@@ -39,6 +39,7 @@ import {
   toggleShell,
   toggleWeb,
   windowNodeId,
+  migrateLegacyTerminals,
 } from "../board/nodes.ts";
 
 const TILE = 120;
@@ -163,6 +164,18 @@ function Editor({ node }: { node: Node }) {
   useEffect(() => {
     session.setApi(excalidraw);
   }, [session, excalidraw]);
+
+  // Once the scene is in, convert terminals from before machine icons existed (editors only).
+  const migrated = useRef(false);
+  useEffect(() => {
+    if (!editor || !excalidraw || conn !== "online" || migrated.current) return;
+    const t = setTimeout(() => {
+      migrated.current = true;
+      const n = migrateLegacyTerminals(excalidraw);
+      if (n) toast(`${n} ancien${n > 1 ? "s" : ""} terminal${n > 1 ? "aux" : ""} converti${n > 1 ? "s" : ""} : l'icône reste maintenant en place.`);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [editor, excalidraw, conn]);
 
   // Personal library: loaded/saved encrypted, and "Browse libraries" installs work.
   const adapter = useMemo(() => libraryAdapter(user, keys), [user, keys]);

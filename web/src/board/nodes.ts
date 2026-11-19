@@ -208,3 +208,48 @@ export function removeWeb(api: Api, nodeId: string, webId: string) {
   for (const e of all(api)) if (cd(e).webId === webId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
   commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }
+
+/**
+ * Terminals created before nodes existed turned into a tile *instead of* their window. Give each
+ * one a node of its own (same label, icon and tile size) so the icon stays when the shell opens.
+ * Returns how many were converted.
+ */
+export function migrateLegacyTerminals(api: Api): number {
+  const legacy = api.getSceneElements().filter((e) => cd(e).terminalId && !cd(e).nodeId);
+  if (!legacy.length) return 0;
+  const changed: El[] = [];
+  const added: El[] = [];
+  for (const el of legacy) {
+    const d = cd(el);
+    const collapsed = !!d.collapsed;
+    const tileW = collapsed ? el.width : (d.tile?.w ?? NODE_SIZE);
+    const tileH = collapsed ? el.height : (d.tile?.h ?? NODE_SIZE);
+    const win = collapsed
+      ? { x: el.x + tileW + GAP, y: el.y, w: d.expanded?.w ?? TERM_W, h: d.expanded?.h ?? TERM_H }
+      : { x: el.x, y: el.y, w: el.width, h: el.height };
+    const nodePos = collapsed ? { x: el.x, y: el.y } : { x: el.x - tileW - GAP, y: el.y };
+    const ref: ShellRef = collapsed ? { terminalId: d.terminalId, ...win } : { terminalId: d.terminalId };
+    const node = embeddable(nodePos.x, nodePos.y, tileW, tileH, (id) => NODE_LINK + id, {
+      node: true,
+      title: d.title ?? null,
+      icon: d.icon ?? null,
+      shells: [ref],
+      webs: [],
+    } satisfies NodeData);
+    added.push(node);
+    changed.push(
+      newElementWith(el, {
+        x: win.x,
+        y: win.y,
+        width: win.w,
+        height: win.h,
+        // A collapsed one stays hidden: the node now stands for it.
+        isDeleted: collapsed,
+        customData: { terminalId: d.terminalId, nodeId: node.id },
+      }),
+    );
+  }
+  const byId = new Map(changed.map((e) => [e.id, e]));
+  api.updateScene({ elements: [...all(api).map((e) => byId.get(e.id) ?? e), ...added], captureUpdate: CaptureUpdateAction.NEVER });
+  return legacy.length;
+}
