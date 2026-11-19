@@ -5,14 +5,16 @@ import { encryptPreview } from "./boardCrypto.ts";
 
 /** Renders a scene to an SVG string for dashboard thumbnails (Excalidraw is loaded on demand). */
 export async function renderPreview(elements: readonly any[], files: Record<string, any>, background = "#ffffff"): Promise<string | null> {
-  // Terminal windows would export as a bare URL placeholder; draw them as dark panes instead.
+  // Terminal windows would export as a bare URL placeholder: draw them as dark panes, and
+  // machine nodes as their library icon (or a small box).
   const visible = elements
     .filter((e) => !e.isDeleted)
-    .map((e) =>
-      e.customData?.terminalId
-        ? { ...e, type: "rectangle", link: null, backgroundColor: "#0b1020", fillStyle: "solid", strokeColor: "#1e293b", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }
-        : e,
-    );
+    .flatMap((e): any[] => {
+      if (e.customData?.node) return nodePreview(e);
+      if (e.customData?.terminalId)
+        return [{ ...e, type: "rectangle", link: null, backgroundColor: "#0b1020", fillStyle: "solid", strokeColor: "#1e293b", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
+      return [e];
+    });
   if (!visible.length) return null;
   const { exportToSvg } = await import("@excalidraw/excalidraw");
   const svg = await exportToSvg({
@@ -66,4 +68,17 @@ export async function importFiles(ctx: Parameters<typeof createItem>[0], files: 
     created++;
   }
   return created;
+}
+
+/** A node's icon elements moved onto the node's box, for thumbnails. */
+function nodePreview(node: any): any[] {
+  const icon: any[] | undefined = node.customData?.icon?.elements;
+  if (!icon?.length) return [{ ...node, type: "rectangle", link: null, customData: undefined, strokeColor: "#1e293b", backgroundColor: "#e2e8f0", fillStyle: "solid", roughness: 0, roundness: { type: 3 } }];
+  const minX = Math.min(...icon.map((e) => e.x));
+  const minY = Math.min(...icon.map((e) => e.y));
+  const maxX = Math.max(...icon.map((e) => e.x + (e.width ?? 0)));
+  const maxY = Math.max(...icon.map((e) => e.y + (e.height ?? 0)));
+  const dx = node.x + (node.width - (maxX - minX)) / 2 - minX;
+  const dy = node.y + (node.height - (maxY - minY)) / 2 - minY;
+  return icon.map((e) => ({ ...e, id: `${node.id}:${e.id}`, x: e.x + dx, y: e.y + dy, groupIds: [], frameId: null, boundElements: null, containerId: null }));
 }

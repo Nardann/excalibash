@@ -23,6 +23,8 @@ export function TileCustomizer(p: {
   icon: TileIcon | null;
   onSave: (patch: TilePatch, collapse: boolean) => void;
   onClose: () => void;
+  /** Node icons are always visible: no "save and reduce". */
+  node?: boolean;
 }) {
   const user = useUser();
   const keys = useKeys();
@@ -44,9 +46,12 @@ export function TileCustomizer(p: {
 
   return (
     <Modal onClose={p.onClose} width={620}>
-      <h2 className="display">Tuile du terminal</h2>
+      <h2 className="display">{p.node ? "Icône de la machine" : "Tuile du terminal"}</h2>
       <p>
-        Fermé, le terminal s'affiche comme cette tuile : place-la dans ton schéma réseau, un clic dessus ouvre le shell. L'icône et le libellé sont chiffrés avec le tableau.
+        {p.node
+          ? "Cette icône représente la machine dans ton schéma réseau : elle reste en place, un clic dessus ouvre ses shells. "
+          : "Fermé, le terminal s'affiche comme cette tuile : place-la dans ton schéma réseau, un clic dessus ouvre le shell. "}
+        L'icône et le libellé sont chiffrés avec le tableau.
       </p>
       <label className="field">
         Libellé (une ligne par information, ex. nom puis IP)
@@ -83,12 +88,14 @@ export function TileCustomizer(p: {
         <button className="btn" onClick={p.onClose}>
           Annuler
         </button>
-        <button className="btn" onClick={() => save(false)}>
+        <button className={`btn ${p.node ? "btn-primary" : ""}`} onClick={() => save(false)}>
           Enregistrer
         </button>
-        <button className="btn btn-primary" onClick={() => save(true)}>
-          Enregistrer et réduire
-        </button>
+        {!p.node && (
+          <button className="btn btn-primary" onClick={() => save(true)}>
+            Enregistrer et réduire
+          </button>
+        )}
       </div>
     </Modal>
   );

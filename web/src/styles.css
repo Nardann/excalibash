@@ -1477,3 +1477,37 @@ html.dark .term-tile.custom {
   background: var(--brand-soft);
   color: var(--brand);
 }
+
+.tile-count {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+}
+.term-float .chip {
+  max-width: 160px;
+  font-weight: 600;
+}
+.term-float .chip span.lbl {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.term-float .chip[aria-pressed="true"] {
+  background: var(--brand-softer);
+  color: var(--brand-text);
+}
+.term-float .sep {
+  width: 2px;
+  margin: 3px 2px;
+  background: var(--line);
+}

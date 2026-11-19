@@ -63,10 +63,12 @@ type Props = {
   title?: string | null;
   icon?: TileIcon | null;
   onToggleCollapsed?: () => void;
+  /** Tooltip of the header's reduce button (windows of a node are hidden, not collapsed). */
+  toggleTitle?: string;
   onCustomize?: (patch: TilePatch, collapse: boolean) => void;
 };
 
-function useIconUrl(icon: TileIcon | null | undefined) {
+export function useIconUrl(icon: TileIcon | null | undefined) {
   const { theme } = useTheme();
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -80,7 +82,7 @@ function useIconUrl(icon: TileIcon | null | undefined) {
   return url;
 }
 
-export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, onCustomize }: Props) {
+export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, toggleTitle, onCustomize }: Props) {
   const info = useTerminalInfo(session, terminalId);
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -249,7 +251,7 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
           </button>
         )}
         {onToggleCollapsed && (
-          <button title="Réduire en tuile" onClick={onToggleCollapsed}>
+          <button title={toggleTitle ?? "Réduire en tuile"} onClick={onToggleCollapsed}>
             <Minimize2 size={14} />
           </button>
         )}

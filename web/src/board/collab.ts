@@ -341,9 +341,14 @@ export class BoardSession {
     for (const e of api.getSceneElementsIncludingDeleted() as readonly OrderedExcalidrawElement[]) {
       const prev = this.syncedVersions.get(e.id);
       if ((prev ?? -1) >= e.version) continue;
-      // A terminal window deleted here: end its shell too (undo shows a "relaunch" button).
-      const tid = terminalIdOf(e);
-      if (tid && e.isDeleted && prev !== undefined) this.closeTerminal(tid);
+      if (e.isDeleted && prev !== undefined) {
+        const data = e.customData as Record<string, any> | undefined;
+        const tid = terminalIdOf(e);
+        // A standalone terminal deleted here ends its shell (undo shows a "relaunch" button). A
+        // node's window is only hidden; deleting the node itself ends all of its shells.
+        if (tid && !data?.nodeId) this.closeTerminal(tid);
+        if (data?.node) for (const sh of data.shells ?? []) this.closeTerminal(sh.terminalId);
+      }
       changed.push(e);
     }
     if (!changed.length) return;

@@ -16,7 +16,7 @@ function excalidrawPatches(): Plugin {
     transform(code, id) {
       if (!id.includes("@excalidraw/excalidraw")) return null;
       let out = code.replace(/`https:\/\/esm\.sh\/\$\{[\s\S]*?\}\/dist\/prod\/`/g, '(window.location.origin + "/")');
-      out = out.replace(/if\((\w+)\.link&&!(\w+)\.selectedElementIds\[\1\.id\]\)/g, "if($1.link&&!$1.customData?.terminalId&&!$2.selectedElementIds[$1.id])");
+      out = out.replace(/if\((\w+)\.link&&!(\w+)\.selectedElementIds\[\1\.id\]\)/g, "if($1.link&&!($1.customData?.terminalId||$1.customData?.node)&&!$2.selectedElementIds[$1.id])");
       return out === code ? null : out;
     },
   };

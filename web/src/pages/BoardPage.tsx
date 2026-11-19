@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { CaptureUpdateAction, Excalidraw, convertToExcalidrawElements, newElementWith, useHandleLibrary } from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportCoords, useHandleLibrary, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
@@ -14,12 +14,31 @@ import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
-import { Avatar, Menu, toast, useTheme } from "../components/ui.tsx";
+import { Avatar, Menu, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
+import { NodeTile } from "../board/NodeTile.tsx";
+import {
+  LINK_BASE,
+  TERM_H,
+  TERM_W,
+  activate,
+  addShell,
+  createNode,
+  deactivate,
+  deleteElements,
+  findEl,
+  hideShell,
+  nodeDataOf,
+  openWindowOf,
+  orphanWindows,
+  setNodeLook,
+  toggleAll,
+  toggleShell,
+  windowNodeId,
+} from "../board/nodes.ts";
 
-const TERMINAL_LINK = "https://excalibash.local/terminal/";
-const TERM_W = 760;
-const TERM_H = 440;
 const TILE = 120;
+/** Height of the terminal's title bar, in scene units (the window is scaled with the zoom). */
+const TERM_HEAD = 32;
 
 type TileData = {
   terminalId?: string;
@@ -76,11 +95,17 @@ function Editor({ node }: { node: Node }) {
   const [conn, setConn] = useState<ConnState>("connecting");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [closed, setClosed] = useState<string | null>(null);
-  const [termMenu, setTermMenu] = useState<HTMLElement | null>(null);
   const [sharing, setSharing] = useState(false);
   const [terminalSelected, setTerminalSelected] = useState(false);
   /** The single selected (not active) terminal: gets a floating toolbar so it can be reduced without typing in it. */
-  const [selTerm, setSelTerm] = useState<{ id: string; tid: string; left: number; top: number; collapsed: boolean } | null>(null);
+  const [selTerm, setSelTerm] = useState<{
+    id: string;
+    kind: "node" | "window" | "legacy";
+    left: number;
+    top: number;
+    collapsed: boolean;
+    shells: { id: string; open: boolean }[];
+  } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
   const [customizing, setCustomizing] = useState<string | null>(null);
@@ -141,45 +166,57 @@ function Editor({ node }: { node: Node }) {
     validateLibraryUrl: (url) => new URL(url).origin === "https://libraries.excalidraw.com",
   });
 
-  const addTerminal = useCallback(
-    async (machine: Machine) => {
-      const x = excalidraw;
+  /** Machine picker: for a brand-new node (header button, Alt+T) or a new shell on a node. */
+  const [picker, setPicker] = useState<{ anchor: MenuAnchor; nodeId?: string } | null>(null);
+  /** Shell list of a node with several shells, opened by clicking its icon. */
+  const [nodeMenu, setNodeMenu] = useState<{ anchor: MenuAnchor; nodeId: string } | null>(null);
+
+  const newShell = useCallback(
+    async (machine: Machine, nodeId?: string) => {
+      const x = excalidrawRef.current;
       if (!x) return;
-      setTermMenu(null);
+      setPicker(null);
       try {
         const info = await session.createTerminal(machine, 100, 30);
         localStorage.setItem(LAST_MACHINE, machine.id);
-        const st = x.getAppState();
-        const zoom = st.zoom.value;
-        const cx = -st.scrollX + st.width / 2 / zoom;
-        const cy = -st.scrollY + st.height / 2 / zoom;
-        const [base] = convertToExcalidrawElements([
-          { type: "rectangle", x: cx - TERM_W / 2, y: cy - TERM_H / 2, width: TERM_W, height: TERM_H, strokeColor: "transparent", backgroundColor: "transparent", roughness: 0 },
-        ]);
-        const element = {
-          ...base,
-          type: "embeddable",
-          link: TERMINAL_LINK + info.id,
-          customData: { terminalId: info.id },
-          index: null,
-          roundness: null,
-        } as unknown as ExcalidrawElement;
-        x.updateScene({ elements: [...x.getSceneElementsIncludingDeleted(), element], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-        const placed = x.getSceneElements().find((e) => e.id === element.id) as NonDeleted<ExcalidrawEmbeddableElement> | undefined;
-        if (placed) {
-          x.updateScene({
-            appState: { selectedElementIds: {}, activeEmbeddable: { element: placed, state: "active" } } as any,
-            captureUpdate: CaptureUpdateAction.NEVER,
-          });
-        }
+        if (nodeId && findEl(x, nodeId) && !findEl(x, nodeId)!.isDeleted) addShell(x, nodeId, info.id);
+        else createNode(x, info.id);
       } catch (e) {
         toast.error(e);
       }
     },
-    [excalidraw, session],
+    [session],
   );
 
-  // Alt+T: new terminal on the last machine used (or open the picker).
+  /** Where to anchor a menu below an element (viewport coordinates). */
+  const anchorBelow = useCallback((id: string): MenuAnchor | null => {
+    const x = excalidrawRef.current;
+    const el = x && findEl(x, id);
+    if (!x || !el) return null;
+    const p = sceneCoordsToViewportCoords({ sceneX: el.x, sceneY: el.y + el.height }, x.getAppState());
+    return { x: p.x, y: p.y + 6 };
+  }, []);
+
+  /** Clicking a node's icon: create its first shell, toggle its only shell, or list its shells. */
+  const onNodeActivate = useCallback(
+    (nodeId: string) => {
+      const x = excalidrawRef.current;
+      if (!x) return;
+      deactivate(x);
+      if (!editor) return;
+      const data = nodeDataOf(findEl(x, nodeId));
+      if (!data) return;
+      const anchor = anchorBelow(nodeId);
+      if (data.shells.length === 0) anchor && setPicker({ anchor, nodeId });
+      else if (data.shells.length === 1) toggleShell(x, nodeId, data.shells[0].terminalId);
+      else anchor && setNodeMenu({ anchor, nodeId });
+    },
+    [editor, anchorBelow],
+  );
+  const onNodeActivateRef = useRef(onNodeActivate);
+  onNodeActivateRef.current = onNodeActivate;
+
+  // Alt+T: new machine node + shell on the last machine used (or open the picker).
   useEffect(() => {
     if (!editor) return;
     const onKey = async (e: KeyboardEvent) => {
@@ -188,25 +225,34 @@ function Editor({ node }: { node: Node }) {
       e.stopPropagation();
       const last = localStorage.getItem(LAST_MACHINE);
       const m = (await listMachines(keys)).find((x) => x.id === last && x.online);
-      if (m) addTerminal(m);
-      else setTermMenu(termButton.current);
+      if (m) newShell(m);
+      else if (termButton.current) setPicker({ anchor: termButton.current });
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [addTerminal, editor, keys]);
+  }, [newShell, editor, keys]);
 
-  // Alt+R: reduce / open the selected terminal without activating it.
+  /** Alt+R / toolbar / title double-click: the "reduce" action for whatever is selected. */
+  const reduce = useCallback((id: string) => {
+    const x = excalidrawRef.current;
+    const el = x && findEl(x, id);
+    if (!x || !el) return;
+    if (nodeDataOf(el)) toggleAll(x, id);
+    else if (windowNodeId(el)) hideShell(x, id);
+    else updateTerminalRef.current?.(id, null, true);
+  }, []);
+
   useEffect(() => {
     if (!editor) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.code !== "KeyR" || e.ctrlKey || e.metaKey || !selTermRef.current) return;
       e.preventDefault();
       e.stopPropagation();
-      updateTerminalRef.current?.(selTermRef.current.id, null, true);
+      reduce(selTermRef.current.id);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [editor]);
+  }, [editor, reduce]);
 
   const onChange = useCallback(
     (elements: readonly OrderedExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
@@ -215,26 +261,34 @@ function Editor({ node }: { node: Node }) {
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
       const tid = terminalIdOf(el);
-      setTerminalSelected(!!tid);
+      const nd = nodeDataOf(el);
+      setTerminalSelected(!!tid || !!nd);
       const active = appState.activeEmbeddable?.element.id === el?.id && appState.activeEmbeddable?.state === "active";
+      const x = excalidrawRef.current;
       const next =
-        el && tid && !el.isDeleted && !active && !appState.isResizing && !appState.isRotating
+        el && (tid || nd) && !el.isDeleted && !active && !appState.isResizing && !appState.isRotating
           ? {
               id: el.id,
-              tid,
+              kind: nd ? ("node" as const) : windowNodeId(el) ? ("window" as const) : ("legacy" as const),
               left: Math.round((el.x + el.width + appState.scrollX) * appState.zoom.value),
               top: Math.round((el.y + appState.scrollY) * appState.zoom.value),
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
+              shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // A node was deleted (here or by someone else): its windows go with it.
+      if (editor && x) {
+        const orphans = orphanWindows(elements);
+        if (orphans.length) setTimeout(() => deleteElements(x, orphans), 0);
+      }
     },
-    [session, theme, toggle],
+    [session, theme, toggle, editor],
   );
 
   /**
-   * Terminal window ⇄ tile. Everything lives on the element (size + customData: collapsed flag,
-   * remembered sizes, label, library icon), so it syncs encrypted to everyone and goes through undo.
+   * Standalone (older) terminals: window ⇄ tile on the same element (size + customData: collapsed
+   * flag, remembered sizes, label, library icon). Synced encrypted and undoable.
    */
   const updateTerminal = useCallback((elementId: string, patch: TilePatch | null, toggle: boolean) => {
     const x = excalidrawRef.current;
@@ -265,23 +319,72 @@ function Editor({ node }: { node: Node }) {
       appState: toggle ? ({ activeEmbeddable: null, selectedElementIds: {} } as any) : undefined,
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     });
-    if (!toggle || collapse) return;
-    // Excalidraw finishes the click and may replace the element object; it tracks the active
-    // embeddable by identity, so activate the final instance once the scene has settled.
-    setTimeout(() => {
-      const current = x.getSceneElements().find((e) => e.id === elementId) as NonDeleted<ExcalidrawEmbeddableElement> | undefined;
-      if (current) x.updateScene({ appState: { activeEmbeddable: { element: current, state: "active" } } as any, captureUpdate: CaptureUpdateAction.NEVER });
-    }, 60);
+    if (toggle && !collapse) activate(x, elementId);
   }, []);
+
+  /** Double-click on a terminal's title bar hides / reduces it, whether active or just selected. */
+  const onCanvasDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      const x = excalidrawRef.current;
+      if (!x || !editor || (e.target as HTMLElement).closest("button")) return;
+      const { x: sx, y: sy } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, x.getAppState());
+      const hit = [...x.getSceneElements()]
+        .reverse()
+        .find(
+          (el) =>
+            terminalIdOf(el) &&
+            !(el.customData as TileData).collapsed &&
+            sx >= el.x &&
+            sx <= el.x + el.width &&
+            sy >= el.y &&
+            sy <= el.y + TERM_HEAD,
+        );
+      if (!hit) return;
+      e.preventDefault();
+      e.stopPropagation(); // keep Excalidraw from treating it as "edit / enter element"
+      reduce(hit.id);
+    },
+    [editor, reduce],
+  );
 
   const updateTerminalRef = useRef(updateTerminal);
   updateTerminalRef.current = updateTerminal;
 
   const renderEmbeddable = useCallback(
     (element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => {
+      const active = appState.activeEmbeddable?.element.id === element.id && appState.activeEmbeddable.state === "active";
+      const x = excalidrawRef.current;
+      const nd = nodeDataOf(element);
+      if (nd) {
+        return (
+          <NodeTile
+            session={session}
+            shells={nd.shells.map((s) => s.terminalId)}
+            openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length : 0}
+            title={nd.title}
+            icon={nd.icon}
+            active={active}
+            onActivate={() => onNodeActivateRef.current(element.id)}
+          />
+        );
+      }
       const tid = terminalIdOf(element);
       if (!tid) return null;
-      const active = appState.activeEmbeddable?.element.id === element.id && appState.activeEmbeddable.state === "active";
+      const nodeId = windowNodeId(element);
+      if (nodeId) {
+        const owner = nodeDataOf(x ? findEl(x, nodeId) : undefined);
+        return (
+          <TerminalEmbed
+            session={session}
+            terminalId={tid}
+            active={active}
+            collapsed={false}
+            title={owner?.title?.split("\n")[0] ?? null}
+            onToggleCollapsed={editor ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+            toggleTitle="Masquer (le shell continue, l'icône reste sur le schéma)"
+          />
+        );
+      }
       const data = (element.customData ?? {}) as TileData;
       return (
         <TerminalEmbed
@@ -299,7 +402,7 @@ function Editor({ node }: { node: Node }) {
     [session, editor, updateTerminal],
   );
 
-  const validateEmbeddable = useCallback((link: string) => (link.startsWith(TERMINAL_LINK) ? true : undefined), []);
+  const validateEmbeddable = useCallback((link: string) => (link.startsWith(LINK_BASE) ? true : undefined), []);
 
   const everyone = useMemo(() => {
     const seen = new Map<string, Peer>();
@@ -335,7 +438,7 @@ function Editor({ node }: { node: Node }) {
           )}
         </div>
         {editor && (
-          <button ref={termButton} className="btn btn-primary btn-sm" title="Nouveau terminal (Alt+T)" onClick={(e) => setTermMenu(termMenu ? null : e.currentTarget)}>
+          <button ref={termButton} className="btn btn-primary btn-sm" title="Nouvelle machine + shell (Alt+T)" onClick={(e) => setPicker(picker ? null : { anchor: e.currentTarget })}>
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
@@ -349,7 +452,7 @@ function Editor({ node }: { node: Node }) {
         </button>
       </header>
 
-      <div className={`board-canvas ${terminalSelected ? "terminal-selected" : ""}`}>
+      <div className={`board-canvas ${terminalSelected ? "terminal-selected" : ""}`} onDoubleClickCapture={onCanvasDoubleClick}>
         <Excalidraw
           excalidrawAPI={setExcalidraw}
           theme={theme}
@@ -362,19 +465,54 @@ function Editor({ node }: { node: Node }) {
           renderEmbeddable={renderEmbeddable}
           validateEmbeddable={validateEmbeddable}
           onLinkOpen={(element, event) => {
-            if (terminalIdOf(element)) event.preventDefault();
+            if (terminalIdOf(element) || nodeDataOf(element)) event.preventDefault();
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
-            <button onClick={() => updateTerminal(selTerm.id, null, true)} title={`${selTerm.collapsed ? "Ouvrir le terminal" : "Réduire en tuile"} (Alt+R)`}>
-              {selTerm.collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
-              {selTerm.collapsed ? "Ouvrir" : "Réduire"}
-            </button>
-            <button onClick={() => setCustomizing(selTerm.id)} title="Icône et libellé de la tuile">
-              <Palette size={14} />
-            </button>
+            {selTerm.kind === "node" ? (
+              <>
+                {selTerm.shells.map((sh, i) => {
+                  const t = session.terminals.get(sh.id);
+                  return (
+                    <button
+                      key={sh.id}
+                      className="chip"
+                      aria-pressed={sh.open}
+                      title={`${sh.open ? "Masquer" : "Ouvrir"} le shell ${i + 1} (${t?.label ?? "?"})`}
+                      onClick={() => toggleShell(excalidrawRef.current!, selTerm.id, sh.id)}
+                    >
+                      <span className={`dot ${t?.status === "running" ? "on" : t?.status === "starting" ? "warn" : ""}`} />
+                      <span className="lbl">
+                        {i + 1}. {t?.label ?? "shell"}
+                      </span>
+                    </button>
+                  );
+                })}
+                <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
+                  <Plus size={14} />
+                </button>
+                <span className="sep" />
+                <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
+                  <Palette size={14} />
+                </button>
+              </>
+            ) : selTerm.kind === "window" ? (
+              <button onClick={() => reduce(selTerm.id)} title="Masquer la fenêtre (le shell continue) — Alt+R ou double-clic sur la barre">
+                <Minimize2 size={14} /> Masquer
+              </button>
+            ) : (
+              <>
+                <button onClick={() => updateTerminal(selTerm.id, null, true)} title={`${selTerm.collapsed ? "Ouvrir le terminal" : "Réduire en tuile"} (Alt+R)`}>
+                  {selTerm.collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+                  {selTerm.collapsed ? "Ouvrir" : "Réduire"}
+                </button>
+                <button onClick={() => setCustomizing(selTerm.id)} title="Icône et libellé de la tuile">
+                  <Palette size={14} />
+                </button>
+              </>
+            )}
           </div>
         )}
         {conn === "connecting" && <div className="board-overlay">Connexion et déchiffrement…</div>}
@@ -394,7 +532,22 @@ function Editor({ node }: { node: Node }) {
 
       {customizing &&
         (() => {
-          const el = excalidrawRef.current?.getSceneElements().find((e) => e.id === customizing);
+          const x = excalidrawRef.current;
+          const el = x?.getSceneElements().find((e) => e.id === customizing);
+          const nd = nodeDataOf(el);
+          if (nd) {
+            const label = (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || "Machine";
+            return (
+              <TileCustomizer
+                node
+                machineLabel={label}
+                title={nd.title ?? null}
+                icon={nd.icon ?? null}
+                onSave={(look) => x && setNodeLook(x, customizing, look)}
+                onClose={() => setCustomizing(null)}
+              />
+            );
+          }
           const data = (el?.customData ?? {}) as TileData;
           const label = (data.terminalId && session.terminals.get(data.terminalId)?.label) || "Terminal";
           return (
@@ -407,7 +560,24 @@ function Editor({ node }: { node: Node }) {
             />
           );
         })()}
-      {termMenu && <MachinePicker anchor={termMenu} onClose={() => setTermMenu(null)} onPick={addTerminal} />}
+      {picker && <MachinePicker anchor={picker.anchor} onClose={() => setPicker(null)} onPick={(m) => newShell(m, picker.nodeId)} />}
+      {nodeMenu && (
+        <NodeMenu
+          session={session}
+          nodeId={nodeMenu.nodeId}
+          anchor={nodeMenu.anchor}
+          api={excalidrawRef.current}
+          onClose={() => setNodeMenu(null)}
+          onNewShell={() => {
+            setPicker({ anchor: nodeMenu.anchor, nodeId: nodeMenu.nodeId });
+            setNodeMenu(null);
+          }}
+          onCustomize={() => {
+            setCustomizing(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+        />
+      )}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>
   );
@@ -474,7 +644,7 @@ function ConnBadge({ state }: { state: ConnState }) {
   return null;
 }
 
-function MachinePicker({ anchor, onClose, onPick }: { anchor: HTMLElement; onClose: () => void; onPick: (m: Machine) => void }) {
+function MachinePicker({ anchor, onClose, onPick }: { anchor: MenuAnchor; onClose: () => void; onPick: (m: Machine) => void }) {
   const keys = useKeys();
   const [machines, setMachines] = useState<Machine[] | null>(null);
   useEffect(() => {
@@ -508,6 +678,63 @@ function MachinePicker({ anchor, onClose, onPick }: { anchor: HTMLElement; onClo
       <Link to="/machines" className="menu-item">
         {machines?.length ? <Server size={16} /> : <Plus size={16} />} Gérer les machines
       </Link>
+    </Menu>
+  );
+}
+
+/** The shells of a node: open / hide each one, all at once, or add one. */
+function NodeMenu(p: {
+  session: BoardSession;
+  nodeId: string;
+  anchor: MenuAnchor;
+  api: ExcalidrawImperativeAPI | null;
+  onClose: () => void;
+  onNewShell: () => void;
+  onCustomize: () => void;
+}) {
+  const api = p.api;
+  const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
+  if (!api || !data) return null;
+  const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId));
+  return (
+    <Menu anchor={p.anchor} onClose={p.onClose}>
+      <div className="menu-label">{data.title?.split("\n")[0] || "Shells"}</div>
+      {data.shells.map((sh, i) => {
+        const t = p.session.terminals.get(sh.terminalId);
+        const open = !!openWindowOf(api, sh.terminalId);
+        return (
+          <button
+            key={sh.terminalId}
+            className={`menu-item ${open ? "selected" : ""}`}
+            onClick={() => {
+              p.onClose();
+              toggleShell(api, p.nodeId, sh.terminalId);
+            }}
+          >
+            <span className={`dot ${t?.status === "running" ? "on" : t?.status === "starting" ? "warn" : ""}`} />
+            <span style={{ flex: 1 }}>
+              Shell {i + 1} · {t?.label ?? "?"}
+            </span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
+          </button>
+        );
+      })}
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        onClick={() => {
+          p.onClose();
+          toggleAll(api, p.nodeId);
+        }}
+      >
+        {anyOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} {anyOpen ? "Tout masquer" : "Tout ouvrir"}
+      </button>
+      <button className="menu-item" onClick={p.onNewShell}>
+        <Plus size={16} /> Nouveau shell
+      </button>
+      <button className="menu-item" onClick={p.onCustomize}>
+        <Palette size={16} /> Icône et libellé…
+      </button>
     </Menu>
   );
 }
