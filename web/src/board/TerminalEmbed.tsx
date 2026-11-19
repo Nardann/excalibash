@@ -1,11 +1,13 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Power, RotateCcw, TerminalSquare } from "lucide-react";
+import { Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
 import type { BoardSession } from "./collab.ts";
-import { confirmDialog } from "../components/ui.tsx";
+import { confirmDialog, useTheme } from "../components/ui.tsx";
+import { iconUrl, type TileIcon } from "./personalLibrary.ts";
+import { TileCustomizer, type TilePatch } from "./TileCustomizer.tsx";
 
 const FONT = '"Cascadia Code", ui-monospace, Menlo, monospace';
 
@@ -51,13 +53,46 @@ const STATUS_LABEL = {
  * A live shell rendered inside an Excalidraw embeddable. Excalidraw only routes
  * pointer events to it once the user clicks the element ("active" state).
  */
-export function TerminalEmbed({ session, terminalId, active }: { session: BoardSession; terminalId: string; active: boolean }) {
+type Props = {
+  session: BoardSession;
+  terminalId: string;
+  active: boolean;
+  /** Shown as a small machine tile; the shell keeps running and its grid is untouched. */
+  collapsed: boolean;
+  /** Custom label and library icon shown on the tile. */
+  title?: string | null;
+  icon?: TileIcon | null;
+  onToggleCollapsed?: () => void;
+  onCustomize?: (patch: TilePatch, collapse: boolean) => void;
+};
+
+function useIconUrl(icon: TileIcon | null | undefined) {
+  const { theme } = useTheme();
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!icon) return setUrl(null);
+    let live = true;
+    iconUrl(icon, theme === "dark").then((u) => live && setUrl(u)).catch(() => live && setUrl(null));
+    return () => {
+      live = false;
+    };
+  }, [icon, theme]);
+  return url;
+}
+
+export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, onCustomize }: Props) {
   const info = useTerminalInfo(session, terminalId);
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+  // New output while reduced to a tile: show an activity badge.
+  const [unread, setUnread] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
+  const iconSrc = useIconUrl(icon);
 
   useEffect(() => {
     const body = bodyRef.current!;
@@ -103,7 +138,10 @@ export function TerminalEmbed({ session, terminalId, active }: { session: BoardS
           term.reset();
           term.write(data);
         },
-        onData: (data) => term.write(data),
+        onData: (data) => {
+          term.write(data);
+          if (collapsedRef.current && data.length) setUnread(true);
+        },
       });
       observer = new ResizeObserver(refit);
       observer.observe(body);
@@ -127,9 +165,18 @@ export function TerminalEmbed({ session, terminalId, active }: { session: BoardS
   }, [info?.cols, info?.rows]);
 
   useEffect(() => {
-    if (active) termRef.current?.focus();
+    if (active && !collapsed) termRef.current?.focus();
     else termRef.current?.blur();
-  }, [active]);
+  }, [active, collapsed]);
+
+  // Clicking a selected tile activates it: that is the "open" gesture.
+  useEffect(() => {
+    if (active && collapsed) onToggleCollapsed?.();
+  }, [active, collapsed, onToggleCollapsed]);
+
+  useEffect(() => {
+    if (!collapsed) setUnread(false);
+  }, [collapsed]);
 
   // Keep keys, clipboard and wheel inside the terminal instead of reaching the canvas.
   useEffect(() => {
@@ -153,17 +200,57 @@ export function TerminalEmbed({ session, terminalId, active }: { session: BoardS
     if (ok) session.closeTerminal(terminalId);
   };
 
+  const dot = `dot ${status === "running" ? "on" : status === "starting" ? "warn" : ""}`;
+  const label = info?.label ?? "Terminal";
+  const name = title || label;
+
   return (
-    <div className="term" ref={rootRef}>
+    <div className={`term ${collapsed ? "collapsed" : ""}`} ref={rootRef}>
+      {collapsed && (
+        <div className={`term-tile ${unread ? "unread" : ""} ${iconSrc ? "custom" : ""}`} title={`${name} (${label}) — clique pour ouvrir le shell`}>
+          {iconSrc ? (
+            <div className="tile-art">
+              <img src={iconSrc} alt="" draggable={false} />
+              <span className={dot} />
+            </div>
+          ) : (
+            <div className="tile-icon">
+              <Monitor size={40} strokeWidth={1.6} />
+              <span className="prompt">&gt;_</span>
+              <span className={dot} />
+            </div>
+          )}
+          <div className="tile-name">{name}</div>
+          {!iconSrc && <div className="tile-status">{unread ? "nouvelle sortie" : status ? STATUS_LABEL[status] : "introuvable"}</div>}
+          {onToggleCollapsed && (
+            <span className="tile-expand">
+              <Maximize2 size={12} />
+            </span>
+          )}
+        </div>
+      )}
       <div className="term-head">
-        <span className={`dot ${status === "running" ? "on" : status === "starting" ? "warn" : ""}`} />
+        <span className={dot} />
         <TerminalSquare size={14} />
-        <span className="name">{info?.label ?? "Terminal"}</span>
+        <span className="name" title={label}>
+          {name.split("\n")[0]}
+          {title && <span className="status"> · {label}</span>}
+        </span>
         {!session.canEdit && <span className="status">lecture seule</span>}
         <span className="status">{status ? STATUS_LABEL[status] : "introuvable"}</span>
         {status === "exited" && session.canEdit && (
           <button title="Relancer" onClick={() => session.restartTerminal(terminalId)}>
             <RotateCcw size={14} />
+          </button>
+        )}
+        {onCustomize && (
+          <button title="Icône et libellé de la tuile" onClick={() => setCustomizing(true)}>
+            <Palette size={14} />
+          </button>
+        )}
+        {onToggleCollapsed && (
+          <button title="Réduire en tuile" onClick={onToggleCollapsed}>
+            <Minimize2 size={14} />
           </button>
         )}
         {(status === "running" || status === "starting") && session.canEdit && (
@@ -172,6 +259,9 @@ export function TerminalEmbed({ session, terminalId, active }: { session: BoardS
           </button>
         )}
       </div>
+      {customizing && onCustomize && (
+        <TileCustomizer machineLabel={label} title={title ?? null} icon={icon ?? null} onSave={onCustomize} onClose={() => setCustomizing(false)} />
+      )}
       <div className="term-body" ref={bodyRef}>
         {(!info || status === "exited" || status === "offline") && (
           <div className={`term-veil ${status === "exited" ? "bottom" : ""}`}>

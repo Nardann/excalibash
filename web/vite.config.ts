@@ -4,21 +4,26 @@ import react from "@vitejs/plugin-react";
 const backend = process.env.BACKEND ?? "http://127.0.0.1:6767";
 
 /**
- * Excalidraw always adds esm.sh as a fallback source for its fonts. Everything is self-hosted
- * (and the CSP forbids third-party fonts), so point that fallback at our own origin.
+ * Small build-time patches to Excalidraw:
+ * - it always adds esm.sh as a fallback source for its fonts; everything is self-hosted
+ *   (and the CSP forbids third-party fonts), so point that fallback at our own origin;
+ * - it draws a "link" badge on every element with a link; terminal tiles need their internal
+ *   link to render, but the badge has no meaning for them and clutters diagrams.
  */
-function selfHostedExcalidrawFonts(): Plugin {
+function excalidrawPatches(): Plugin {
   return {
-    name: "excalibash:self-hosted-excalidraw-fonts",
+    name: "excalibash:excalidraw-patches",
     transform(code, id) {
-      if (!id.includes("@excalidraw/excalidraw") || !code.includes("https://esm.sh/")) return null;
-      return code.replace(/`https:\/\/esm\.sh\/\$\{[\s\S]*?\}\/dist\/prod\/`/g, '(window.location.origin + "/")');
+      if (!id.includes("@excalidraw/excalidraw")) return null;
+      let out = code.replace(/`https:\/\/esm\.sh\/\$\{[\s\S]*?\}\/dist\/prod\/`/g, '(window.location.origin + "/")');
+      out = out.replace(/if\((\w+)\.link&&!(\w+)\.selectedElementIds\[\1\.id\]\)/g, "if($1.link&&!$1.customData?.terminalId&&!$2.selectedElementIds[$1.id])");
+      return out === code ? null : out;
     },
   };
 }
 
 export default defineConfig({
-  plugins: [react(), selfHostedExcalidrawFonts()],
+  plugins: [react(), excalidrawPatches()],
   define: { "process.env.IS_PREACT": JSON.stringify("false") },
   server: {
     port: 5173,

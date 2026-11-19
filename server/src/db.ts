@@ -127,6 +127,10 @@ PRAGMA user_version = ${SCHEMA_VERSION};
 if (!(db.prepare("PRAGMA table_info(machines)").all() as { name: string }[]).some((c) => c.name === "enc_auth")) {
   db.exec("ALTER TABLE machines ADD COLUMN enc_auth TEXT");
 }
+// Personal Excalidraw library, encrypted under the owner's vault key.
+if (!(db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).some((c) => c.name === "enc_library")) {
+  db.exec("ALTER TABLE users ADD COLUMN enc_library TEXT");
+}
 
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");

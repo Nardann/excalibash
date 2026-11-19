@@ -43,6 +43,18 @@ function evictBoards(items: ItemRow[], code: number, reason: string, discard = f
   for (const id of boardIdsOf(items)) evictRoom(id, code, reason, discard);
 }
 
+// ---- Personal library (opaque to the server) -------------------------------------
+
+itemsApi.get("/library", (req, res) => {
+  const row = db.prepare("SELECT enc_library FROM users WHERE id = ?").get(req.user!.id) as { enc_library: string | null };
+  res.set("Cache-Control", "no-store").json({ encLibrary: row.enc_library });
+});
+
+itemsApi.put("/library", (req, res) => {
+  db.prepare("UPDATE users SET enc_library = ? WHERE id = ?").run(blob(req.body.encLibrary, 30_000_000), req.user!.id);
+  res.json({ ok: true });
+});
+
 // ---- Listing --------------------------------------------------------------------
 
 itemsApi.get("/tree", (req, res) => {

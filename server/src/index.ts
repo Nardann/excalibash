@@ -22,7 +22,8 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  // Installing a library from libraries.excalidraw.com fetches it from there (explicit user action).
+  "connect-src 'self' https://libraries.excalidraw.com",
   "worker-src 'self' blob:",
   // Excalidraw's own embeds (YouTube, Figma…) are third-party iframes.
   "frame-src 'self' https:",

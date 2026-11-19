@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { CaptureUpdateAction, Excalidraw, convertToExcalidrawElements } from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, Excalidraw, convertToExcalidrawElements, newElementWith, useHandleLibrary } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
@@ -12,11 +12,23 @@ import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
+import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
+import type { TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, toast, useTheme } from "../components/ui.tsx";
 
 const TERMINAL_LINK = "https://excalibash.local/terminal/";
 const TERM_W = 760;
 const TERM_H = 440;
+const TILE = 120;
+
+type TileData = {
+  terminalId?: string;
+  collapsed?: boolean;
+  expanded?: { w: number; h: number };
+  tile?: { w: number; h: number };
+  title?: string | null;
+  icon?: TileIcon | null;
+};
 const PREVIEW_DELAY = 4000;
 const LAST_MACHINE = "eb-last-machine";
 
@@ -116,6 +128,14 @@ function Editor({ node }: { node: Node }) {
     session.setApi(excalidraw);
   }, [session, excalidraw]);
 
+  // Personal library: loaded/saved encrypted, and "Browse libraries" installs work.
+  const adapter = useMemo(() => libraryAdapter(user, keys), [user, keys]);
+  useHandleLibrary({
+    excalidrawAPI: excalidraw,
+    adapter,
+    validateLibraryUrl: (url) => new URL(url).origin === "https://libraries.excalidraw.com",
+  });
+
   const addTerminal = useCallback(
     async (machine: Machine) => {
       const x = excalidraw;
@@ -180,14 +200,68 @@ function Editor({ node }: { node: Node }) {
     [session, theme, toggle],
   );
 
+  /**
+   * Terminal window ⇄ tile. Everything lives on the element (size + customData: collapsed flag,
+   * remembered sizes, label, library icon), so it syncs encrypted to everyone and goes through undo.
+   */
+  const updateTerminal = useCallback((elementId: string, patch: TilePatch | null, toggle: boolean) => {
+    const x = excalidrawRef.current;
+    if (!x) return;
+    const el = x.getSceneElementsIncludingDeleted().find((e) => e.id === elementId);
+    if (!el) return;
+    const data = (el.customData ?? {}) as TileData;
+    // Never let the canvas draw a frame under the (possibly transparent) tile.
+    const frameless = { strokeColor: "transparent", backgroundColor: "transparent" } as const;
+    let next = newElementWith(el, { ...frameless, customData: patch ? { ...data, ...patch } : data });
+    const collapse = toggle && !data.collapsed;
+    if (toggle) {
+      const d = next.customData as TileData;
+      next = collapse
+        ? newElementWith(next, {
+            width: d.tile?.w ?? TILE,
+            height: d.tile?.h ?? TILE,
+            customData: { ...d, collapsed: true, expanded: { w: next.width, h: next.height } },
+          })
+        : newElementWith(next, {
+            width: d.expanded?.w ?? TERM_W,
+            height: d.expanded?.h ?? TERM_H,
+            customData: { ...d, collapsed: false, tile: { w: next.width, h: next.height } },
+          });
+    }
+    x.updateScene({
+      elements: x.getSceneElementsIncludingDeleted().map((e) => (e.id === elementId ? next : e)),
+      appState: toggle ? ({ activeEmbeddable: null, selectedElementIds: {} } as any) : undefined,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+    if (!toggle || collapse) return;
+    // Excalidraw finishes the click and may replace the element object; it tracks the active
+    // embeddable by identity, so activate the final instance once the scene has settled.
+    setTimeout(() => {
+      const current = x.getSceneElements().find((e) => e.id === elementId) as NonDeleted<ExcalidrawEmbeddableElement> | undefined;
+      if (current) x.updateScene({ appState: { activeEmbeddable: { element: current, state: "active" } } as any, captureUpdate: CaptureUpdateAction.NEVER });
+    }, 60);
+  }, []);
+
   const renderEmbeddable = useCallback(
     (element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => {
       const tid = terminalIdOf(element);
       if (!tid) return null;
       const active = appState.activeEmbeddable?.element.id === element.id && appState.activeEmbeddable.state === "active";
-      return <TerminalEmbed session={session} terminalId={tid} active={active} />;
+      const data = (element.customData ?? {}) as TileData;
+      return (
+        <TerminalEmbed
+          session={session}
+          terminalId={tid}
+          active={active}
+          collapsed={!!data.collapsed}
+          title={data.title}
+          icon={data.icon}
+          onToggleCollapsed={editor ? () => updateTerminal(element.id, null, true) : undefined}
+          onCustomize={editor ? (patch, collapse) => updateTerminal(element.id, patch, collapse && !data.collapsed) : undefined}
+        />
+      );
     },
-    [session],
+    [session, editor, updateTerminal],
   );
 
   const validateEmbeddable = useCallback((link: string) => (link.startsWith(TERMINAL_LINK) ? true : undefined), []);
