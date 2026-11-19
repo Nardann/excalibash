@@ -1,0 +1,117 @@
+# Excalibash — modèle de sécurité (chiffrement de bout en bout)
+
+Objectif : **le serveur, l'hébergeur et les administrateurs ne peuvent ni lire ni modifier
+silencieusement** les tableaux, noms, aperçus, images, curseurs et terminaux. Ils ne peuvent
+pas non plus se faire passer pour un utilisateur afin d'obtenir ses données.
+
+## Ce que le serveur voit (métadonnées)
+
+Emails et noms d'affichage, la forme de l'arbre (qui est parent de qui, qui a accès à quoi),
+les dates, les tailles, le nombre d'éléments, les ids et versions des éléments, qui est connecté,
+les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
+dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
+est tapé ou affiché dans les terminaux.
+
+Limite propre à toute appli web E2E : le serveur fournit le JavaScript. Un hébergeur malveillant
+qui modifie le code servi peut tout compromettre. On réduit la surface (CSP stricte, aucune
+dépendance chargée d'un CDN), mais seul un code auditable et un hébergeur de confiance
+règlent ce point.
+
+## Primitives (WebCrypto côté navigateur, stdlib côté Go)
+
+Encodage binaire → texte : **base64url sans padding** partout.
+AAD = chaîne UTF-8 qui lie chaque chiffré à son emplacement : le serveur ne peut pas déplacer
+un chiffré d'un objet à un autre.
+
+| Nom | Format |
+|---|---|
+| `box(K, pt, aad)` | `0x01 ‖ iv(12) ‖ AES-256-GCM(K, iv, pt, aad)` — iv aléatoire |
+| `seal(pub, pt, aad)` | `0x02 ‖ ephPub(32) ‖ iv(12) ‖ AES-256-GCM(k, iv, pt, aad)` où `k = HKDF-SHA256(ikm = X25519(ephPriv, pub), salt = ephPub ‖ pub, info = "excalibash/seal/v1", 32)` |
+| Clé symétrique | 32 octets aléatoires |
+| Clé asymétrique | X25519, publique = 32 octets bruts |
+| Empreinte | `SHA-256(pub)`, 20 premiers octets en hex majuscule par groupes de 4 : `AB12 CD34 …` |
+
+## Comptes
+
+- Dérivation : `Argon2id(password, salt 16 o, m = 64 Mio, t = 3, p = 1) → 32 o`, puis HKDF :
+  `authKey` (`info = "excalibash/auth"`) et `masterKey` (`info = "excalibash/master"`).
+- Le serveur ne reçoit que `authKey` et en stocke `scrypt(authKey)`. Il ne voit jamais le mot de passe.
+- À l'inscription, le navigateur génère l'id utilisateur, la paire X25519 et une **clé de
+  récupération** (32 o, affichée en base32 par groupes). Le serveur stocke :
+  - `encPrivateKey = box(masterKey, pkcs8, "eb:priv:<userId>")` ;
+  - `recoveryEncPrivateKey = box(HKDF(recovery, "excalibash/recovery-enc"), pkcs8, "eb:priv:<userId>")` ;
+  - `recoveryAuthHash = scrypt(HKDF(recovery, "excalibash/recovery-auth"))`.
+- `vaultKey = HKDF(X25519(priv, pub), info = "excalibash/vault")` : clé que seul le titulaire
+  de la clé privée peut calculer. Elle sert à protéger l'intégrité de ses données à lui
+  (clés publiques épinglées de ses machines et de ses contacts).
+- `prelogin` renvoie un sel factice déterministe pour un email inconnu (pas d'énumération).
+- La clé privée déchiffrée est importée **non extractible** et gardée dans IndexedDB jusqu'à la
+  déconnexion.
+- **Admin** : il peut inviter, supprimer un compte, ouvrir ou fermer les inscriptions et nommer
+  d'autres admins. Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
+  ni s'ajouter à un partage. L'API ne le permet pas, et même en trafiquant la base il n'obtiendrait
+  que des chiffrés.
+- Mot de passe perdu : la clé de récupération permet d'en redéfinir un. Sans elle, les données sont perdues.
+
+## Arbre de dossiers et partages
+
+Chaque dossier et chaque tableau a sa propre clé `K` et un `id` généré par le client.
+
+- `encName = box(K_item, nom, "eb:name:<id>")`
+- Enfant d'un dossier : `keyWrap = box(K_parent, K_item, "eb:wrap:<id>:<parentId>")`
+- Élément à la racine ou partagé : une **grant** `wrappedKey = seal(pub_user, K_item, "eb:grant:<id>:<userId>")`,
+  avec un rôle `owner | editor | viewer`. Le propriétaire a une grant `owner` sur chacun de ses éléments racine.
+- Accès à un élément = une grant sur lui ou sur un ancêtre. On déroule la chaîne de `keyWrap`
+  vers le bas : **les sous-dossiers d'un dossier partagé sont donc partagés aussi**. Le rôle effectif
+  est le plus fort trouvé sur le chemin.
+- Seul le propriétaire (`owner_id`) partage ou révoque. On ne peut déplacer un élément qu'entre
+  éléments du même propriétaire ; le client re-wrappe alors la clé sous celle du nouveau parent.
+- **Révocation = rotation** : le navigateur du propriétaire génère de nouvelles clés pour tout le
+  sous-arbre, re-chiffre noms, wraps, éléments, fichiers, aperçus et clés de terminaux, puis
+  ré-émet les grants des membres restants. Le serveur applique le tout en une transaction et
+  incrémente `key_epoch`. Les écritures portant un ancien epoch sont refusées.
+  - Les terminaux qui tournent sur les machines du propriétaire reçoivent une nouvelle clé (`rekey`).
+  - Les autres terminaux du sous-arbre sont fermés : le propriétaire ne peut pas authentifier la
+    clé d'une machine qui ne lui appartient pas.
+- Épinglage (TOFU) : les clés publiques des destinataires sont épinglées dans le coffre de
+  l'utilisateur (`box(vaultKey, …)`). Une clé qui change déclenche une alerte. Les empreintes
+  sont affichées pour une vérification hors bande.
+
+## Contenu d'un tableau (clé `K_b`)
+
+| Donnée | AAD |
+|---|---|
+| Élément : `{id, v, n, c}` avec `c = box(K_b, JSON(element))` | `eb:el:<boardId>:<id>:<version>:<versionNonce>` |
+| Fichier (image) | `eb:file:<boardId>:<fileId>` |
+| Aperçu SVG | `eb:preview:<boardId>` |
+| Curseur | `eb:ptr:<boardId>` |
+| Clé de terminal pour le tableau | `eb:termkey:<boardId>:<termId>` |
+
+`id`, `version` et `versionNonce` restent en clair : c'est ce qui permet au serveur de fusionner
+les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
+
+## Machines et terminaux
+
+- Ajout d'une machine : **le navigateur** génère la paire X25519 de l'agent. La clé privée est
+  incluse uniquement dans la commande d'installation affichée à l'utilisateur. Le serveur ne reçoit
+  que `encMachinePub = box(vaultKey, pub, "eb:machine:<machineId>")`, que lui ne peut pas forger.
+  Le jeton d'authentification à `/agent` est distinct et ne sert qu'à la connexion.
+- Chaque terminal a une clé `K_t` générée par le navigateur **du propriétaire de la machine**.
+  Le serveur stocke :
+  - `keyForBoard = box(K_b, K_t, "eb:termkey:<boardId>:<termId>")` ;
+  - `keyForAgent = seal(machinePub, K_t, "eb:term:<termId>")`.
+- Agent ⇄ serveur :
+  - `open {id, cols, rows, key}` : `key = keyForAgent` (aussi renvoyé tel quel lors d'un redémarrage) ;
+  - `rekey {id, key}` ;
+  - `output {id, gen, seq, d}` avec `d = box(K_t, octets, "eb:term-out:<id>:<gen>:<seq>")`.
+    `gen` (chaîne aléatoire) change à chaque lancement de PTY ou rekey ; `seq` part de 1 et croît
+    strictement. Le navigateur rejette `seq ≤ dernier` pour une même `gen`.
+  - `input {id, s, k, ts, d}` avec `d = box(K_t, octets, "eb:term-in:<id>:<s>:<k>:<ts>")`.
+    `s` = id aléatoire d'un émetteur (onglet), `k` = compteur strictement croissant par émetteur,
+    `ts` = horodatage en ms. L'agent rejette `|now − ts| > 5 min` et `k ≤ dernier k vu pour s`.
+    Le serveur ne peut donc pas rejouer des frappes.
+- Le serveur garde l'historique de sortie **chiffré** (morceaux `{gen, seq, d}`) pour le rejouer
+  aux nouveaux arrivants.
+- Les lecteurs (rôle viewer) reçoivent la sortie mais le serveur rejette leurs entrées.
+  Ils ont la clé : c'est une restriction d'accès, pas une garantie cryptographique.
+- Il n'y a plus de machine intégrée : toute machine est un agent avec ses propres clés.

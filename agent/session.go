@@ -1,0 +1,416 @@
+package main
+
+import (
+	"crypto/ecdh"
+	"errors"
+	"log"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/creack/pty"
+)
+
+const (
+	readChunk     = 32 * 1024
+	offlineBuffer = 256 * 1024
+	// Inputs older (or further in the future) than this are refused.
+	inputMaxSkew = 5 * time.Minute
+	// Replay-protection state kept per session, oldest sender evicted first.
+	maxSenders = 1000
+)
+
+// manager owns every PTY session. Sessions outlive websocket connections:
+// while no connection is attached, output is kept in a per-session ring buffer
+// and exits are remembered until they can be reported.
+type manager struct {
+	mu       sync.Mutex
+	priv     *ecdh.PrivateKey
+	sessions map[string]*session
+	out      *outbox // nil while disconnected
+}
+
+// session state below cmd/ptmx is guarded by manager.mu.
+type session struct {
+	id      string
+	cmd     *exec.Cmd
+	ptmx    *os.File
+	pending []byte // plaintext output produced while disconnected
+	exited  bool
+	code    int
+	done    chan struct{}
+
+	key     []byte // terminal key K_t
+	gen     string // changes on every PTY launch and rekey
+	seq     uint64 // last output sequence number used in gen
+	senders map[string]*sender
+	order   uint64
+}
+
+// sender tracks the highest input counter accepted from one browser tab.
+type sender struct {
+	k     uint64
+	order uint64
+}
+
+func newManager(priv *ecdh.PrivateKey) *manager {
+	return &manager{priv: priv, sessions: map[string]*session{}}
+}
+
+// openKey unseals a terminal key addressed to this machine.
+func (m *manager) openKey(id, sealed string) ([]byte, error) {
+	data, err := b64.DecodeString(sealed)
+	if err != nil {
+		return nil, errCrypto
+	}
+	key, err := unseal(m.priv, data, "eb:term:"+id)
+	if err != nil || len(key) != keyLen {
+		return nil, errCrypto
+	}
+	return key, nil
+}
+
+// outputFrame encrypts data as the next output chunk. Caller holds m.mu.
+func (s *session) outputFrame(data []byte) (message, error) {
+	s.seq++
+	aad := "eb:term-out:" + s.id + ":" + s.gen + ":" + strconv.FormatUint(s.seq, 10)
+	d, err := box(s.key, data, aad)
+	if err != nil {
+		return message{}, err
+	}
+	return message{T: "output", ID: s.id, Gen: s.gen, Seq: s.seq, D: b64.EncodeToString(d)}, nil
+}
+
+// sendOutput encrypts and queues data; false means it must be buffered. Caller holds m.mu.
+func (m *manager) sendOutput(s *session, data []byte) bool {
+	if m.out == nil {
+		return false
+	}
+	frame, err := s.outputFrame(data)
+	if err != nil {
+		log.Printf("encrypt %s: %v", s.id, err)
+		return true // drop: retrying would fail the same way
+	}
+	return m.out.send(frame)
+}
+
+// attach starts routing output to out. Buffered output and unreported exits
+// are flushed first so the server sees them in order.
+func (m *manager) attach(out *outbox) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, s := range m.sessions {
+		if len(s.pending) > 0 {
+			if frame, err := s.outputFrame(s.pending); err == nil {
+				out.send(frame)
+			}
+			s.pending = nil
+		}
+		if s.exited {
+			out.send(message{T: "exit", ID: id, Code: intPtr(s.code)})
+			delete(m.sessions, id)
+		}
+	}
+	m.out = out
+}
+
+func (m *manager) detach(out *outbox) {
+	m.mu.Lock()
+	if m.out == out {
+		m.out = nil
+	}
+	m.mu.Unlock()
+}
+
+// ids lists sessions the server should know about (alive or with an unreported exit).
+func (m *manager) ids() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (m *manager) emitOutput(s *session, data []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sendOutput(s, data) {
+		return
+	}
+	s.pending = append(s.pending, data...)
+	if over := len(s.pending) - offlineBuffer; over > 0 {
+		s.pending = append([]byte(nil), s.pending[over:]...)
+	}
+}
+
+func (m *manager) emitExit(s *session, code int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.out != nil && m.out.send(message{T: "exit", ID: s.id, Code: intPtr(code)}) {
+		delete(m.sessions, s.id)
+		return
+	}
+	s.exited, s.code = true, code
+}
+
+func (m *manager) get(id string) *session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessions[id]
+}
+
+func (m *manager) open(msg message, out *outbox) {
+	if s := m.get(msg.ID); s != nil {
+		out.send(message{T: "opened", ID: msg.ID, Pid: s.cmd.Process.Pid})
+		return
+	}
+	key, err := m.openKey(msg.ID, msg.Key)
+	if err != nil {
+		log.Printf("open %s: invalid terminal key", msg.ID)
+		out.send(message{T: "exit", ID: msg.ID, Code: intPtr(-1), Error: "clé de terminal invalide"})
+		return
+	}
+
+	shell := pickShell(msg.Shell)
+	cmd := exec.Command(shell, "-l")
+	cmd.Dir = pickCwd(msg.Cwd)
+	cmd.Env = shellEnv()
+
+	size := &pty.Winsize{Cols: orDefault(msg.Cols, 80), Rows: orDefault(msg.Rows, 24)}
+	ptmx, err := pty.StartWithSize(cmd, size)
+	if err != nil {
+		log.Printf("open %s: %v", msg.ID, err)
+		out.send(message{T: "exit", ID: msg.ID, Code: intPtr(-1), Error: err.Error()})
+		return
+	}
+
+	s := &session{
+		id: msg.ID, cmd: cmd, ptmx: ptmx, done: make(chan struct{}),
+		key: key, gen: randomID(6), senders: map[string]*sender{},
+	}
+	m.mu.Lock()
+	m.sessions[s.id] = s
+	m.mu.Unlock()
+	log.Printf("session %s started (%s, pid %d)", s.id, shell, cmd.Process.Pid)
+	out.send(message{T: "opened", ID: s.id, Pid: cmd.Process.Pid})
+
+	go m.pump(s)
+}
+
+// pump forwards PTY output until the shell exits, then reports the exit code.
+func (m *manager) pump(s *session) {
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, readChunk)
+		for {
+			n, err := s.ptmx.Read(buf)
+			if n > 0 {
+				m.emitOutput(s, append([]byte(nil), buf[:n]...))
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	err := s.cmd.Wait()
+	// Background jobs may keep the PTY open; give the reader a moment to drain.
+	select {
+	case <-readDone:
+	case <-time.After(200 * time.Millisecond):
+	}
+	s.ptmx.Close()
+	<-readDone
+	close(s.done)
+
+	code := exitCode(s.cmd, err)
+	log.Printf("session %s exited (%d)", s.id, code)
+	m.emitExit(s, code)
+}
+
+// rekey switches a session to a new terminal key; output restarts in a new gen.
+func (m *manager) rekey(msg message) {
+	key, err := m.openKey(msg.ID, msg.Key)
+	if err != nil {
+		log.Printf("rekey %s: invalid terminal key", msg.ID)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := m.sessions[msg.ID]; s != nil {
+		s.key, s.gen, s.seq = key, randomID(6), 0
+		s.senders = map[string]*sender{}
+	}
+}
+
+// input decrypts keystrokes and writes them to the PTY. Frames that are stale,
+// replayed or fail authentication are dropped.
+func (m *manager) input(msg message) {
+	ts, err := strconv.ParseInt(string(msg.Ts), 10, 64)
+	if err != nil || msg.S == "" || msg.K == 0 {
+		debugf("input %s: malformed frame", msg.ID)
+		return
+	}
+	if skew := time.Since(time.UnixMilli(ts)); skew > inputMaxSkew || skew < -inputMaxSkew {
+		debugf("input %s: timestamp out of window", msg.ID)
+		return
+	}
+	data, err := b64.DecodeString(msg.D)
+	if err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	s := m.sessions[msg.ID]
+	if s == nil || s.key == nil {
+		m.mu.Unlock()
+		return
+	}
+	if last := s.senders[msg.S]; last != nil && msg.K <= last.k {
+		m.mu.Unlock()
+		debugf("input %s: replayed counter %d from %s", msg.ID, msg.K, msg.S)
+		return
+	}
+	aad := "eb:term-in:" + msg.ID + ":" + msg.S + ":" + strconv.FormatUint(msg.K, 10) + ":" + strconv.FormatInt(ts, 10)
+	pt, err := unbox(s.key, data, aad)
+	if err != nil {
+		m.mu.Unlock()
+		debugf("input %s: authentication failed", msg.ID)
+		return
+	}
+	s.remember(msg.S, msg.K)
+	ptmx := s.ptmx
+	m.mu.Unlock()
+
+	if _, err := ptmx.Write(pt); err != nil && !errors.Is(err, os.ErrClosed) {
+		log.Printf("input %s: %v", msg.ID, err)
+	}
+}
+
+// remember records the latest counter for a sender. Caller holds m.mu.
+func (s *session) remember(id string, k uint64) {
+	s.order++
+	if st := s.senders[id]; st != nil {
+		st.k, st.order = k, s.order
+		return
+	}
+	if len(s.senders) >= maxSenders {
+		var oldest string
+		var min uint64
+		for sid, st := range s.senders {
+			if oldest == "" || st.order < min {
+				oldest, min = sid, st.order
+			}
+		}
+		delete(s.senders, oldest)
+	}
+	s.senders[id] = &sender{k: k, order: s.order}
+}
+
+func (m *manager) resize(id string, cols, rows uint16) {
+	if s := m.get(id); s != nil && cols > 0 && rows > 0 {
+		_ = pty.Setsize(s.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
+	}
+}
+
+// kill sends SIGHUP to the session's process group, then SIGKILL after 2s.
+func (m *manager) kill(id string) {
+	s := m.get(id)
+	if s == nil || s.cmd.Process == nil {
+		return
+	}
+	pgid := s.cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGHUP)
+	go func() {
+		select {
+		case <-s.done:
+		case <-time.After(2 * time.Second):
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}()
+}
+
+func (m *manager) closeAll() {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		m.kill(id)
+	}
+}
+
+func pickShell(requested string) string {
+	for _, sh := range []string{requested, os.Getenv("SHELL"), "/bin/bash", "/bin/sh"} {
+		if sh == "" {
+			continue
+		}
+		if path, err := exec.LookPath(sh); err == nil {
+			return path
+		}
+	}
+	return "/bin/sh"
+}
+
+func pickCwd(requested string) string {
+	for _, dir := range []string{requested, os.Getenv("HOME"), "/"} {
+		if dir == "" {
+			continue
+		}
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			return dir
+		}
+	}
+	return "/"
+}
+
+func shellEnv() []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "TERM=") || strings.HasPrefix(kv, "COLORTERM=") ||
+			strings.HasPrefix(kv, "EXCALIBASH_TOKEN=") || strings.HasPrefix(kv, "EXCALIBASH_KEY=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "EXCALIBASH=1")
+}
+
+func exitCode(cmd *exec.Cmd, err error) int {
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
+		if ws.Signaled() {
+			return 128 + int(ws.Signal())
+		}
+		return ws.ExitStatus()
+	}
+	if err != nil {
+		return -1
+	}
+	return 0
+}
+
+func orDefault(v, def uint16) uint16 {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+func intPtr(v int) *int { return &v }
+
+var debug = os.Getenv("EXCALIBASH_DEBUG") != ""
+
+func debugf(format string, args ...any) {
+	if debug {
+		log.Printf(format, args...)
+	}
+}

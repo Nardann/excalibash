@@ -1,0 +1,229 @@
+// End-to-end encryption primitives — byte formats are specified in docs/SECURITY.md
+// and shared with the Go agent. Runs in browsers and in Node (WebCrypto only).
+import { argon2id } from "hash-wasm";
+
+const subtle = globalThis.crypto.subtle;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+export type Bytes = Uint8Array<ArrayBuffer>;
+
+// ---- Encoding ----------------------------------------------------------------------
+
+export function toB64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function fromB64(s: string): Bytes {
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+export const utf8 = (s: string): Bytes => enc.encode(s) as Bytes;
+export const fromUtf8 = (b: Uint8Array): string => dec.decode(b);
+
+export function randomBytes(n: number): Bytes {
+  return globalThis.crypto.getRandomValues(new Uint8Array(n));
+}
+
+/** Ids generated client-side and bound into AADs. */
+export const randomId = (): string => toB64(randomBytes(16));
+
+function concat(...parts: Uint8Array[]): Bytes {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+// ---- Symmetric ---------------------------------------------------------------------
+
+/** A 32-byte symmetric key, kept as an AES-GCM CryptoKey alongside its raw bytes (needed to wrap it). */
+export type SymKey = { raw: Bytes; key: CryptoKey };
+
+export async function symKey(raw: Uint8Array): Promise<SymKey> {
+  if (raw.length !== 32) throw new Error("clé symétrique invalide");
+  const copy = new Uint8Array(raw) as Bytes;
+  return { raw: copy, key: await subtle.importKey("raw", copy, "AES-GCM", false, ["encrypt", "decrypt"]) };
+}
+
+export const newSymKey = () => symKey(randomBytes(32));
+
+export async function hkdf(ikm: Uint8Array, info: string, salt: Uint8Array = new Uint8Array(), length = 32): Promise<Bytes> {
+  const base = await subtle.importKey("raw", ikm as Bytes, "HKDF", false, ["deriveBits"]);
+  const bits = await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: salt as Bytes, info: utf8(info) }, base, length * 8);
+  return new Uint8Array(bits);
+}
+
+/** box = 0x01 ‖ iv(12) ‖ AES-256-GCM(pt, aad) */
+export async function box(k: SymKey, pt: Uint8Array, aad: string): Promise<string> {
+  const iv = randomBytes(12);
+  const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf8(aad) }, k.key, pt as Bytes));
+  return toB64(concat(Uint8Array.of(1), iv, ct));
+}
+
+export async function unbox(k: SymKey, data: string, aad: string): Promise<Bytes> {
+  const b = fromB64(data);
+  if (b[0] !== 1 || b.length < 29) throw new Error("chiffré invalide");
+  try {
+    return new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv: b.subarray(1, 13), additionalData: utf8(aad) }, k.key, b.subarray(13)));
+  } catch {
+    throw new Error("déchiffrement impossible (clé ou données altérées)");
+  }
+}
+
+export const boxText = (k: SymKey, s: string, aad: string) => box(k, utf8(s), aad);
+export const unboxText = async (k: SymKey, data: string, aad: string) => fromUtf8(await unbox(k, data, aad));
+export const boxJson = (k: SymKey, v: unknown, aad: string) => box(k, utf8(JSON.stringify(v)), aad);
+export const unboxJson = async <T = any>(k: SymKey, data: string, aad: string): Promise<T> => JSON.parse(fromUtf8(await unbox(k, data, aad)));
+
+/** Wraps a symmetric key under another one. */
+export const wrapKey = (parent: SymKey, child: SymKey, aad: string) => box(parent, child.raw, aad);
+export const unwrapKey = async (parent: SymKey, data: string, aad: string) => symKey(await unbox(parent, data, aad));
+
+// ---- Asymmetric (X25519) -----------------------------------------------------------
+
+export type KeyPair = { priv: CryptoKey; pub: Bytes };
+
+const X25519 = { name: "X25519" } as const;
+
+export async function generateKeyPair(): Promise<KeyPair & { pkcs8: Bytes; rawPriv: Bytes }> {
+  const kp = (await subtle.generateKey(X25519, true, ["deriveBits"])) as CryptoKeyPair;
+  const pub = new Uint8Array(await subtle.exportKey("raw", kp.publicKey));
+  const pkcs8 = new Uint8Array(await subtle.exportKey("pkcs8", kp.privateKey));
+  const jwk = await subtle.exportKey("jwk", kp.privateKey);
+  return { priv: kp.privateKey, pub, pkcs8, rawPriv: fromB64(jwk.d!) };
+}
+
+/** Imports a private key as non-extractable: script can use it, never read it out. */
+export async function importPrivateKey(pkcs8: Uint8Array): Promise<CryptoKey> {
+  return subtle.importKey("pkcs8", pkcs8 as Bytes, X25519, false, ["deriveBits"]);
+}
+
+export async function importRawPrivateKey(raw: Uint8Array, pub: Uint8Array): Promise<CryptoKey> {
+  return subtle.importKey("jwk", { kty: "OKP", crv: "X25519", d: toB64(raw), x: toB64(pub) }, X25519, false, ["deriveBits"]);
+}
+
+async function dh(priv: CryptoKey, pub: Uint8Array): Promise<Bytes> {
+  const pubKey = await subtle.importKey("raw", pub as Bytes, X25519, true, []);
+  return new Uint8Array(await subtle.deriveBits({ name: "X25519", public: pubKey }, priv, 256));
+}
+
+const SEAL_INFO = "excalibash/seal/v1";
+
+/** seal = 0x02 ‖ ephPub(32) ‖ iv(12) ‖ AES-256-GCM(k, pt, aad), k = HKDF(X25519(eph, pub), ephPub ‖ pub) */
+export async function seal(pub: Uint8Array, pt: Uint8Array, aad: string): Promise<string> {
+  const eph = (await subtle.generateKey(X25519, true, ["deriveBits"])) as CryptoKeyPair;
+  const ephPub = new Uint8Array(await subtle.exportKey("raw", eph.publicKey));
+  const k = await symKey(await hkdf(await dh(eph.privateKey, pub), SEAL_INFO, concat(ephPub, pub)));
+  const iv = randomBytes(12);
+  const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf8(aad) }, k.key, pt as Bytes));
+  return toB64(concat(Uint8Array.of(2), ephPub, iv, ct));
+}
+
+export async function unseal(kp: KeyPair, data: string, aad: string): Promise<Bytes> {
+  const b = fromB64(data);
+  if (b[0] !== 2 || b.length < 61) throw new Error("chiffré scellé invalide");
+  const ephPub = b.subarray(1, 33);
+  const k = await symKey(await hkdf(await dh(kp.priv, ephPub), SEAL_INFO, concat(ephPub, kp.pub)));
+  try {
+    return new Uint8Array(await subtle.decrypt({ name: "AES-GCM", iv: b.subarray(33, 45), additionalData: utf8(aad) }, k.key, b.subarray(45)));
+  } catch {
+    throw new Error("déchiffrement impossible (clé ou données altérées)");
+  }
+}
+
+export const sealKey = (pub: Uint8Array, k: SymKey, aad: string) => seal(pub, k.raw, aad);
+export const unsealKey = async (kp: KeyPair, data: string, aad: string) => symKey(await unseal(kp, data, aad));
+
+/** Key only the holder of the private key can compute: protects their own small records. */
+export async function vaultKey(kp: KeyPair): Promise<SymKey> {
+  return symKey(await hkdf(await dh(kp.priv, kp.pub), "excalibash/vault"));
+}
+
+export async function fingerprint(pub: Uint8Array): Promise<string> {
+  const h = new Uint8Array(await subtle.digest("SHA-256", pub as Bytes)).subarray(0, 20);
+  const hex = [...h].map((x) => x.toString(16).padStart(2, "0")).join("").toUpperCase();
+  return hex.match(/.{4}/g)!.join(" ");
+}
+
+// ---- Accounts ------------------------------------------------------------------------
+
+export const KDF = { memorySize: 64 * 1024, iterations: 3, parallelism: 1 };
+
+/** Password → (authKey sent to the server, masterKey that never leaves the browser). */
+export async function deriveAccountKeys(password: string, salt: string): Promise<{ authKey: string; masterKey: SymKey }> {
+  const root = await argon2id({ password: password.normalize("NFKC"), salt: fromB64(salt), ...KDF, hashLength: 32, outputType: "binary" });
+  const [auth, master] = await Promise.all([hkdf(root, "excalibash/auth"), hkdf(root, "excalibash/master")]);
+  return { authKey: toB64(auth), masterKey: await symKey(master) };
+}
+
+const B32 = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I
+
+/** 32 random bytes shown as 52 base32 characters in groups of 4. */
+export function formatRecoveryKey(raw: Uint8Array): string {
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of raw) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32[(value << (5 - bits)) & 31];
+  return out.match(/.{1,4}/g)!.join("-");
+}
+
+export function parseRecoveryKey(s: string): Bytes {
+  const clean = s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  let bits = 0;
+  let value = 0;
+  const out: number[] = [];
+  for (const ch of clean) {
+    const i = B32.indexOf(ch);
+    if (i < 0) throw new Error("Clé de récupération invalide");
+    value = (value << 5) | i;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  if (out.length !== 32) throw new Error("Clé de récupération invalide");
+  return Uint8Array.from(out);
+}
+
+export async function recoveryKeys(raw: Uint8Array): Promise<{ recoveryAuth: string; recoveryEnc: SymKey }> {
+  return {
+    recoveryAuth: toB64(await hkdf(raw, "excalibash/recovery-auth")),
+    recoveryEnc: await symKey(await hkdf(raw, "excalibash/recovery-enc")),
+  };
+}
+
+export const AAD = {
+  priv: (userId: string) => `eb:priv:${userId}`,
+  name: (id: string) => `eb:name:${id}`,
+  wrap: (id: string, parentId: string) => `eb:wrap:${id}:${parentId}`,
+  grant: (id: string, userId: string) => `eb:grant:${id}:${userId}`,
+  element: (boardId: string, id: string, v: number, n: number) => `eb:el:${boardId}:${id}:${v}:${n}`,
+  file: (boardId: string, fileId: string) => `eb:file:${boardId}:${fileId}`,
+  preview: (boardId: string) => `eb:preview:${boardId}`,
+  pointer: (boardId: string) => `eb:ptr:${boardId}`,
+  termKey: (boardId: string, termId: string) => `eb:termkey:${boardId}:${termId}`,
+  termLabel: (boardId: string, termId: string) => `eb:termlabel:${boardId}:${termId}`,
+  termAgent: (termId: string) => `eb:term:${termId}`,
+  termOut: (termId: string, gen: string, seq: number) => `eb:term-out:${termId}:${gen}:${seq}`,
+  termIn: (termId: string, s: string, k: number, ts: number) => `eb:term-in:${termId}:${s}:${k}:${ts}`,
+  machine: (machineId: string) => `eb:machine:${machineId}`,
+  vault: (userId: string) => `eb:vault:${userId}`,
+};

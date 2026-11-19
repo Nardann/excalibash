@@ -1,0 +1,48 @@
+{
+  "box": [
+    {
+      "aeadKey": "ERERERERERERERERERERERERERERERERERERERERERE",
+      "aad": "eb:name:abcdefghijklmnop",
+      "plaintext": "Archi infra",
+      "box": "Ac7NJTYl4i1Q9d5D-wT5uhW0m63iX1gOsZNtJUMHtFOY0XV5PfNrzQ"
+    },
+    {
+      "aeadKey": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+      "aad": "eb:term-out:t1:gen12345:1",
+      "plaintext": "\u001b[32mhi\u001b[0m\r\n",
+      "box": "AZ4s-fgSYVhh8dCPlZgPUv1g6vOhvgGstFsTuUat5bwo7wX2K6zMGkAu"
+    },
+    {
+      "aeadKey": "ERERERERERERERERERERERERERERERERERERERERERE",
+      "aad": "eb:term-in:t1:tabA:7:1795078000000",
+      "plaintext": "ls -la\r",
+      "box": "AYeRcOb7Mb3NB9DdsmmncbYVDR87owZ4yyehktn95Xo4L55p"
+    }
+  ],
+  "seal": [
+    {
+      "recipientPriv": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA",
+      "recipientPub": "BkU_zZzvWh9TrMT5QhBMDI6eJ9XHs39VB83NFigQWWM",
+      "aad": "eb:term:t1",
+      "plaintext": "32-byte-key-material-0000000000",
+      "sealed": "AlhvwCTkvgonRAvNTb6RTiA9_6If4SyOnyp8mgz4XnFT5D1JmEBX4xbNj49tAG8VkclIgfGGSAI0ZsS6_KT4DKOOwNms64TEfCSiWV9fhjnQIozuaSmhOz8ks0I"
+    },
+    {
+      "recipientPriv": "ISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISE",
+      "recipientPub": "fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ",
+      "aad": "eb:grant:abcdefghijklmnop:userid0123456789",
+      "plaintext": "32-byte-key-material-0000000001",
+      "sealed": "ArsWrZnMeqfcW9LFWjyTXZlXwOvyzvS1jhevvoOQ05Uw13zRHBOwbMYyhAlsZg5KNps6gHPInQYZCtfXsmbSBdCI8hj41i0Kie-UoNbuqMIe-wWhoXs-GEEHPCM"
+    }
+  ],
+  "fingerprint": [
+    {
+      "pub": "BkU_zZzvWh9TrMT5QhBMDI6eJ9XHs39VB83NFigQWWM",
+      "fingerprint": "5347 8650 9023 21EC A613 E5B6 38A1 8B2E 5AE8 EAB4"
+    },
+    {
+      "pub": "fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ",
+      "fingerprint": "F05F CD1F E8D7 BE51 F79B F91C 6B7C F285 7A3B A517"
+    }
+  ]
+}

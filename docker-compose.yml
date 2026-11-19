@@ -1,0 +1,18 @@
+services:
+  excalibash:
+    build: .
+    image: excalibash:latest
+    container_name: excalibash
+    restart: unless-stopped
+    ports:
+      - "6767:6767"
+    environment:
+      # Public URL, used in the agent install commands (e.g. https://excalibash.example.com)
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      # Set to "true" when served over HTTPS (behind a reverse proxy)
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - excalibash-data:/data
+
+volumes:
+  excalibash-data:

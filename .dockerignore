@@ -1,0 +1,9 @@
+**/node_modules
+web/dist
+web/public/fonts
+agent/dist
+agent/excalibash-agent
+data
+data-dev
+.git
+.claude

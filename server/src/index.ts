@@ -1,0 +1,152 @@
+import { createServer } from "node:http";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import express, { type Request, type Response, type NextFunction } from "express";
+import { WebSocketServer } from "ws";
+import { config } from "./config.ts";
+import { pruneSessions, userFromRequest } from "./auth.ts";
+import { HttpError, publicUrl } from "./http.ts";
+import { authApi } from "./api/auth.ts";
+import { itemsApi } from "./api/items.ts";
+import { machinesApi } from "./api/machines.ts";
+import { adminApi } from "./api/admin.ts";
+import { getItem, isTrashed, roleOn } from "./access.ts";
+import { joinBoard, flushAllRooms } from "./rooms.ts";
+import { authenticateAgent, handleAgent } from "./terminals.ts";
+import { installScript } from "./install.ts";
+
+const CSP = [
+  "default-src 'self'",
+  // Argon2 runs as WebAssembly.
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  // Excalidraw's own embeds (YouTube, Figma…) are third-party iframes.
+  "frame-src 'self' https:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+const app = express();
+app.set("trust proxy", true);
+app.disable("x-powered-by");
+app.use((_req, res, next) => {
+  res.set({
+    "Content-Security-Policy": CSP,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  });
+  next();
+});
+app.use(express.json({ limit: "200mb" }));
+
+app.get("/healthz", (_req, res) => {
+  res.json({ ok: true });
+});
+app.use("/api/auth", authApi);
+app.use("/api/machines", machinesApi);
+app.use("/api/admin", adminApi);
+app.use("/api", itemsApi);
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Introuvable" });
+});
+app.use("/api", (err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof HttpError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  if (err?.type === "entity.too.large") {
+    res.status(413).json({ error: "Contenu trop volumineux" });
+    return;
+  }
+  console.error(err);
+  res.status(500).json({ error: "Erreur serveur" });
+});
+
+const AGENT_FILE = /^excalibash-agent-(linux|darwin)-(amd64|arm64)$/;
+
+app.get("/install.sh", (req, res) => {
+  res.type("text/x-shellscript").send(installScript(publicUrl(req)));
+});
+
+app.get("/downloads", (_req, res) => {
+  const files = existsSync(config.agentDistDir) ? readdirSync(config.agentDistDir).filter((f) => AGENT_FILE.test(f)) : [];
+  res.json({ files });
+});
+
+app.get("/downloads/:file", (req, res) => {
+  const file = req.params.file;
+  if (!AGENT_FILE.test(file) || !existsSync(join(config.agentDistDir, file))) {
+    res.status(404).send("not found\n");
+    return;
+  }
+  res.download(join(config.agentDistDir, file));
+});
+
+if (existsSync(config.webDir)) {
+  app.use(express.static(config.webDir, { index: false, maxAge: "1h" }));
+  app.get(/^\/(?!api\/|ws|agent).*/, (_req, res) => {
+    res.set("Cache-Control", "no-cache").sendFile(join(config.webDir, "index.html"));
+  });
+} else {
+  console.warn(`[web] ${config.webDir} absent — lance le frontend avec \`npm run dev\` dans web/`);
+}
+
+const server = createServer(app);
+const boardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
+const agentWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url ?? "/", "http://x");
+  const reject = (code: number, text: string) => {
+    socket.end(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\n\r\n`);
+  };
+
+  if (url.pathname === "/agent") {
+    const machineId = authenticateAgent(req);
+    if (!machineId) return reject(401, "Unauthorized");
+    agentWss.handleUpgrade(req, socket, head, (ws) => handleAgent(ws, machineId));
+    return;
+  }
+
+  if (url.pathname === "/ws") {
+    // Cookies are SameSite=Strict, but a cross-site page could still open a socket: check the origin.
+    const origin = req.headers.origin;
+    if (origin && new URL(origin).host !== req.headers.host) return reject(403, "Forbidden");
+    const user = userFromRequest(req);
+    if (!user) return reject(401, "Unauthorized");
+    const item = getItem(url.searchParams.get("board") ?? "");
+    const role = item ? roleOn(user.id, item.id) : undefined;
+    if (!item || item.kind !== "board" || !role || isTrashed(item.id)) return reject(403, "Forbidden");
+    boardWss.handleUpgrade(req, socket, head, (ws) => joinBoard(ws, user, item.id, role));
+    return;
+  }
+
+  reject(404, "Not Found");
+});
+
+let shuttingDown = false;
+function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("Arrêt…");
+  flushAllRooms();
+  server.close();
+  setTimeout(() => process.exit(0), 500).unref();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+setInterval(pruneSessions, 3600_000).unref();
+
+server.listen(config.port, config.host, () => {
+  console.log(`Excalibash sur http://${config.host}:${config.port}`);
+});
