@@ -61,7 +61,11 @@ type sender struct {
 }
 
 func newManager(priv *ecdh.PrivateKey) *manager {
-	auth := machineAuthKey(priv)
+	return newManagerWithAuth(machineAuthKey(priv))
+}
+
+// newManagerWithAuth runs with a machine auth key received at pairing time.
+func newManagerWithAuth(auth []byte) *manager {
 	return &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth)}
 }
 

@@ -338,6 +338,52 @@ const dump = JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SE
 ok(!/Projet secret|Sous-dossier|confidentiel|TOP_SECRET|laptop-alice|CLEAR_42|127\.0\.0\.1/.test(dump), "aucun nom, contenu ni adresse en clair dans la base");
 site.close();
 
+// Pairing with a short code (no copy-paste): the agent makes its key on the machine.
+{
+  const { approvePairing, listMachines: lm } = await import("../web/src/vault.ts");
+  const pr = (await as(alice, () => api("POST", "/machines/pairings"))).body;
+  const cfgPath = `${process.env.DB}.agent-pair.json`;
+  const agentBin = new URL(`../agent/dist/excalibash-agent-${process.platform}-${process.arch === "x64" ? "amd64" : process.arch}`, import.meta.url).pathname;
+  const pairProc = spawn(agentBin, ["--server", BASE, "--pair", pr.code.toLowerCase(), "--pair-only", "--config", cfgPath, "--name", "vm-tp"], { stdio: ["ignore", "ignore", "pipe"] });
+  let pairOut = "";
+  pairProc.stderr.on("data", (d) => (pairOut += d));
+  let claim: any = null;
+  for (let i = 0; i < 30 && !claim; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    const st = (await as(alice, () => api("GET", `/machines/pairings/${pr.code}`))).body;
+    if (st.status === "claimed") claim = st;
+  }
+  const fp = await c.fingerprint(c.fromB64(claim.agentPub));
+  ok(pairOut.includes(fp), "l'empreinte affichée sur la machine est celle montrée dans le navigateur");
+  await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, "vm-tp"));
+  const exit = await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
+  ok(exit === 0, "l'agent est appairé et sa configuration enregistrée");
+  const reuse = await realFetch(`${BASE}/api/pair/${pr.code.replace("-", "")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pub: c.toB64(c.randomBytes(32)) }) });
+  ok(reuse.status === 404, "un code déjà utilisé est refusé");
+  const paired = spawn(agentBin, ["--config", cfgPath], { stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 1200));
+  const pm = (await as(alice, () => lm(alice.keys))).find((m) => m.name === "vm-tp");
+  ok(pm?.online, "la machine appairée se connecte avec sa configuration");
+  const pt = c.randomId();
+  const pk = await c.newSymKey();
+  const sp = boardSocket(alice, B);
+  await sp.open;
+  await sp.next((m) => m.t === "init");
+  const nowKeyB = (await tree(alice)).get(B)!.key!;
+  sp.send({
+    t: "term.create", reqId: "p1", id: pt, machineId: pm!.id, cols: 80, rows: 24,
+    keyForBoard: await c.wrapKey(nowKeyB, pk, c.AAD.termKey(B, pt)),
+    keyForAgent: await c.box(pm!.auth, pk.raw, c.AAD.termAgent(pt)),
+    encLabel: await c.boxText(nowKeyB, "vm-tp", c.AAD.termLabel(B, pt)),
+  });
+  await sp.next((m) => m.t === "term" && m.terminal.id === pt && m.terminal.status === "running", 8000);
+  await subscribe(sp, pt);
+  await sendInput(sp, pk, pt, "pairtab", "echo PAIRED_$((5*5))\n");
+  ok((await termOutput(sp, pk, pt, "PAIRED_25")).includes("PAIRED_25"), "un shell s'ouvre sur la machine appairée");
+  paired.kill();
+  sp.ws.close();
+}
+
 // Unauthenticated hardening.
 const nullOrigin = await new Promise<number>((resolve) => {
   const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });

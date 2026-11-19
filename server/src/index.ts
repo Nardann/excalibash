@@ -14,6 +14,7 @@ import { getItem, isTrashed, roleOn } from "./access.ts";
 import { joinBoard, flushAllRooms } from "./rooms.ts";
 import { authenticateAgent, handleAgent } from "./terminals.ts";
 import { installScript } from "./install.ts";
+import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
 
 const CSP = [
@@ -59,7 +60,9 @@ app.get("/api/config", (req, res) => {
 const small = express.json({ limit: "256kb" });
 const large = express.json({ limit: "200mb" });
 app.use("/api/auth", small, authApi);
+app.use("/api/machines/pairings", small, pairingOwnerApi);
 app.use("/api/machines", small, machinesApi);
+app.use("/api/pair", small, pairingAgentApi);
 app.use("/api/admin", small, adminApi);
 app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)(req, res, next), itemsApi);
 app.use("/api", (_req, res) => {
@@ -79,6 +82,10 @@ app.use("/api", (err: any, _req: Request, res: Response, _next: NextFunction) =>
 });
 
 const AGENT_FILE = /^excalibash-agent-(linux|darwin)-(amd64|arm64)$/;
+
+app.get("/p/:code", (req, res) => {
+  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(pairScript(publicUrl(req), String(req.params.code)));
+});
 
 app.get("/install.sh", (req, res) => {
   res.type("text/x-shellscript").send(installScript(publicUrl(req)));

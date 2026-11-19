@@ -104,6 +104,12 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   - Le serveur ne reçoit que des chiffrés du coffre, qu'il ne peut pas forger : la clé publique
     (`eb:machine:<id>`, pour l'empreinte), `machineAuth` (`eb:machine-auth:<id>`) et le nom.
   - Le jeton d'authentification à `/agent` est distinct et ne sert qu'à la connexion.
+- **Appairage par code** (sans copier-coller) :
+  - le serveur crée un rendez-vous de 10 minutes, à usage unique, avec un code de 6 caractères ;
+  - l'agent **génère sa propre paire X25519 sur la machine** et dépose sa clé publique ;
+  - le navigateur du propriétaire affiche l'empreinte de cette clé, que l'humain compare avec celle affichée par la machine ;
+  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé (`seal(agentPub, machineAuth, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
+  - un serveur qui substituerait sa propre clé ferait apparaître une empreinte différente de celle de l'écran de la machine. Deviner un code n'apporte rien d'autre que ce même risque : le dépôt de clé est limité en débit, et un code n'accepte qu'une seule machine.
 - Chaque terminal a une clé `K_t` générée par le navigateur **du propriétaire de la machine**.
   Le serveur stocke :
   - `keyForBoard = box(K_b, K_t, "eb:termkey:<boardId>:<termId>")` ;

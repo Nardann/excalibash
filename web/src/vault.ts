@@ -1,7 +1,7 @@
 // Per-user encrypted records the server cannot forge: pinned contact keys (TOFU) and
 // the public keys of the user's own machines.
 import { api, type RawMachine, type User } from "./api.ts";
-import { AAD, box, boxText, fingerprint, generateKeyPair, machineAuthKey, randomId, symKey, toB64, unbox, unboxJson, unboxText, boxJson, vaultKey, type KeyPair, type SymKey } from "./crypto.ts";
+import { AAD, box, boxText, fingerprint, fromB64, generateKeyPair, machineAuthKey, randomBytes, randomId, seal, symKey, toB64, unbox, unboxJson, unboxText, boxJson, vaultKey, type KeyPair, type SymKey } from "./crypto.ts";
 
 /** Pinned public keys of the people we shared with, by account id and by email. */
 type VaultData = { contacts: Record<string, string>; emails?: Record<string, string> };
@@ -84,3 +84,23 @@ export async function renameMachine(keys: KeyPair, id: string, name: string) {
   await api.patch(`/machines/${id}`, { encName: await boxText(await vaultKey(keys), name, machineNameAad(id)) });
 }
 
+
+/**
+ * Approves a machine paired with a short code, once the owner has checked its fingerprint: a
+ * fresh machine auth key is sealed to the key the agent generated on the machine itself.
+ */
+export async function approvePairing(keys: KeyPair, code: string, agentPubB64: string, name: string) {
+  const vk = await vaultKey(keys);
+  const id = randomId();
+  const pub = fromB64(agentPubB64);
+  const auth = randomBytes(32);
+  await api.post(`/machines/pairings/${encodeURIComponent(code)}/approve`, {
+    id,
+    agentPub: agentPubB64,
+    encName: await boxText(vk, name, machineNameAad(id)),
+    encPub: await box(vk, pub, AAD.machine(id)),
+    encAuth: await box(vk, auth, AAD.machineAuth(id)),
+    sealedAuth: await seal(pub, auth, `eb:pair:${code.toUpperCase().replace(/[^A-Z0-9]/g, "")}`),
+  });
+  return id;
+}

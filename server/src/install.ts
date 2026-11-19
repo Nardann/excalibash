@@ -66,7 +66,12 @@ UNIT
   systemctl --user daemon-reload
   systemctl --user enable --now excalibash-agent.service
   echo "✓ service systemd utilisateur installé (journalctl --user -u excalibash-agent -f)"
-  echo "  astuce : 'loginctl enable-linger $USER' pour qu'il tourne sans session ouverte"
+  # Without "linger", user services only start once someone logs in.
+  if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+    echo "  il démarre avec la machine, même sans connexion"
+  else
+    echo "  pour qu'il démarre sans connexion : sudo loginctl enable-linger $(id -un)"
+  fi
 else
   echo "✓ agent installé dans $BIN — connexion à $SERVER (Ctrl+C pour arrêter)"
   EXCALIBASH_TOKEN="$TOKEN" EXCALIBASH_KEY="$KEY" exec "$BIN" "$@"
