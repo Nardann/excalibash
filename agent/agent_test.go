@@ -375,3 +375,80 @@ func TestInputBoundToGen(t *testing.T) {
 	}
 	send(t, c, message{T: "close", ID: "t8"})
 }
+
+func TestWebTunnel(t *testing.T) {
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Path", r.URL.RequestURI())
+		fmt.Fprintf(w, "hello %s %s", r.Method, r.Header.Get("X-Test"))
+	}))
+	defer site.Close()
+
+	base, conns := fakeServer(t)
+	h := newHarness(t)
+	startAgent(t, base, h)
+	c := <-conns
+	recv(t, c) // hello
+
+	key := make([]byte, 32)
+	rand.Read(key)
+	spec, _ := json.Marshal(map[string]any{"k": b64.EncodeToString(key), "url": site.URL})
+	boxed, _ := box(machineAuthKey(h.priv), spec, "eb:web:w1")
+	send(t, c, message{T: "web.open", ID: "w1", Key: b64.EncodeToString(boxed)})
+
+	request := func(rid string, ts int64) message {
+		body, _ := json.Marshal(httpReq{M: "POST", P: "/a/b?x=1", H: map[string][]string{"X-Test": {"ok"}}, B: ""})
+		d, _ := box(key, body, fmt.Sprintf("eb:http-req:w1:%s:%d", rid, ts))
+		return message{T: "http", ID: "w1", Rid: rid, Ts: json.RawMessage(strconv.FormatInt(ts, 10)), D: b64.EncodeToString(d)}
+	}
+	first := request("r1", now())
+	send(t, c, first)
+	var res httpRes
+	for {
+		m := recv(t, c)
+		if m.T != "http.res" {
+			continue
+		}
+		d, _ := b64.DecodeString(m.D)
+		pt, err := unbox(key, d, "eb:http-res:w1:"+m.Rid)
+		if err != nil {
+			t.Fatalf("cannot decrypt response: %v", err)
+		}
+		json.Unmarshal(pt, &res)
+		break
+	}
+	body, _ := b64.DecodeString(res.B)
+	if res.S != 200 || string(body) != "hello POST ok" || res.H["X-Seen-Path"][0] != "/a/b?x=1" {
+		t.Fatalf("unexpected response %d %q %v", res.S, body, res.H)
+	}
+
+	// Replay, stale and forged-target frames get no answer at all.
+	send(t, c, first)
+	send(t, c, request("r2", now()-6*60*1000))
+	other := make([]byte, 32)
+	rand.Read(other)
+	forged, _ := json.Marshal(map[string]any{"k": b64.EncodeToString(other), "url": "http://127.0.0.1:1"})
+	fb, _ := box(other, forged, "eb:web:w1") // not under the machine auth key
+	send(t, c, message{T: "web.open", ID: "w1", Key: b64.EncodeToString(fb)})
+	send(t, c, request("r3", now()))
+	got := 0
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		_, data, err := c.Read(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		var m message
+		json.Unmarshal(data, &m)
+		if m.T == "http.res" {
+			got++
+			if m.Rid != "r3" {
+				t.Fatalf("unexpected answer to %s", m.Rid)
+			}
+		}
+	}
+	if got != 1 {
+		t.Fatalf("expected only r3 to be answered (forged key ignored), got %d answers", got)
+	}
+}

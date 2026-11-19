@@ -13,6 +13,7 @@ import {
   terminalResize,
   terminalRestart,
 } from "./terminals.ts";
+import { closeTunnel, createTunnel, listBoardTunnels, tunnelExists } from "./tunnels.ts";
 
 /** Encrypted element: only the merge metadata is readable by the server. */
 type Entry = { id: string; v: number; n: number; c: string };
@@ -86,6 +87,7 @@ class Room implements BoardRoom {
         elements: this.order.map((id) => this.elements.get(id)),
         files: this.files,
         terminals: listBoardTerminals(this.boardId),
+        webs: listBoardTunnels(this.boardId),
         peers: [...this.clients.values()].filter((c) => c !== client).map((c) => this.peer(c)),
       }),
     );
@@ -181,6 +183,27 @@ class Room implements BoardRoom {
         ws.send(JSON.stringify({ t: "term.created", reqId: msg.reqId, terminal }));
         break;
       }
+      case "web.create": {
+        if (!editor) return deny("Lecture seule");
+        const machine = getMachine(String(msg.machineId));
+        if (!machine || machine.owner_id !== client.user.id) return deny("On ne peut ouvrir des tunnels que vers ses propres machines");
+        if (!isClientId(msg.id) || tunnelExists(msg.id)) return deny("Identifiant de tunnel invalide");
+        if (!str(msg.keyForBoard) || !str(msg.keyForAgent) || !str(msg.encLabel)) return deny("Clés manquantes");
+        const web = createTunnel({
+          id: msg.id,
+          boardId: this.boardId,
+          machineId: machine.id,
+          createdBy: client.user.id,
+          keyForBoard: msg.keyForBoard,
+          keyForAgent: msg.keyForAgent,
+          encLabel: msg.encLabel,
+        });
+        ws.send(JSON.stringify({ t: "web.created", reqId: msg.reqId, web }));
+        break;
+      }
+      case "web.close":
+        if (editor) closeTunnel(this.boardId, String(msg.id));
+        break;
       case "term.sub": {
         const chunks = terminalReplay(this.boardId, String(msg.id));
         if (chunks) ws.send(JSON.stringify({ t: "term.replay", id: msg.id, chunks }));

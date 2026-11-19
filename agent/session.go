@@ -33,6 +33,7 @@ type manager struct {
 	// a terminal key that is not boxed under it cannot have been issued by them.
 	auth     []byte
 	sessions map[string]*session
+	web      *webHub
 	out      *outbox // nil while disconnected
 }
 
@@ -60,7 +61,8 @@ type sender struct {
 }
 
 func newManager(priv *ecdh.PrivateKey) *manager {
-	return &manager{auth: machineAuthKey(priv), sessions: map[string]*session{}}
+	auth := machineAuthKey(priv)
+	return &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth)}
 }
 
 // openKey decrypts a terminal key issued by the machine's owner.

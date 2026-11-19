@@ -1,6 +1,6 @@
-// Network-diagram nodes: an icon on the canvas that owns one or more shells. Each shell has its
-// own window element, moved independently; hiding a window keeps the shell running and the icon
-// in place. Everything is plain scene state (customData), so it is encrypted, synced and undoable.
+// Network-diagram nodes: an icon on the canvas that owns shells and web views. Each one has its
+// own window element, moved independently; hiding a window keeps the shell (or tunnel) alive and
+// the icon in place. Everything is plain scene state (customData): encrypted, synced, undoable.
 import { CaptureUpdateAction, convertToExcalidrawElements, newElementWith } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
@@ -8,25 +8,38 @@ import type { TileIcon } from "./personalLibrary.ts";
 
 export const LINK_BASE = "https://excalibash.local/";
 export const TERMINAL_LINK = `${LINK_BASE}terminal/`;
+const WEB_LINK = `${LINK_BASE}web/`;
 const NODE_LINK = `${LINK_BASE}node/`;
 export const TERM_W = 760;
 export const TERM_H = 440;
 export const NODE_SIZE = 110;
 const GAP = 40;
 
-/** Last place and size of a shell's window, so it reopens where it was. */
-export type ShellRef = { terminalId: string; x?: number; y?: number; w?: number; h?: number };
-export type NodeData = { node: true; title?: string | null; icon?: TileIcon | null; shells: ShellRef[] };
+/** Last place and size of a window, so it reopens where it was. */
+type Geometry = { x?: number; y?: number; w?: number; h?: number };
+export type ShellRef = Geometry & { terminalId: string };
+export type WebRef = Geometry & { webId: string };
+export type NodeData = { node: true; title?: string | null; icon?: TileIcon | null; shells: ShellRef[]; webs?: WebRef[] };
 
 type El = ExcalidrawElement;
 type Api = ExcalidrawImperativeAPI;
 
-export const nodeDataOf = (el: El | null | undefined): NodeData | undefined =>
-  (el?.customData as any)?.node ? (el!.customData as NodeData) : undefined;
+/** The two kinds of windows a node can own. */
+const KINDS = {
+  terminal: { field: "terminalId", list: "shells", link: TERMINAL_LINK, w: TERM_W, h: TERM_H },
+  web: { field: "webId", list: "webs", link: WEB_LINK, w: 900, h: 580 },
+} as const;
+type Kind = keyof typeof KINDS;
 
-/** The node a shell window belongs to (undefined for standalone, older terminals). */
+const cd = (el: El | null | undefined) => (el?.customData ?? {}) as Record<string, any>;
+
+export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => (cd(el).node ? (el!.customData as NodeData) : undefined);
+
+/** The node a window belongs to (undefined for standalone, older terminals). */
 export const windowNodeId = (el: El | null | undefined): string | undefined =>
-  (el?.customData as any)?.terminalId ? (el!.customData as any).nodeId : undefined;
+  cd(el).terminalId || cd(el).webId ? cd(el).nodeId : undefined;
+
+const kindOf = (el: El): Kind | undefined => (cd(el).webId ? "web" : cd(el).terminalId ? "terminal" : undefined);
 
 function embeddable(x: number, y: number, w: number, h: number, link: (id: string) => string, customData: Record<string, unknown>): El {
   const [base] = convertToExcalidrawElements([
@@ -38,9 +51,13 @@ function embeddable(x: number, y: number, w: number, h: number, link: (id: strin
 const all = (api: Api) => api.getSceneElementsIncludingDeleted();
 export const findEl = (api: Api, id: string) => all(api).find((e) => e.id === id);
 
+function openWindow(api: Api, kind: Kind, id: string) {
+  const f = KINDS[kind].field;
+  return api.getSceneElements().find((e) => cd(e)[f] === id && cd(e).nodeId);
+}
 /** The visible window of a shell, if it is open. */
-export const openWindowOf = (api: Api, terminalId: string) =>
-  api.getSceneElements().find((e) => (e.customData as any)?.terminalId === terminalId && (e.customData as any)?.nodeId);
+export const openWindowOf = (api: Api, terminalId: string) => openWindow(api, "terminal", terminalId);
+export const openWebWindowOf = (api: Api, webId: string) => openWindow(api, "web", webId);
 
 function commit(api: Api, changed: El[], added: El[] = [], appState?: object) {
   const byId = new Map(changed.map((e) => [e.id, e]));
@@ -69,25 +86,32 @@ export function createNode(api: Api, terminalId: string) {
   const zoom = st.zoom.value;
   const cx = -st.scrollX + st.width / 2 / zoom;
   const cy = -st.scrollY + st.height / 2 / zoom;
-  const width = NODE_SIZE + GAP + TERM_W;
-  const nx = cx - width / 2;
+  const nx = cx - (NODE_SIZE + GAP + TERM_W) / 2;
   const ny = cy - NODE_SIZE / 2;
-  const node = embeddable(nx, ny, NODE_SIZE, NODE_SIZE, (id) => NODE_LINK + id, { node: true, shells: [{ terminalId }] } satisfies NodeData);
+  const node = embeddable(nx, ny, NODE_SIZE, NODE_SIZE, (id) => NODE_LINK + id, { node: true, shells: [{ terminalId }], webs: [] } satisfies NodeData);
   const win = embeddable(nx + NODE_SIZE + GAP, cy - TERM_H / 2, TERM_W, TERM_H, () => TERMINAL_LINK + terminalId, { terminalId, nodeId: node.id });
   commit(api, [], [node, win]);
   activate(api, win.id);
 }
 
-export function addShell(api: Api, nodeId: string, terminalId: string) {
+function refsOf(data: NodeData, kind: Kind): (Geometry & Record<string, any>)[] {
+  return ((data as any)[KINDS[kind].list] as any[] | undefined) ?? [];
+}
+
+function add(api: Api, kind: Kind, nodeId: string, id: string) {
   const node = findEl(api, nodeId);
   const data = nodeDataOf(node);
   if (!node || !data) return;
-  commit(api, [newElementWith(node, { customData: { ...data, shells: [...data.shells, { terminalId }] } })]);
-  openShell(api, nodeId, terminalId);
+  const k = KINDS[kind];
+  commit(api, [newElementWith(node, { customData: { ...data, [k.list]: [...refsOf(data, kind), { [k.field]: id }] } })]);
+  open(api, kind, nodeId, id);
 }
+export const addShell = (api: Api, nodeId: string, terminalId: string) => add(api, "terminal", nodeId, terminalId);
+export const addWeb = (api: Api, nodeId: string, webId: string) => add(api, "web", nodeId, webId);
 
-export function openShell(api: Api, nodeId: string, terminalId: string, focus = true) {
-  const existing = openWindowOf(api, terminalId);
+function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
+  const k = KINDS[kind];
+  const existing = openWindow(api, kind, id);
   if (existing) {
     if (focus) activate(api, existing.id);
     return;
@@ -95,55 +119,61 @@ export function openShell(api: Api, nodeId: string, terminalId: string, focus = 
   const node = findEl(api, nodeId);
   const data = nodeDataOf(node);
   if (!node || !data) return;
-  const i = Math.max(0, data.shells.findIndex((s) => s.terminalId === terminalId));
-  const ref = data.shells[i] ?? { terminalId };
-  const geometry = {
-    x: ref.x ?? node.x + node.width + GAP + i * 28,
-    y: ref.y ?? node.y + i * 28,
-    width: ref.w ?? TERM_W,
-    height: ref.h ?? TERM_H,
-  };
+  const refs = refsOf(data, kind);
+  const i = Math.max(0, refs.findIndex((r) => r[k.field] === id));
+  const ref = refs[i] ?? {};
+  // Web views open below the node, shells to its right: their default spots don't overlap.
+  const geometry =
+    kind === "web"
+      ? { x: ref.x ?? node.x + i * 28, y: ref.y ?? node.y + node.height + GAP + i * 28, width: ref.w ?? k.w, height: ref.h ?? k.h }
+      : { x: ref.x ?? node.x + node.width + GAP + i * 28, y: ref.y ?? node.y + i * 28, width: ref.w ?? k.w, height: ref.h ?? k.h };
   // Reuse the hidden window when there is one: no pile of deleted elements.
-  const hidden = all(api).find((e) => e.isDeleted && (e.customData as any)?.terminalId === terminalId && (e.customData as any)?.nodeId === nodeId);
+  const hidden = all(api).find((e) => e.isDeleted && cd(e)[k.field] === id && cd(e).nodeId === nodeId);
   if (hidden) {
     commit(api, [newElementWith(hidden, { ...geometry, isDeleted: false })]);
     if (focus) activate(api, hidden.id);
   } else {
-    const win = embeddable(geometry.x, geometry.y, geometry.width, geometry.height, () => TERMINAL_LINK + terminalId, { terminalId, nodeId });
+    const win = embeddable(geometry.x, geometry.y, geometry.width, geometry.height, () => k.link + id, { [k.field]: id, nodeId });
     commit(api, [], [win]);
     if (focus) activate(api, win.id);
   }
 }
+export const openShell = (api: Api, nodeId: string, terminalId: string, focus = true) => open(api, "terminal", nodeId, terminalId, focus);
 
-/** Hides a shell window; the shell keeps running and the node remembers where it was. */
+/** Hides a window; the shell / tunnel keeps running and the node remembers where it was. */
 export function hideShell(api: Api, windowId: string) {
   const win = findEl(api, windowId);
   const nodeId = windowNodeId(win);
-  if (!win || !nodeId) return;
+  const kind = win && kindOf(win);
+  if (!win || !nodeId || !kind) return;
   const node = findEl(api, nodeId);
   const data = nodeDataOf(node);
   const changed: El[] = [newElementWith(win, { isDeleted: true })];
   if (node && data) {
-    const tid = (win.customData as any).terminalId as string;
-    const shells = data.shells.map((s) => (s.terminalId === tid ? { ...s, x: win.x, y: win.y, w: win.width, h: win.height } : s));
-    changed.push(newElementWith(node, { customData: { ...data, shells } }));
+    const k = KINDS[kind];
+    const id = cd(win)[k.field];
+    const refs = refsOf(data, kind).map((r) => (r[k.field] === id ? { ...r, x: win.x, y: win.y, w: win.width, h: win.height } : r));
+    changed.push(newElementWith(node, { customData: { ...data, [k.list]: refs } }));
   }
   commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }
 
-export function toggleShell(api: Api, nodeId: string, terminalId: string) {
-  const open = openWindowOf(api, terminalId);
-  if (open) hideShell(api, open.id);
-  else openShell(api, nodeId, terminalId);
+function toggle(api: Api, kind: Kind, nodeId: string, id: string) {
+  const w = openWindow(api, kind, id);
+  if (w) hideShell(api, w.id);
+  else open(api, kind, nodeId, id);
 }
+export const toggleShell = (api: Api, nodeId: string, terminalId: string) => toggle(api, "terminal", nodeId, terminalId);
+export const toggleWeb = (api: Api, nodeId: string, webId: string) => toggle(api, "web", nodeId, webId);
 
-/** Opens every shell of a node, or hides them all if any is open. */
+/** Opens every window of a node, or hides them all if any is open. */
 export function toggleAll(api: Api, nodeId: string) {
   const data = nodeDataOf(findEl(api, nodeId));
   if (!data) return;
-  const open = data.shells.map((s) => openWindowOf(api, s.terminalId)).filter(Boolean) as El[];
-  if (open.length) for (const w of open) hideShell(api, w.id);
-  else data.shells.forEach((s, i) => openShell(api, nodeId, s.terminalId, i === data.shells.length - 1));
+  const items = (["terminal", "web"] as Kind[]).flatMap((kind) => refsOf(data, kind).map((r) => ({ kind, id: r[KINDS[kind].field] as string })));
+  const open_ = items.map((it) => openWindow(api, it.kind, it.id)).filter(Boolean) as El[];
+  if (open_.length) for (const w of open_) hideShell(api, w.id);
+  else items.forEach((it, i) => open(api, it.kind, nodeId, it.id, i === items.length - 1));
 }
 
 export function setNodeLook(api: Api, nodeId: string, look: { title: string | null; icon: TileIcon | null }) {
@@ -167,4 +197,14 @@ export function deleteElements(api: Api, list: El[]) {
   if (!list.length) return;
   const byId = new Map(list.map((e) => [e.id, newElementWith(e, { isDeleted: true })]));
   api.updateScene({ elements: all(api).map((e) => byId.get(e.id) ?? e), captureUpdate: CaptureUpdateAction.NEVER });
+}
+
+/** Removes a web view from its node (its tunnel was closed). */
+export function removeWeb(api: Api, nodeId: string, webId: string) {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  const changed: El[] = [];
+  if (node && data) changed.push(newElementWith(node, { customData: { ...data, webs: (data.webs ?? []).filter((w) => w.webId !== webId) } }));
+  for (const e of all(api)) if (cd(e).webId === webId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
+  commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }

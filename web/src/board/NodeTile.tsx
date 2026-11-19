@@ -8,6 +8,7 @@ import { useIconUrl } from "./TerminalEmbed.tsx";
 export function NodeTile(p: {
   session: BoardSession;
   shells: string[];
+  webCount?: number;
   openCount: number;
   title?: string | null;
   icon?: TileIcon | null;
@@ -34,7 +35,14 @@ export function NodeTile(p: {
     wasActive.current = p.active;
   }, [p.active]);
 
-  const shellsText = `${p.shells.length} shell${p.shells.length > 1 ? "s" : ""}${p.openCount ? ` · ${p.openCount} ouvert${p.openCount > 1 ? "s" : ""}` : ""}`;
+  const webs = p.webCount ?? 0;
+  const shellsText = [
+    `${p.shells.length} shell${p.shells.length > 1 ? "s" : ""}`,
+    webs ? `${webs} site${webs > 1 ? "s" : ""}` : "",
+    p.openCount ? `${p.openCount} ouvert${p.openCount > 1 ? "s" : ""}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="term collapsed">
@@ -53,7 +61,7 @@ export function NodeTile(p: {
         )}
         <div className="tile-name">{label}</div>
         {!iconSrc && <div className="tile-status">{shellsText}</div>}
-        {p.shells.length > 1 && <span className="tile-count">{p.shells.length}</span>}
+        {p.shells.length + webs > 1 && <span className="tile-count">{p.shells.length + webs}</span>}
       </div>
     </div>
   );

@@ -15,6 +15,9 @@ import {
   unwrapKey,
   wrapKey,
   box,
+  boxJson,
+  toB64,
+  unboxJson,
   type KeyPair,
   type SymKey,
 } from "./crypto.ts";
@@ -223,6 +226,7 @@ type RotationSnapshot = {
   items: { id: string; kind: string; parentId: string | null; encName: string; keyWrap: string | null; epoch: number }[];
   boards: { id: string; elements: Entry[]; files: Record<string, string>; preview: string | null }[];
   terminals: { id: string; boardId: string; machineId: string; machineOwnerId: string | null; keyForBoard: string; encLabel: string }[];
+  webs?: { id: string; boardId: string; machineId: string; machineOwnerId: string | null; keyForBoard: string; encLabel: string }[];
   grants: { itemId: string; userId: string; role: Role; email: string; publicKey: string }[];
 };
 
@@ -307,9 +311,26 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
       });
     }
 
+    // Web tunnels on our machines too (their target is in the board-encrypted label).
+    const webs = [];
+    for (const w of snap.webs ?? []) {
+      const m = machines.get(w.machineId);
+      if (w.machineOwnerId !== ctx.user.id || !m) continue;
+      const target = await unboxJson<{ url: string; insecure: boolean; machine: string }>(oldKeys.get(w.boardId)!, w.encLabel, AAD.webLabel(w.boardId, w.id)).catch(() => null);
+      if (!target) continue;
+      const kw = await newSymKey();
+      const nk = newKeys.get(w.boardId)!;
+      webs.push({
+        id: w.id,
+        keyForBoard: await wrapKey(nk, kw, AAD.webKey(w.boardId, w.id)),
+        keyForAgent: await boxJson(m.auth, { k: toB64(kw.raw), url: target.url, insecure: target.insecure }, AAD.webAgent(w.id)),
+        encLabel: await boxJson(nk, target, AAD.webLabel(w.boardId, w.id)),
+      });
+    }
+
     onProgress?.("Envoi…");
     try {
-      await api.post(`/items/${rootId}/revoke`, { userId, snapshotAt: snap.snapshotAt, items, boards, grants, terminals });
+      await api.post(`/items/${rootId}/revoke`, { userId, snapshotAt: snap.snapshotAt, items, boards, grants, terminals, webs });
       return;
     } catch (e: any) {
       if (e?.status !== 409 || attempt === 2) throw e;

@@ -4,6 +4,7 @@ import { requireUser, getUserRow } from "../auth.ts";
 import { atLeast, getItem, isTrashed, roleOn, subtree, visibleItems, type ItemRow, type Role } from "../access.ts";
 import { activeTerminalCount, dropBoardTerminals, dropTerminals, rekeyTerminal, terminalsOfBoards } from "../terminals.ts";
 import { evictRoom, flushRoom } from "../rooms.ts";
+import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
 import { HttpError, blob, pid } from "../http.ts";
 
 export const itemsApi = Router();
@@ -175,7 +176,10 @@ itemsApi.post("/items/:id/move", (req, res) => {
 function purge(item: ItemRow) {
   const all = subtree(item.id);
   evictBoards(all, 4404, "supprimé", true);
-  for (const id of boardIdsOf(all)) dropBoardTerminals(id);
+  for (const id of boardIdsOf(all)) {
+    dropBoardTerminals(id);
+    dropBoardTunnels(id);
+  }
   db.prepare("DELETE FROM items WHERE id = ?").run(item.id);
 }
 
@@ -282,6 +286,14 @@ itemsApi.get("/items/:id/rotation", (req, res) => {
       keyForBoard: t.keyForBoard,
       encLabel: t.encLabel,
     })),
+    webs: tunnelsOfBoards(boards).map((t) => ({
+      id: t.id,
+      boardId: t.boardId,
+      machineId: t.machineId,
+      machineOwnerId: t.machineOwnerId,
+      keyForBoard: t.keyForBoard,
+      encLabel: t.encLabel,
+    })),
     grants: db
       .prepare(
         `SELECT g.item_id AS itemId, g.user_id AS userId, g.role, u.email, u.public_key AS publicKey
@@ -315,6 +327,7 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const boardsIn = Array.isArray(req.body.boards) ? req.body.boards : [];
   const grantsIn = Array.isArray(req.body.grants) ? req.body.grants : [];
   const termsIn = Array.isArray(req.body.terminals) ? req.body.terminals : [];
+  const websIn = Array.isArray(req.body.webs) ? req.body.webs : [];
 
   if (items.length !== allIds.size || !items.every((i: any) => allIds.has(i.id))) throw new HttpError(400, "Rotation incomplète (éléments)");
   if (boardsIn.length !== boards.size || !boardsIn.every((b: any) => boards.has(b.id))) throw new HttpError(400, "Rotation incomplète (tableaux)");
@@ -333,6 +346,12 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
     const cur = known.get(String(t.id));
     if (!cur || cur.machineOwnerId !== uid) throw new HttpError(400, "Terminal invalide dans la rotation");
     return { id: cur.id, keyForBoard: blob(t.keyForBoard), keyForAgent: blob(t.keyForAgent), encLabel: blob(t.encLabel) };
+  });
+  const knownWebs = new Map(tunnelsOfBoards(boards).map((t) => [t.id, t]));
+  const rekeyedWebs = websIn.map((t: any) => {
+    const cur = knownWebs.get(String(t.id));
+    if (!cur || cur.machineOwnerId !== uid) throw new HttpError(400, "Tunnel web invalide dans la rotation");
+    return { id: cur.id, keyForBoard: blob(t.keyForBoard), keyForAgent: blob(t.keyForAgent, 4000), encLabel: blob(t.encLabel) };
   });
 
   const now = Date.now();
@@ -360,5 +379,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const kept = new Set(rekeyed.map((t: { id: string }) => t.id));
   dropTerminals([...known.keys()].filter((id) => !kept.has(id)));
   for (const t of rekeyed) rekeyTerminal(t.id, t.keyForBoard, t.keyForAgent, t.encLabel);
+  const keptWebs = new Set(rekeyedWebs.map((t: { id: string }) => t.id));
+  dropTunnels([...knownWebs.keys()].filter((id) => !keptWebs.has(id)));
+  for (const t of rekeyedWebs) rekeyTunnel(t.id, t.keyForBoard, t.keyForAgent, t.encLabel);
   res.json({ ok: true });
 });

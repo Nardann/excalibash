@@ -2,6 +2,7 @@
 // third user / admin cannot read. Uses the real web crypto + library code against the real server/agent.
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { createServer } from "node:http";
 import WebSocket from "../server/node_modules/ws/index.js";
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
@@ -9,6 +10,7 @@ import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:6797";
+const PROXY = process.env.PROXY ?? "http://127.0.0.1:6799";
 const DB = process.env.DB!;
 const realFetch = globalThis.fetch;
 const jar = { current: "" };
@@ -219,6 +221,35 @@ sb.send(frame);
 const out2 = await termOutput(sb, ktBob, tid2, "CLEAR_42").catch(() => "");
 ok(!out2.includes("CLEAR_42"), "le rejeu d'une frappe par le serveur est ignoré par l'agent");
 
+// Web tunnel: HTTP to a service on the machine, end-to-end encrypted through the agent.
+const site = createServer((req, res) => res.end(`site:${req.method}:${req.url}:${req.headers["x-t"]}`));
+await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
+const sitePort = (site.address() as any).port;
+const wid = c.randomId();
+const kwA = await c.newSymKey();
+const siteUrl = `http://127.0.0.1:${sitePort}`;
+sa.send({
+  t: "web.create", reqId: "w1", id: wid, machineId: machine.id,
+  keyForBoard: await c.wrapKey(keyB, kwA, c.AAD.webKey(B, wid)),
+  keyForAgent: await c.boxJson(mAlice.auth, { k: c.toB64(kwA.raw), url: siteUrl, insecure: false }, c.AAD.webAgent(wid)),
+  encLabel: await c.boxJson(keyB, { url: siteUrl, insecure: false, machine: "laptop-alice" }, c.AAD.webLabel(B, wid)),
+});
+await sa.next((m) => m.t === "web.created" && m.reqId === "w1");
+const webForBob = await sb.next((m) => m.t === "web" && m.web.id === wid);
+const kwB = await c.unwrapKey(nB.get(B)!.key!, webForBob.web.keyForBoard, c.AAD.webKey(B, wid));
+await new Promise((r) => setTimeout(r, 300));
+async function tunnelGet(kw: c.SymKey, path: string) {
+  const rid = c.randomId();
+  const ts = Date.now();
+  const d = await c.box(kw, c.utf8(JSON.stringify({ m: "GET", p: path, h: { "x-t": ["ok"] }, b: "" })), `eb:http-req:${wid}:${rid}:${ts}`);
+  const r = await realFetch(`${PROXY}/eb-proxy/req/${wid}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rid, ts, d }) });
+  const j: any = await r.json();
+  const res = JSON.parse(c.fromUtf8(await c.unbox(kw, j.d, `eb:http-res:${wid}:${rid}`)));
+  return { status: res.s, body: c.fromUtf8(c.fromB64(res.b)) };
+}
+const got = await tunnelGet(kwB, "/hello?x=1");
+ok(got.status === 200 && got.body === "site:GET:/hello?x=1:ok", "Bob consulte le site de la machine d'Alice via le tunnel chiffré");
+
 // Third user / admin cannot read.
 const inv = await as(alice, () => api("POST", "/admin/invites", { note: "carol" }));
 const carol = await register("carol@test.local", "Carol", "carol-password-1", new URL(inv.body.url).searchParams.get("invite")!);
@@ -289,6 +320,11 @@ const init2 = await sa2.next((m) => m.t === "init");
 const t2 = init2.terminals.find((t: any) => t.id === tid2);
 const kt2 = await c.unwrapKey(newKeyB, t2.keyForBoard, c.AAD.termKey(B, tid2));
 ok(c.toB64(kt2.raw) !== c.toB64(kt.raw), "le terminal a reçu une nouvelle clé");
+const w2 = init2.webs.find((w: any) => w.id === wid);
+const kw2 = await c.unwrapKey(newKeyB, w2.keyForBoard, c.AAD.webKey(B, wid));
+ok(c.toB64(kw2.raw) !== c.toB64(kwA.raw), "le tunnel web a reçu une nouvelle clé");
+await new Promise((r) => setTimeout(r, 300));
+ok((await tunnelGet(kw2, "/after")).body === "site:GET:/after:ok", "le tunnel fonctionne avec la nouvelle clé");
 await subscribe(sa2, tid2);
 await sendInput(sa2, kt2, tid2, "alicetab", "echo ROTATED_$((7*7))\n");
 ok((await termOutput(sa2, kt2, tid2, "ROTATED_49")).includes("ROTATED_49"), "le terminal fonctionne avec la nouvelle clé");
@@ -297,8 +333,10 @@ ok((await termOutput(sa2, kt2, tid2, "ROTATED_49")).includes("ROTATED_49"), "le 
 await new Promise((r) => setTimeout(r, 2000));
 const dump = JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM items").all()) +
   JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM boards").all()) +
-  JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM machines").all());
-ok(!/Projet secret|Sous-dossier|confidentiel|TOP_SECRET|laptop-alice|CLEAR_42/.test(dump), "aucun nom ni contenu en clair dans la base");
+  JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM machines").all()) +
+  JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM tunnels").all());
+ok(!/Projet secret|Sous-dossier|confidentiel|TOP_SECRET|laptop-alice|CLEAR_42|127\.0\.0\.1/.test(dump), "aucun nom, contenu ni adresse en clair dans la base");
+site.close();
 
 // Unauthenticated hardening.
 const nullOrigin = await new Promise<number>((resolve) => {

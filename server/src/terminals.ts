@@ -121,7 +121,11 @@ function announce(t: Term): void {
   broadcastToBoard(t.boardId, { t: "term", terminal: info(t) });
 }
 
-function sendAgent(machineId: string, msg: object): boolean {
+/** Extra agent message handlers (web tunnels). */
+type AgentHooks = { hello: ((machineId: string) => void)[]; message: ((machineId: string, msg: any) => void)[] };
+export const agentHooks: AgentHooks = { hello: [], message: [] };
+
+export function sendAgent(machineId: string, msg: object): boolean {
   const a = agents.get(machineId);
   if (!a || a.ws.readyState !== WebSocket.OPEN) return false;
   a.ws.send(JSON.stringify(msg));
@@ -322,6 +326,10 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
     switch (msg.t) {
       case "hello":
         onHello(machineId, msg);
+        for (const fn of agentHooks.hello) fn(machineId);
+        break;
+      case "http.res":
+        for (const fn of agentHooks.message) fn(machineId, msg);
         break;
       case "opened":
         if (t && t.machineId === machineId && t.status !== "running") {

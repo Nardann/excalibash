@@ -77,3 +77,17 @@ export const api = {
   put: <T>(path: string, body: unknown) => request<T>("PUT", path, body),
   del: <T>(path: string) => request<T>("DELETE", path),
 };
+
+export type WebInfo = {
+  id: string;
+  boardId: string;
+  machineId: string;
+  machineOwnerId: string | null;
+  createdBy: string | null;
+  online: boolean;
+  keyForBoard: string;
+  encLabel: string;
+};
+
+/** What a web tunnel points at (sealed for the agent, and in the board-encrypted label). */
+export type WebTarget = { url: string; insecure: boolean; machine: string };

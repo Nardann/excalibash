@@ -3,6 +3,7 @@ import { db, getSetting, setSetting } from "../db.ts";
 import { requireAdmin, requireUser, sha256 } from "../auth.ts";
 import { subtree, type ItemRow } from "../access.ts";
 import { dropBoardTerminals, dropMachine } from "../terminals.ts";
+import { dropBoardTunnels, dropMachineTunnels } from "../tunnels.ts";
 import { evictRoom } from "../rooms.ts";
 import { HttpError, pid, publicUrl, str } from "../http.ts";
 import { newInviteToken } from "./auth.ts";
@@ -72,9 +73,13 @@ adminApi.delete("/users/:id", (req, res) => {
       if (i.kind !== "board") continue;
       evictRoom(i.id, 4404, "supprimé", true);
       dropBoardTerminals(i.id);
+      dropBoardTunnels(i.id);
     }
   }
-  for (const { id: m } of db.prepare("SELECT id FROM machines WHERE owner_id = ?").all(id) as { id: string }[]) dropMachine(m);
+  for (const { id: m } of db.prepare("SELECT id FROM machines WHERE owner_id = ?").all(id) as { id: string }[]) {
+    dropMachine(m);
+    dropMachineTunnels(m);
+  }
   db.prepare("DELETE FROM users WHERE id = ?").run(id);
   res.json({ ok: true });
 });

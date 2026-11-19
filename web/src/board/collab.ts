@@ -1,8 +1,8 @@
 import { CaptureUpdateAction, reconcileElements, restoreElements } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI, Collaborator, SocketId, BinaryFiles, AppState } from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import type { Entry, Role, TerminalInfo } from "../api.ts";
-import { AAD, box, boxText, newSymKey, randomId, unbox, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
+import type { Entry, Role, TerminalInfo, WebInfo, WebTarget } from "../api.ts";
+import { AAD, box, boxJson, boxText, newSymKey, randomId, toB64, unbox, unboxJson, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
 import { decryptEntry, decryptFile, decryptPointer, encryptEntry, encryptFile, encryptPointer } from "./boardCrypto.ts";
 
 export type Peer = { id: string; userId: string; name: string; color: string; role: Role };
@@ -63,6 +63,10 @@ export class BoardSession {
   private collaborators = new Map<SocketId, Collaborator>();
 
   terminals = new Map<string, TerminalInfo & { label: string }>();
+  /** Web tunnels of the board, with their decrypted target. */
+  webs = new Map<string, WebInfo & { target: WebTarget | null }>();
+  private webKeys = new Map<string, Promise<SymKey>>();
+  private pendingWebs = new Map<string, { resolve: (w: WebInfo) => void; reject: (e: Error) => void }>();
   private termKeys = new Map<string, Promise<SymKey>>();
   private termListeners = new Map<string, Set<TermListener>>();
   /** Last output sequence accepted per terminal, to drop replayed or reordered chunks. */
@@ -175,6 +179,7 @@ export class BoardSession {
         this.epoch = msg.epoch;
         this.peers = new Map(msg.peers.map((p: Peer) => [p.id, p]));
         await this.setTerminals(msg.terminals);
+        await this.setWebs(msg.webs ?? []);
         this.emit("peers", [...this.peers.values()]);
         this.emit("init", msg);
         if (this.api) await this.applyInit(msg);
@@ -216,6 +221,18 @@ export class BoardSession {
       }
       case "term":
         await this.setTerminals([msg.terminal], true);
+        break;
+      case "web":
+        await this.setWebs([msg.web], true);
+        break;
+      case "web.created":
+        await this.setWebs([msg.web], true);
+        this.pendingWebs.get(msg.reqId)?.resolve(msg.web);
+        this.pendingWebs.delete(msg.reqId);
+        break;
+      case "web.gone":
+        this.webs.delete(msg.id);
+        this.emit("terminals");
         break;
       case "term.gone":
         this.terminals.delete(msg.id);
@@ -259,6 +276,9 @@ export class BoardSession {
         if (msg.reqId && this.pendingCreates.has(msg.reqId)) {
           this.pendingCreates.get(msg.reqId)!.reject(new Error(msg.message));
           this.pendingCreates.delete(msg.reqId);
+        } else if (msg.reqId && this.pendingWebs.has(msg.reqId)) {
+          this.pendingWebs.get(msg.reqId)!.reject(new Error(msg.message));
+          this.pendingWebs.delete(msg.reqId);
         } else this.emit("error", msg.message);
         break;
     }
@@ -347,7 +367,11 @@ export class BoardSession {
         // A standalone terminal deleted here ends its shell (undo shows a "relaunch" button). A
         // node's window is only hidden; deleting the node itself ends all of its shells.
         if (tid && !data?.nodeId) this.closeTerminal(tid);
-        if (data?.node) for (const sh of data.shells ?? []) this.closeTerminal(sh.terminalId);
+        if (data?.webId && !data?.nodeId) this.closeWeb(data.webId);
+        if (data?.node) {
+          for (const sh of data.shells ?? []) this.closeTerminal(sh.terminalId);
+          for (const w of data.webs ?? []) this.closeWeb(w.webId);
+        }
       }
       changed.push(e);
     }
@@ -438,6 +462,58 @@ export class BoardSession {
         if (this.pendingCreates.delete(reqId)) reject(new Error("Le serveur ne répond pas"));
       }, 10_000);
     });
+  }
+
+  // ---- Web tunnels --------------------------------------------------------------
+
+  private async setWebs(list: WebInfo[], merge = false) {
+    if (!merge) this.webs.clear();
+    for (const w of list) {
+      const prev = this.webs.get(w.id);
+      if (!prev || prev.keyForBoard !== w.keyForBoard) this.webKeys.set(w.id, unwrapKey(this.key, w.keyForBoard, AAD.webKey(this.boardId, w.id)));
+      const target =
+        prev && prev.encLabel === w.encLabel ? prev.target : await unboxJson<WebTarget>(this.key, w.encLabel, AAD.webLabel(this.boardId, w.id)).catch(() => null);
+      this.webs.set(w.id, { ...w, target });
+    }
+    this.emit("terminals");
+  }
+
+  /** The tunnel key, for handing to the proxy origin's service worker. */
+  async webKey(id: string): Promise<string | null> {
+    const k = this.webKeys.get(id);
+    return k ? toB64((await k).raw) : null;
+  }
+
+  /**
+   * A tunnel to `target` on one of our machines. The target is sealed with the key under the
+   * owner-only machine auth key, so neither the server nor anyone else can redirect it.
+   */
+  async createWeb(machine: { id: string; name: string; auth: SymKey }, target: Omit<WebTarget, "machine">): Promise<WebInfo> {
+    const id = randomId();
+    const kw = await newSymKey();
+    const full: WebTarget = { ...target, machine: machine.name };
+    const frame = {
+      id,
+      machineId: machine.id,
+      keyForBoard: await wrapKey(this.key, kw, AAD.webKey(this.boardId, id)),
+      keyForAgent: await boxJson(machine.auth, { k: toB64(kw.raw), url: target.url, insecure: target.insecure }, AAD.webAgent(id)),
+      encLabel: await boxJson(this.key, full, AAD.webLabel(this.boardId, id)),
+    };
+    const reqId = randomId();
+    return new Promise((resolve, reject) => {
+      if (!this.send({ t: "web.create", reqId, ...frame })) {
+        reject(new Error("Pas connecté au serveur"));
+        return;
+      }
+      this.pendingWebs.set(reqId, { resolve, reject });
+      setTimeout(() => {
+        if (this.pendingWebs.delete(reqId)) reject(new Error("Le serveur ne répond pas"));
+      }, 10_000);
+    });
+  }
+
+  closeWeb(id: string) {
+    this.send({ t: "web.close", id });
   }
 
   subscribeTerminal(id: string, listener: TermListener): () => void {

@@ -115,6 +115,17 @@ CREATE TABLE IF NOT EXISTS terminals (
   enc_label TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tunnels (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  key_for_board TEXT NOT NULL,
+  key_for_agent TEXT NOT NULL,
+  enc_label TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tunnels_board ON tunnels(board_id);
 CREATE INDEX IF NOT EXISTS items_parent ON items(parent_id);
 CREATE INDEX IF NOT EXISTS items_owner ON items(owner_id);
 CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id);

@@ -128,6 +128,29 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   Ils ont la clé : c'est une restriction d'accès, pas une garantie cryptographique.
 - Il n'y a plus de machine intégrée : toute machine est un agent avec ses propres clés.
 
+## Tunnels web
+
+- Le navigateur du propriétaire de la machine génère `K_w`. Il dépose `box(machineAuth, {k: K_w, url, insecure}, "eb:web:<id>")`
+  pour l'agent : la **cible est scellée avec la clé**, et le serveur ne peut ni la lire ni la changer
+  (pas de redirection vers un autre port ou un autre hôte). Il dépose aussi `box(K_b, K_w, "eb:webkey:…")` pour les membres
+  du tableau, et la cible chiffrée dans le libellé.
+- Le site s'exécute sur une **origine séparée** (`PROXY_URL`, port 6768 par défaut). Il n'a donc aucun accès au
+  stockage d'Excalibash (clés de compte). La clé du tunnel n'est remise par `postMessage` qu'à l'iframe ou à l'onglet
+  ouvert par Excalibash pour ce tunnel. Elle n'apparaît jamais dans une URL.
+- Un Service Worker de cette origine chiffre chaque requête : `box(K_w, {m, p, h, b}, "eb:http-req:<id>:<rid>:<ts>")`.
+  L'agent rejette les horodatages à plus de 5 min et les `rid` déjà vus, déchiffre, appelle la cible et renvoie
+  `box(K_w, {s, h, b}, "eb:http-res:<id>:<rid>")`. Le serveur ne relaie que des chiffrés.
+- Le Service Worker tient un jar de cookies par tunnel. Les en-têtes `Set-Cookie` ne deviennent jamais de vrais cookies du navigateur.
+- Seul Excalibash peut intégrer un site tunnelisé en iframe (`frame-ancestors`). L'iframe ne peut pas faire naviguer
+  l'onglet Excalibash, et l'onglet plein écran perd `window.opener`.
+- La révocation renouvelle aussi les clés des tunnels qui passent par les machines du propriétaire.
+- Limites actuelles :
+  - pas de WebSocket ni de streaming dans le site tunnelisé (les réponses font au plus 48 Mo) ;
+  - les sites ouverts partagent l'origine proxy entre eux, mais pas avec Excalibash ;
+  - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port). Le cookie
+    de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
+    d'hôte distinct reste préférable.
+
 ## Risques résiduels (assumés, documentés)
 
 Voir [AUDIT.md](AUDIT.md) pour le détail.

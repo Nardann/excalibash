@@ -48,6 +48,7 @@ type message struct {
 	Arch     string          `json:"arch,omitempty"`
 	Version  string          `json:"version,omitempty"`
 	Sessions []string        `json:"sessions,omitempty"`
+	Rid      string          `json:"rid,omitempty"`
 }
 
 // outbox serialises writes to one connection through a single writer goroutine.
@@ -119,7 +120,7 @@ func connectOnce(ctx context.Context, cfg config, mgr *manager) error {
 		}
 		return err
 	}
-	c.SetReadLimit(4 << 20)
+	c.SetReadLimit(64 << 20) // web tunnel requests can carry uploads
 	defer c.CloseNow()
 
 	connCtx, cancel := context.WithCancel(ctx)
@@ -198,5 +199,11 @@ func handle(msg message, mgr *manager, out *outbox) {
 		mgr.kill(msg.ID)
 	case "ping":
 		out.send(message{T: "pong", Ts: msg.Ts})
+	case "web.open":
+		mgr.web.open(msg)
+	case "web.close":
+		mgr.web.close(msg.ID)
+	case "http":
+		go mgr.web.request(msg, out)
 	}
 }

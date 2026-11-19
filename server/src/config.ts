@@ -22,6 +22,12 @@ export const config = {
    */
   trustProxy: process.env.TRUST_PROXY ?? "loopback, linklocal, uniquelocal",
   sessionDays: Number(process.env.SESSION_DAYS ?? 30),
+  /**
+   * Web tunnels are served from a *separate origin* (another port, or PROXY_URL behind a reverse
+   * proxy), so the proxied sites can never touch Excalibash's own storage and keys.
+   */
+  proxyPort: Number(process.env.PROXY_PORT ?? 6768),
+  proxyUrl: process.env.PROXY_URL ?? "",
   /** Encrypted scrollback kept per terminal, replayed to new viewers. */
   scrollbackBytes: Number(process.env.SCROLLBACK_BYTES ?? 768 * 1024),
 };

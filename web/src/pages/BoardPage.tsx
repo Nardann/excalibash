@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Check, Cloud, CloudOff, Eye, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -14,25 +14,30 @@ import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
-import { Avatar, Menu, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
+import { Avatar, Menu, Modal, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
+import { WebEmbed } from "../board/WebEmbed.tsx";
 import {
   LINK_BASE,
   TERM_H,
   TERM_W,
   activate,
   addShell,
+  addWeb,
   createNode,
   deactivate,
   deleteElements,
   findEl,
   hideShell,
   nodeDataOf,
+  openWebWindowOf,
   openWindowOf,
   orphanWindows,
+  removeWeb,
   setNodeLook,
   toggleAll,
   toggleShell,
+  toggleWeb,
   windowNodeId,
 } from "../board/nodes.ts";
 
@@ -105,6 +110,7 @@ function Editor({ node }: { node: Node }) {
     top: number;
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
+    webs: { id: string; open: boolean }[];
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
@@ -170,6 +176,8 @@ function Editor({ node }: { node: Node }) {
   const [picker, setPicker] = useState<{ anchor: MenuAnchor; nodeId?: string } | null>(null);
   /** Shell list of a node with several shells, opened by clicking its icon. */
   const [nodeMenu, setNodeMenu] = useState<{ anchor: MenuAnchor; nodeId: string } | null>(null);
+  /** "New web view" form for a node. */
+  const [webForm, setWebForm] = useState<string | null>(null);
 
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string) => {
@@ -207,8 +215,10 @@ function Editor({ node }: { node: Node }) {
       const data = nodeDataOf(findEl(x, nodeId));
       if (!data) return;
       const anchor = anchorBelow(nodeId);
-      if (data.shells.length === 0) anchor && setPicker({ anchor, nodeId });
-      else if (data.shells.length === 1) toggleShell(x, nodeId, data.shells[0].terminalId);
+      const webs = data.webs ?? [];
+      if (data.shells.length + webs.length === 0) anchor && setPicker({ anchor, nodeId });
+      else if (data.shells.length === 1 && !webs.length) toggleShell(x, nodeId, data.shells[0].terminalId);
+      else if (webs.length === 1 && !data.shells.length) toggleWeb(x, nodeId, webs[0].webId);
       else anchor && setNodeMenu({ anchor, nodeId });
     },
     [editor, anchorBelow],
@@ -260,7 +270,7 @@ function Editor({ node }: { node: Node }) {
       if (appState.theme !== theme) toggle();
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
-      const tid = terminalIdOf(el);
+      const tid = terminalIdOf(el) ?? ((el?.customData as any)?.webId as string | undefined);
       const nd = nodeDataOf(el);
       setTerminalSelected(!!tid || !!nd);
       const active = appState.activeEmbeddable?.element.id === el?.id && appState.activeEmbeddable?.state === "active";
@@ -274,6 +284,7 @@ function Editor({ node }: { node: Node }) {
               top: Math.round((el.y + appState.scrollY) * appState.zoom.value),
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
+              webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
@@ -332,7 +343,7 @@ function Editor({ node }: { node: Node }) {
         .reverse()
         .find(
           (el) =>
-            terminalIdOf(el) &&
+            (terminalIdOf(el) || (el.customData as any)?.webId) &&
             !(el.customData as TileData).collapsed &&
             sx >= el.x &&
             sx <= el.x + el.width &&
@@ -360,11 +371,34 @@ function Editor({ node }: { node: Node }) {
           <NodeTile
             session={session}
             shells={nd.shells.map((s) => s.terminalId)}
-            openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length : 0}
+            webCount={(nd.webs ?? []).length}
+            openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length + (nd.webs ?? []).filter((w) => openWebWindowOf(x, w.webId)).length : 0}
             title={nd.title}
             icon={nd.icon}
             active={active}
             onActivate={() => onNodeActivateRef.current(element.id)}
+          />
+        );
+      }
+      const webId = (element.customData as any)?.webId as string | undefined;
+      if (webId) {
+        const nid = windowNodeId(element);
+        const owner = nodeDataOf(x && nid ? findEl(x, nid) : undefined);
+        return (
+          <WebEmbed
+            session={session}
+            webId={webId}
+            active={active}
+            title={owner?.title?.split("\n")[0] ?? null}
+            onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+            onRemove={
+              editor
+                ? () => {
+                    session.closeWeb(webId);
+                    if (nid) removeWeb(excalidrawRef.current!, nid, webId);
+                  }
+                : undefined
+            }
           />
         );
       }
@@ -465,7 +499,7 @@ function Editor({ node }: { node: Node }) {
           renderEmbeddable={renderEmbeddable}
           validateEmbeddable={validateEmbeddable}
           onLinkOpen={(element, event) => {
-            if (terminalIdOf(element) || nodeDataOf(element)) event.preventDefault();
+            if (element.link?.startsWith(LINK_BASE)) event.preventDefault();
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
@@ -490,8 +524,26 @@ function Editor({ node }: { node: Node }) {
                     </button>
                   );
                 })}
+                {selTerm.webs.map((w) => {
+                  const info = session.webs.get(w.id);
+                  return (
+                    <button
+                      key={w.id}
+                      className="chip"
+                      aria-pressed={w.open}
+                      title={`${w.open ? "Masquer" : "Ouvrir"} ${info?.target?.url ?? "le site"}`}
+                      onClick={() => toggleWeb(excalidrawRef.current!, selTerm.id, w.id)}
+                    >
+                      <Globe size={13} />
+                      <span className="lbl">{info?.target?.url.replace(/^https?:\/\//, "") ?? "site"}</span>
+                    </button>
+                  );
+                })}
                 <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
                   <Plus size={14} />
+                </button>
+                <button title="Ouvrir un site web de la machine (tunnel chiffré)" onClick={() => setWebForm(selTerm.id)}>
+                  <Globe size={14} />
                 </button>
                 <span className="sep" />
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
@@ -575,6 +627,26 @@ function Editor({ node }: { node: Node }) {
           onCustomize={() => {
             setCustomizing(nodeMenu.nodeId);
             setNodeMenu(null);
+          }}
+          onNewWeb={() => {
+            setWebForm(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+        />
+      )}
+      {webForm && (
+        <WebForm
+          onClose={() => setWebForm(null)}
+          onCreate={async (machine, target) => {
+            const x = excalidrawRef.current;
+            const nodeId = webForm;
+            setWebForm(null);
+            try {
+              const web = await session.createWeb(machine, target);
+              if (x) addWeb(x, nodeId, web.id);
+            } catch (e) {
+              toast.error(e);
+            }
           }}
         />
       )}
@@ -691,11 +763,12 @@ function NodeMenu(p: {
   onClose: () => void;
   onNewShell: () => void;
   onCustomize: () => void;
+  onNewWeb: () => void;
 }) {
   const api = p.api;
   const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
   if (!api || !data) return null;
-  const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId));
+  const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId)) || (data.webs ?? []).some((w) => openWebWindowOf(api, w.webId));
   return (
     <Menu anchor={p.anchor} onClose={p.onClose}>
       <div className="menu-label">{data.title?.split("\n")[0] || "Shells"}</div>
@@ -719,6 +792,24 @@ function NodeMenu(p: {
           </button>
         );
       })}
+      {(data.webs ?? []).map((w) => {
+        const info = p.session.webs.get(w.webId);
+        const open = !!openWebWindowOf(api, w.webId);
+        return (
+          <button
+            key={w.webId}
+            className={`menu-item ${open ? "selected" : ""}`}
+            onClick={() => {
+              p.onClose();
+              toggleWeb(api, p.nodeId, w.webId);
+            }}
+          >
+            <Globe size={16} />
+            <span style={{ flex: 1 }}>{info?.target?.url ?? "Site web"}</span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
+          </button>
+        );
+      })}
       <div className="menu-sep" />
       <button
         className="menu-item"
@@ -732,9 +823,110 @@ function NodeMenu(p: {
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
+      <button className="menu-item" onClick={p.onNewWeb}>
+        <Globe size={16} /> Nouveau site web…
+      </button>
       <button className="menu-item" onClick={p.onCustomize}>
         <Palette size={16} /> Icône et libellé…
       </button>
     </Menu>
+  );
+}
+
+/** Target of a new web view: a service reachable from the chosen machine (itself or its LAN). */
+function WebForm({ onClose, onCreate }: { onClose: () => void; onCreate: (m: Machine, target: { url: string; insecure: boolean }) => void }) {
+  const keys = useKeys();
+  const [machines, setMachines] = useState<Machine[] | null>(null);
+  const [machineId, setMachineId] = useState(() => localStorage.getItem(LAST_MACHINE) ?? "");
+  const [scheme, setScheme] = useState("http");
+  const [host, setHost] = useState("127.0.0.1");
+  const [port, setPort] = useState("80");
+  const [path, setPath] = useState("/");
+  const [insecure, setInsecure] = useState(true);
+  useEffect(() => {
+    listMachines(keys)
+      .then((ms) => {
+        setMachines(ms);
+        if (!ms.some((m) => m.id === machineId) && ms[0]) setMachineId(ms[0].id);
+      })
+      .catch(toast.error);
+  }, [keys]);
+  const machine = machines?.find((m) => m.id === machineId);
+  const cleanHost = host.trim().replace(/^\[|\]$/g, "");
+  const portNum = Number(port);
+  const valid = !!machine && /^[A-Za-z0-9._:-]+$/.test(cleanHost) && Number.isInteger(portNum) && portNum > 0 && portNum < 65536;
+  const url = `${scheme}://${cleanHost.includes(":") ? `[${cleanHost}]` : cleanHost}:${port}${path.startsWith("/") ? path : `/${path}`}`;
+  return (
+    <Modal onClose={onClose} width={560}>
+      <h2 className="display">Ouvrir un site de la machine</h2>
+      <p>
+        Le site est joint <b>depuis la machine</b> (son propre port, ou un autre appareil de son réseau). Tout le trafic est chiffré de bout en bout entre ton
+        navigateur et l'agent : le serveur Excalibash ne voit rien.
+      </p>
+      <form
+        style={{ display: "grid", gap: 12 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid) onCreate(machine!, { url, insecure: scheme === "https" && insecure });
+        }}
+      >
+        <label className="field">
+          Machine (une des tiennes)
+          <select className="select" value={machineId} onChange={(e) => setMachineId(e.target.value)} style={{ width: "100%" }}>
+            {machines?.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+                {m.online ? "" : " (hors ligne)"}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="web-form">
+          <label className="field">
+            Protocole
+            <select
+              className="select"
+              value={scheme}
+              onChange={(e) => {
+                setScheme(e.target.value);
+                if (port === "80" && e.target.value === "https") setPort("443");
+                if (port === "443" && e.target.value === "http") setPort("80");
+              }}
+            >
+              <option value="http">http</option>
+              <option value="https">https</option>
+            </select>
+          </label>
+          <label className="field">
+            Hôte (vu depuis la machine)
+            <input className="input" value={host} onChange={(e) => setHost(e.target.value)} placeholder="127.0.0.1" />
+          </label>
+          <label className="field">
+            Port
+            <input className="input" value={port} inputMode="numeric" onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
+          </label>
+        </div>
+        <label className="field">
+          Chemin
+          <input className="input" value={path} onChange={(e) => setPath(e.target.value)} />
+        </label>
+        {scheme === "https" && (
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600 }}>
+            <input type="checkbox" checked={insecure} onChange={(e) => setInsecure(e.target.checked)} /> Accepter un certificat auto-signé (Proxmox, routeurs…)
+          </label>
+        )}
+        <div className="codebox" style={{ paddingRight: 14 }}>
+          {url}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose}>
+            Annuler
+          </button>
+          <button className="btn btn-primary" disabled={!valid}>
+            <Globe size={16} /> Ouvrir
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

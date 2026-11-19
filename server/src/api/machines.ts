@@ -4,6 +4,7 @@ import { db, isClientId } from "../db.ts";
 import { requireUser, sha256 } from "../auth.ts";
 import { getMachine, type MachineRow } from "../access.ts";
 import { disconnectMachine, dropMachine, isMachineOnline } from "../terminals.ts";
+import { dropMachineTunnels } from "../tunnels.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 
 export const machinesApi = Router();
@@ -72,6 +73,7 @@ machinesApi.post("/:id/token", (req, res) => {
 machinesApi.delete("/:id", (req, res) => {
   const m = own(req);
   dropMachine(m.id);
+  dropMachineTunnels(m.id);
   db.prepare("DELETE FROM machines WHERE id = ?").run(m.id);
   res.json({ ok: true });
 });

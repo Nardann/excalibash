@@ -44,7 +44,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/data
 
 USER excalibash
-EXPOSE 6767
+EXPOSE 6767 6768
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:6767/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--", "node", "--disable-warning=ExperimentalWarning", "/app/server/src/index.ts"]

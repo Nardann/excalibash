@@ -14,6 +14,7 @@ import { getItem, isTrashed, roleOn } from "./access.ts";
 import { joinBoard, flushAllRooms } from "./rooms.ts";
 import { authenticateAgent, handleAgent } from "./terminals.ts";
 import { installScript } from "./install.ts";
+import { proxyUrl, startProxy } from "./proxy.ts";
 
 const CSP = [
   "default-src 'self'",
@@ -25,8 +26,8 @@ const CSP = [
   // Installing a library from libraries.excalidraw.com fetches it from there (explicit user action).
   "connect-src 'self' https://libraries.excalidraw.com",
   "worker-src 'self' blob:",
-  // Excalidraw's own embeds (YouTube, Figma…) are third-party iframes.
-  "frame-src 'self' https:",
+  // Excalidraw's own embeds (YouTube, Figma…) are third-party iframes; web tunnels use the proxy origin.
+  "frame-src 'self' https: __PROXY__",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",
@@ -36,9 +37,9 @@ const CSP = [
 const app = express();
 app.set("trust proxy", config.trustProxy);
 app.disable("x-powered-by");
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.set({
-    "Content-Security-Policy": CSP,
+    "Content-Security-Policy": CSP.replace("__PROXY__", new URL(proxyUrl(req)).origin),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
@@ -50,6 +51,9 @@ app.use((_req, res, next) => {
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
+});
+app.get("/api/config", (req, res) => {
+  res.json({ proxyUrl: proxyUrl(req) });
 });
 // Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
 const small = express.json({ limit: "256kb" });
@@ -105,7 +109,8 @@ if (existsSync(config.webDir)) {
 
 const server = createServer(app);
 const boardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
-const agentWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+// Web tunnel responses (up to ~48 MB of body, base64) travel on the agent socket.
+const agentWss = new WebSocketServer({ noServer: true, maxPayload: 72 * 1024 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://x");
@@ -159,3 +164,4 @@ setInterval(pruneSessions, 3600_000).unref();
 server.listen(config.port, config.host, () => {
   console.log(`Excalibash sur http://${config.host}:${config.port}`);
 });
+startProxy();

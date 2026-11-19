@@ -11,6 +11,8 @@ export async function renderPreview(elements: readonly any[], files: Record<stri
     .filter((e) => !e.isDeleted)
     .flatMap((e): any[] => {
       if (e.customData?.node) return nodePreview(e);
+      if (e.customData?.webId)
+        return [{ ...e, type: "rectangle", link: null, backgroundColor: "#ffffff", fillStyle: "solid", strokeColor: "#1e293b", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       if (e.customData?.terminalId)
         return [{ ...e, type: "rectangle", link: null, backgroundColor: "#0b1020", fillStyle: "solid", strokeColor: "#1e293b", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       return [e];
