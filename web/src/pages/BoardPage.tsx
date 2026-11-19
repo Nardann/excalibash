@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, convertToExcalidrawElements, newElemen
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Check, Cloud, CloudOff, Eye, Loader2, Lock, Moon, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Check, Cloud, CloudOff, Eye, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -13,7 +13,7 @@ import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../
 import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
-import type { TilePatch } from "../board/TileCustomizer.tsx";
+import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, toast, useTheme } from "../components/ui.tsx";
 
 const TERMINAL_LINK = "https://excalibash.local/terminal/";
@@ -79,6 +79,11 @@ function Editor({ node }: { node: Node }) {
   const [termMenu, setTermMenu] = useState<HTMLElement | null>(null);
   const [sharing, setSharing] = useState(false);
   const [terminalSelected, setTerminalSelected] = useState(false);
+  /** The single selected (not active) terminal: gets a floating toolbar so it can be reduced without typing in it. */
+  const [selTerm, setSelTerm] = useState<{ id: string; tid: string; left: number; top: number; collapsed: boolean } | null>(null);
+  const selTermRef = useRef(selTerm);
+  selTermRef.current = selTerm;
+  const [customizing, setCustomizing] = useState<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
   const previewTimer = useRef<number | undefined>(undefined);
   const editor = node.role !== "viewer";
@@ -190,12 +195,39 @@ function Editor({ node }: { node: Node }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [addTerminal, editor, keys]);
 
+  // Alt+R: reduce / open the selected terminal without activating it.
+  useEffect(() => {
+    if (!editor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.code !== "KeyR" || e.ctrlKey || e.metaKey || !selTermRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      updateTerminalRef.current?.(selTermRef.current.id, null, true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [editor]);
+
   const onChange = useCallback(
     (elements: readonly OrderedExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
       session.handleChange(elements, files);
       if (appState.theme !== theme) toggle();
       const selected = Object.keys(appState.selectedElementIds);
-      setTerminalSelected(selected.length === 1 && !!terminalIdOf(elements.find((e) => e.id === selected[0])));
+      const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
+      const tid = terminalIdOf(el);
+      setTerminalSelected(!!tid);
+      const active = appState.activeEmbeddable?.element.id === el?.id && appState.activeEmbeddable?.state === "active";
+      const next =
+        el && tid && !el.isDeleted && !active && !appState.isResizing && !appState.isRotating
+          ? {
+              id: el.id,
+              tid,
+              left: Math.round((el.x + el.width + appState.scrollX) * appState.zoom.value),
+              top: Math.round((el.y + appState.scrollY) * appState.zoom.value),
+              collapsed: !!(el.customData as TileData | undefined)?.collapsed,
+            }
+          : null;
+      setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
     },
     [session, theme, toggle],
   );
@@ -241,6 +273,9 @@ function Editor({ node }: { node: Node }) {
       if (current) x.updateScene({ appState: { activeEmbeddable: { element: current, state: "active" } } as any, captureUpdate: CaptureUpdateAction.NEVER });
     }, 60);
   }, []);
+
+  const updateTerminalRef = useRef(updateTerminal);
+  updateTerminalRef.current = updateTerminal;
 
   const renderEmbeddable = useCallback(
     (element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => {
@@ -331,6 +366,17 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        {selTerm && editor && (
+          <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
+            <button onClick={() => updateTerminal(selTerm.id, null, true)} title={`${selTerm.collapsed ? "Ouvrir le terminal" : "Réduire en tuile"} (Alt+R)`}>
+              {selTerm.collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+              {selTerm.collapsed ? "Ouvrir" : "Réduire"}
+            </button>
+            <button onClick={() => setCustomizing(selTerm.id)} title="Icône et libellé de la tuile">
+              <Palette size={14} />
+            </button>
+          </div>
+        )}
         {conn === "connecting" && <div className="board-overlay">Connexion et déchiffrement…</div>}
         {closed && (
           <div className="board-overlay">
@@ -346,6 +392,21 @@ function Editor({ node }: { node: Node }) {
         )}
       </div>
 
+      {customizing &&
+        (() => {
+          const el = excalidrawRef.current?.getSceneElements().find((e) => e.id === customizing);
+          const data = (el?.customData ?? {}) as TileData;
+          const label = (data.terminalId && session.terminals.get(data.terminalId)?.label) || "Terminal";
+          return (
+            <TileCustomizer
+              machineLabel={label}
+              title={data.title ?? null}
+              icon={data.icon ?? null}
+              onSave={(patch, collapse) => updateTerminal(customizing, patch, collapse && !data.collapsed)}
+              onClose={() => setCustomizing(null)}
+            />
+          );
+        })()}
       {termMenu && <MachinePicker anchor={termMenu} onClose={() => setTermMenu(null)} onPick={addTerminal} />}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>

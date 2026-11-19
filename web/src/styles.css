@@ -1445,3 +1445,35 @@ html.dark .term-tile.custom {
 .term-tile.custom .tile-expand {
   display: none;
 }
+
+/* Floating actions over a selected terminal (works without activating it). */
+.term-float {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transform: translate(-100%, calc(-100% - 10px));
+  animation: pop 0.12s ease-out;
+}
+.term-float button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.term-float button:hover {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
