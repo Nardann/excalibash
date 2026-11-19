@@ -148,6 +148,17 @@ export async function vaultKey(kp: KeyPair): Promise<SymKey> {
   return symKey(await hkdf(await dh(kp.priv, kp.pub), "excalibash/vault"));
 }
 
+/** Key the owner uses to issue terminal keys to a machine; the agent derives it from its private key. */
+export async function machineAuthKey(rawPriv: Uint8Array): Promise<SymKey> {
+  return symKey(await hkdf(rawPriv, "excalibash/machine-auth"));
+}
+
+/** Public key of a private key we can briefly export (pkcs8), so we never trust one supplied by the server. */
+export async function publicKeyOf(pkcs8: Uint8Array): Promise<Bytes> {
+  const k = await subtle.importKey("pkcs8", pkcs8 as Bytes, X25519, true, ["deriveBits"]);
+  return fromB64((await subtle.exportKey("jwk", k)).x!);
+}
+
 export async function fingerprint(pub: Uint8Array): Promise<string> {
   const h = new Uint8Array(await subtle.digest("SHA-256", pub as Bytes)).subarray(0, 20);
   const hex = [...h].map((x) => x.toString(16).padStart(2, "0")).join("").toUpperCase();
@@ -223,7 +234,9 @@ export const AAD = {
   termLabel: (boardId: string, termId: string) => `eb:termlabel:${boardId}:${termId}`,
   termAgent: (termId: string) => `eb:term:${termId}`,
   termOut: (termId: string, gen: string, seq: number) => `eb:term-out:${termId}:${gen}:${seq}`,
-  termIn: (termId: string, s: string, k: number, ts: number) => `eb:term-in:${termId}:${s}:${k}:${ts}`,
+  termIn: (termId: string, gen: string, s: string, k: number, ts: number) => `eb:term-in:${termId}:${gen}:${s}:${k}:${ts}`,
   machine: (machineId: string) => `eb:machine:${machineId}`,
+  machineName: (machineId: string) => `eb:machine:${machineId}:name`,
+  machineAuth: (machineId: string) => `eb:machine-auth:${machineId}`,
   vault: (userId: string) => `eb:vault:${userId}`,
 };

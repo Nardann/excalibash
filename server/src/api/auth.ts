@@ -16,6 +16,7 @@ import {
   toUser,
   userCount,
   verifySecret,
+  burnVerify,
 } from "../auth.ts";
 import { HttpError, blob, str } from "../http.ts";
 
@@ -85,7 +86,7 @@ authApi.post("/register", (req, res) => {
     Date.now(),
   );
   if (invite) db.prepare("UPDATE invites SET used_by = ? WHERE token_hash = ?").run(b.id, invite.token_hash);
-  createSession(res, b.id);
+  createSession(req, res, b.id);
   res.json({ user: toUser(getUserRow(b.id)!) });
 });
 
@@ -94,8 +95,12 @@ authApi.post("/login", (req, res) => {
   limit(`login:${req.ip}`, 20);
   limit(`login:${email.toLowerCase()}`, 8);
   const row = findUserByEmail(email);
-  if (!row || !verifySecret(String(req.body.authKey ?? ""), row.auth_hash)) throw new HttpError(401, "Email ou mot de passe incorrect");
-  createSession(res, row.id);
+  const authKey = String(req.body.authKey ?? "");
+  if (!row || !verifySecret(authKey, row.auth_hash)) {
+    if (!row) burnVerify(authKey);
+    throw new HttpError(401, "Email ou mot de passe incorrect");
+  }
+  createSession(req, res, row.id);
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: row.enc_private_key } });
 });
 
@@ -104,7 +109,11 @@ authApi.post("/recover", (req, res) => {
   const email = str(req.body.email);
   limit(`recover:${req.ip}`, 5);
   const row = findUserByEmail(email);
-  if (!row || !verifySecret(String(req.body.recoveryAuth ?? ""), row.recovery_auth_hash)) throw new HttpError(401, "Email ou clé de récupération incorrecte");
+  const proof = String(req.body.recoveryAuth ?? "");
+  if (!row || !verifySecret(proof, row.recovery_auth_hash)) {
+    if (!row) burnVerify(proof);
+    throw new HttpError(401, "Email ou clé de récupération incorrecte");
+  }
   res.json({ userId: row.id, publicKey: row.public_key, recoveryEncPrivateKey: row.recovery_enc_private_key });
 });
 
@@ -113,7 +122,11 @@ authApi.post("/recover/finish", (req, res) => {
   const email = str(req.body.email);
   limit(`recover:${req.ip}`, 5);
   const row = findUserByEmail(email);
-  if (!row || !verifySecret(String(req.body.recoveryAuth ?? ""), row.recovery_auth_hash)) throw new HttpError(401, "Email ou clé de récupération incorrecte");
+  const proof = String(req.body.recoveryAuth ?? "");
+  if (!row || !verifySecret(proof, row.recovery_auth_hash)) {
+    if (!row) burnVerify(proof);
+    throw new HttpError(401, "Email ou clé de récupération incorrecte");
+  }
   db.prepare("UPDATE users SET auth_hash = ?, kdf_salt = ?, enc_private_key = ? WHERE id = ?").run(
     hashSecret(blob(req.body.authKey, 100)),
     blob(req.body.salt, 64),
@@ -121,7 +134,7 @@ authApi.post("/recover/finish", (req, res) => {
     row.id,
   );
   db.prepare("DELETE FROM sessions WHERE user_id = ?").run(row.id);
-  createSession(res, row.id);
+  createSession(req, res, row.id);
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: blob(req.body.encPrivateKey, 400) } });
 });
 

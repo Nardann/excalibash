@@ -14,6 +14,7 @@ function dto(m: MachineRow) {
     id: m.id,
     encName: m.enc_name,
     encPub: m.enc_pub,
+    encAuth: m.enc_auth,
     hostname: m.hostname,
     os: m.os,
     arch: m.arch,
@@ -42,11 +43,12 @@ machinesApi.get("/", (req, res) => {
 machinesApi.post("/", (req, res) => {
   if (!isClientId(req.body.id) || getMachine(req.body.id)) throw new HttpError(400, "Identifiant invalide");
   const token = newToken();
-  db.prepare("INSERT INTO machines (id, owner_id, enc_name, enc_pub, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT INTO machines (id, owner_id, enc_name, enc_pub, enc_auth, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
     req.body.id,
     req.user!.id,
     blob(req.body.encName, 1000),
     blob(req.body.encPub, 300),
+    blob(req.body.encAuth, 300),
     sha256(token),
     Date.now(),
   );

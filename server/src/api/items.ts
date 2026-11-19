@@ -272,7 +272,7 @@ itemsApi.get("/items/:id/rotation", (req, res) => {
     })),
     grants: db
       .prepare(
-        `SELECT g.item_id AS itemId, g.user_id AS userId, g.role, u.public_key AS publicKey
+        `SELECT g.item_id AS itemId, g.user_id AS userId, g.role, u.email, u.public_key AS publicKey
          FROM grants g JOIN users u ON u.id = g.user_id WHERE g.item_id IN (${marks})`,
       )
       .all(...ids),
@@ -291,6 +291,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   if (revoked === uid) throw new HttpError(400, "Impossible de se retirer soi-même");
   if (!db.prepare("SELECT 1 FROM grants WHERE item_id = ? AND user_id = ?").get(item.id, revoked)) throw new HttpError(404, "Cette personne n'a pas de partage ici");
 
+  // Persist in-flight edits first so they count as changes (instead of being discarded below).
+  for (const b of boardIdsOf(subtree(item.id))) flushRoom(b);
   const all = subtree(item.id);
   const allIds = new Set(all.map((i) => i.id));
   const boards = boardIdsOf(all);

@@ -14,7 +14,7 @@ import {
   unsealKey,
   unwrapKey,
   wrapKey,
-  seal,
+  box,
   type KeyPair,
   type SymKey,
 } from "./crypto.ts";
@@ -203,10 +203,17 @@ export async function fetchPreview(key: SymKey, boardId: string): Promise<string
 
 export type Member = { userId: string; role: Role; name: string; email: string; publicKey: string; color: string };
 
-export async function shareItem(ctx: Ctx, id: string, target: { id: string; publicKey: string }, role: Role) {
+/**
+ * Seals the item key for someone. A key that differs from the one pinned for that person
+ * (or that email) is refused unless the user explicitly verified the new fingerprint.
+ */
+export async function shareItem(ctx: Ctx, id: string, target: { id: string; email: string; publicKey: string }, role: Role, verifiedChange = false) {
+  if (!verifiedChange && (await checkContact(ctx.user, ctx.keys, target.id, target.email, target.publicKey)) === "changed") {
+    throw new Error(`La clé de ${target.email} a changé depuis votre dernier partage : vérifie son empreinte avant de continuer.`);
+  }
   const wrappedKey = await sealKey(fromB64(target.publicKey), keyOf(ctx, id), AAD.grant(id, target.id));
   await api.put(`/items/${id}/grants/${target.id}`, { role, wrappedKey });
-  await pinContact(ctx.user, ctx.keys, target.id, target.publicKey);
+  await pinContact(ctx.user, ctx.keys, target.id, target.email, target.publicKey);
 }
 
 export { checkContact };
@@ -216,7 +223,7 @@ type RotationSnapshot = {
   items: { id: string; kind: string; parentId: string | null; encName: string; keyWrap: string | null; epoch: number }[];
   boards: { id: string; elements: Entry[]; files: Record<string, string>; preview: string | null }[];
   terminals: { id: string; boardId: string; machineId: string; machineOwnerId: string | null; keyForBoard: string; encLabel: string }[];
-  grants: { itemId: string; userId: string; role: Role; publicKey: string }[];
+  grants: { itemId: string; userId: string; role: Role; email: string; publicKey: string }[];
 };
 
 /**
@@ -275,8 +282,9 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
     const grants = [];
     for (const g of snap.grants) {
       if (g.itemId === rootId && g.userId === userId) continue;
-      if (g.userId !== ctx.user.id && (await checkContact(ctx.user, ctx.keys, g.userId, g.publicKey)) === "changed") {
-        throw new Error("La clé publique d'un membre a changé depuis le partage : rotation annulée par sécurité.");
+      // New keys only go to keys we pinned when sharing: a member (or key) slipped in by the server gets nothing.
+      if (g.userId !== ctx.user.id && (await checkContact(ctx.user, ctx.keys, g.userId, g.email, g.publicKey)) !== "match") {
+        throw new Error(`Clé non vérifiée pour ${g.email} : rotation annulée par sécurité.`);
       }
       const pub = g.userId === ctx.user.id ? ctx.keys.pub : fromB64(g.publicKey);
       grants.push({ itemId: g.itemId, userId: g.userId, wrappedKey: await sealKey(pub, newKeys.get(g.itemId)!, AAD.grant(g.itemId, g.userId)) });
@@ -294,7 +302,7 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
       terminals.push({
         id: t.id,
         keyForBoard: await wrapKey(nk, kt, AAD.termKey(t.boardId, t.id)),
-        keyForAgent: await seal(m.pub, kt.raw, AAD.termAgent(t.id)),
+        keyForAgent: await box(m.auth, kt.raw, AAD.termAgent(t.id)),
         encLabel: await boxText(nk, label, AAD.termLabel(t.boardId, t.id)),
       });
     }

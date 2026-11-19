@@ -100,21 +100,33 @@ function boardSocket(u: U, boardId: string) {
   return { ws, next, closed, open: new Promise((r) => ws.on("open", r)), send: (m: object) => ws.send(JSON.stringify(m)) };
 }
 
+const gens = new Map<string, string>();
+
 async function termOutput(sock: ReturnType<typeof boardSocket>, kt: c.SymKey, tid: string, needle: string) {
   let acc = "";
   for (let i = 0; i < 50; i++) {
     const m = await sock.next((x) => x.t === "term.data" && x.id === tid, 8000);
     acc += c.fromUtf8(await c.unbox(kt, m.d, c.AAD.termOut(tid, m.gen, m.seq)));
+    gens.set(tid, m.gen);
     if (acc.includes(needle)) return acc;
   }
   return acc;
+}
+
+/** Subscribes and learns the current gen (from the replay or the agent's announce). */
+async function subscribe(sock: ReturnType<typeof boardSocket>, tid: string) {
+  sock.send({ t: "term.sub", id: tid });
+  const r = await sock.next((x) => x.t === "term.replay" && x.id === tid);
+  if (r.chunks.length) gens.set(tid, r.chunks.at(-1).gen);
+  else gens.set(tid, (await sock.next((x) => x.t === "term.data" && x.id === tid)).gen);
 }
 
 let counter = 0;
 async function sendInput(sock: ReturnType<typeof boardSocket>, kt: c.SymKey, tid: string, s: string, text: string) {
   const k = ++counter;
   const ts = Date.now();
-  const frame = { t: "term.input", id: tid, s, k, ts, d: await c.box(kt, c.utf8(text), c.AAD.termIn(tid, s, k, ts)) };
+  const gen = gens.get(tid)!;
+  const frame = { t: "term.input", id: tid, s, k, ts, d: await c.box(kt, c.utf8(text), c.AAD.termIn(tid, gen, s, k, ts)) };
   sock.send(frame);
   return frame;
 }
@@ -189,7 +201,7 @@ const kt = await c.newSymKey();
 sa.send({
   t: "term.create", reqId: "r2", id: tid2, machineId: machine.id, cols: 80, rows: 24,
   keyForBoard: await c.wrapKey(keyB, kt, c.AAD.termKey(B, tid2)),
-  keyForAgent: await c.seal(mAlice.pub, kt.raw, c.AAD.termAgent(tid2)),
+  keyForAgent: await c.box(mAlice.auth, kt.raw, c.AAD.termAgent(tid2)),
   encLabel: await c.boxText(keyB, "laptop-alice", c.AAD.termLabel(B, tid2)),
 });
 const created = await sa.next((m) => m.t === "term.created" && m.reqId === "r2");
@@ -197,7 +209,7 @@ const termB = await sb.next((m) => m.t === "term" && m.terminal.id === tid2 && m
 const ktBob = await c.unwrapKey(nB.get(B)!.key!, termB.terminal.keyForBoard, c.AAD.termKey(B, tid2));
 ok(c.toB64(ktBob.raw) === c.toB64(kt.raw), "Bob récupère la clé du terminal via la clé du tableau");
 
-sb.send({ t: "term.sub", id: tid2 });
+await subscribe(sb, tid2);
 const frame = await sendInput(sb, ktBob, tid2, "bobtab", "echo CLEAR_$((6*7))\n");
 const out = await termOutput(sb, ktBob, tid2, "CLEAR_42");
 ok(out.includes("CLEAR_42"), "Bob tape dans le terminal d'Alice, sortie chiffrée bout en bout");
@@ -229,6 +241,26 @@ nA = await tree(alice);
 await as(alice, () => lib.revokeAccess(ctxOf(alice, nA), B, carol.user.id));
 nA = await tree(alice);
 const oldKeyB = keyB;
+
+// Malicious server: slips a fake member (its own key) into the folder before the rotation.
+const evil = await c.generateKeyPair();
+const rw = new DatabaseSync(DB);
+rw.prepare("INSERT INTO users (id, email, name, auth_hash, kdf_salt, public_key, enc_private_key, recovery_enc_private_key, recovery_auth_hash, color, created_at) VALUES ('evilevilevilevilevil', 'evil@x.y', 'Evil', 'x', 'x', ?, 'x', 'x', 'x', '#000', 0)").run(c.toB64(evil.pub));
+rw.prepare("INSERT INTO grants (item_id, user_id, role, wrapped_key, created_at) VALUES (?, 'evilevilevilevilevil', 'viewer', 'AAAA', 0)").run(F);
+let injected = "";
+await as(alice, () => lib.revokeAccess(ctxOf(alice, nA), F, bob.user.id)).catch((e) => (injected = String(e)));
+ok(/non vérifiée/.test(injected), "rotation refusée si le serveur glisse un membre non vérifié");
+rw.prepare("DELETE FROM grants WHERE user_id = 'evilevilevilevilevil'").run();
+
+// Malicious server: swaps Bob's public key, then Alice changes Bob's role.
+const realBobKey = rw.prepare("SELECT public_key AS k FROM users WHERE id = ?").get(bob.user.id) as any;
+rw.prepare("UPDATE users SET public_key = ? WHERE id = ?").run(c.toB64(evil.pub), bob.user.id);
+let swapped = "";
+const bobMember = { id: bob.user.id, email: "bob@test.local", publicKey: c.toB64(evil.pub) };
+await as(alice, () => lib.shareItem(ctxOf(alice, nA), F, bobMember, "viewer")).catch((e) => (swapped = String(e)));
+ok(/a changé/.test(swapped), "partage refusé si la clé d'un contact a été substituée");
+rw.prepare("UPDATE users SET public_key = ? WHERE id = ?").run(realBobKey.k, bob.user.id);
+
 const sb2 = boardSocket(bob, B);
 await sb2.open;
 await sb2.next((m) => m.t === "init");
@@ -257,7 +289,7 @@ const init2 = await sa2.next((m) => m.t === "init");
 const t2 = init2.terminals.find((t: any) => t.id === tid2);
 const kt2 = await c.unwrapKey(newKeyB, t2.keyForBoard, c.AAD.termKey(B, tid2));
 ok(c.toB64(kt2.raw) !== c.toB64(kt.raw), "le terminal a reçu une nouvelle clé");
-sa2.send({ t: "term.sub", id: tid2 });
+await subscribe(sa2, tid2);
 await sendInput(sa2, kt2, tid2, "alicetab", "echo ROTATED_$((7*7))\n");
 ok((await termOutput(sa2, kt2, tid2, "ROTATED_49")).includes("ROTATED_49"), "le terminal fonctionne avec la nouvelle clé");
 
@@ -267,6 +299,23 @@ const dump = JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SE
   JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM boards").all()) +
   JSON.stringify(new DatabaseSync(DB, { readOnly: true }).prepare("SELECT * FROM machines").all());
 ok(!/Projet secret|Sous-dossier|confidentiel|TOP_SECRET|laptop-alice|CLEAR_42/.test(dump), "aucun nom ni contenu en clair dans la base");
+
+// Unauthenticated hardening.
+const nullOrigin = await new Promise<number>((resolve) => {
+  const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });
+  w.on("unexpected-response", (_q: any, r: any) => resolve(r.statusCode));
+  w.on("error", () => {});
+});
+ok(nullOrigin === 403 && (await api("GET", "/auth/status")).status === 200, "Origin: null refusé sans faire tomber le serveur");
+jar.current = "";
+const big = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "x", authKey: "y".repeat(600_000) }) });
+ok(big.status === 413, "corps énorme refusé avant authentification");
+let limited = 0;
+for (let i = 0; i < 12; i++) {
+  const r = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": `9.9.9.${i}` }, body: JSON.stringify({ email: "alice@test.local", authKey: "nope" }) });
+  if (r.status === 429) limited++;
+}
+ok(limited > 0, "limitation des tentatives de connexion par compte, même en changeant X-Forwarded-For");
 
 agent.kill();
 sa.ws.close();

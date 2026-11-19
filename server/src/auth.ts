@@ -55,6 +55,14 @@ export function hashSecret(secret: string): string {
   return `scrypt$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
 
+const DUMMY_HASH = hashSecret("excalibash-dummy");
+
+/** Same cost as a real check, so unknown emails cannot be told apart by timing. */
+export function burnVerify(secret: string): false {
+  verifySecret(secret, DUMMY_HASH);
+  return false;
+}
+
 export function verifySecret(secret: string, stored: string): boolean {
   const [, salt, hash] = stored.split("$");
   if (!salt || !hash) return false;
@@ -80,14 +88,14 @@ export function getUserRow(id: string): UserRow | undefined {
   return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
 }
 
-export function createSession(res: Response, userId: string): void {
+export function createSession(req: Request, res: Response, userId: string): void {
   const token = randomBytes(32).toString("base64url");
   const expires = Date.now() + config.sessionDays * 86400_000;
   db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").run(sha256(token), userId, expires);
   res.cookie(COOKIE, token, {
     httpOnly: true,
     sameSite: "strict",
-    secure: config.cookieSecure,
+    secure: config.cookieSecure || req.secure,
     expires: new Date(expires),
     path: "/",
   });

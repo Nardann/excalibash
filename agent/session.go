@@ -28,8 +28,10 @@ const (
 // while no connection is attached, output is kept in a per-session ring buffer
 // and exits are remembered until they can be reported.
 type manager struct {
-	mu       sync.Mutex
-	priv     *ecdh.PrivateKey
+	mu sync.Mutex
+	// auth is shared only with the machine's owner (derived from the key they generated):
+	// a terminal key that is not boxed under it cannot have been issued by them.
+	auth     []byte
 	sessions map[string]*session
 	out      *outbox // nil while disconnected
 }
@@ -58,16 +60,16 @@ type sender struct {
 }
 
 func newManager(priv *ecdh.PrivateKey) *manager {
-	return &manager{priv: priv, sessions: map[string]*session{}}
+	return &manager{auth: machineAuthKey(priv), sessions: map[string]*session{}}
 }
 
-// openKey unseals a terminal key addressed to this machine.
-func (m *manager) openKey(id, sealed string) ([]byte, error) {
-	data, err := b64.DecodeString(sealed)
+// openKey decrypts a terminal key issued by the machine's owner.
+func (m *manager) openKey(id, boxed string) ([]byte, error) {
+	data, err := b64.DecodeString(boxed)
 	if err != nil {
 		return nil, errCrypto
 	}
-	key, err := unseal(m.priv, data, "eb:term:"+id)
+	key, err := unbox(m.auth, data, "eb:term:"+id)
 	if err != nil || len(key) != keyLen {
 		return nil, errCrypto
 	}
@@ -113,6 +115,11 @@ func (m *manager) attach(out *outbox) {
 		if s.exited {
 			out.send(message{T: "exit", ID: id, Code: intPtr(s.code)})
 			delete(m.sessions, id)
+			continue
+		}
+		// The server may have lost its scrollback: re-announce the current gen.
+		if frame, err := s.outputFrame(nil); err == nil {
+			out.send(frame)
 		}
 	}
 	m.out = out
@@ -194,11 +201,13 @@ func (m *manager) open(msg message, out *outbox) {
 		id: msg.ID, cmd: cmd, ptmx: ptmx, done: make(chan struct{}),
 		key: key, gen: randomID(6), senders: map[string]*sender{},
 	}
-	m.mu.Lock()
-	m.sessions[s.id] = s
-	m.mu.Unlock()
 	log.Printf("session %s started (%s, pid %d)", s.id, shell, cmd.Process.Pid)
 	out.send(message{T: "opened", ID: s.id, Pid: cmd.Process.Pid})
+	m.mu.Lock()
+	m.sessions[s.id] = s
+	// Browsers bind their keystrokes to the gen: announce it even if the shell stays silent.
+	m.sendOutput(s, nil)
+	m.mu.Unlock()
 
 	go m.pump(s)
 }
@@ -247,6 +256,7 @@ func (m *manager) rekey(msg message) {
 	if s := m.sessions[msg.ID]; s != nil {
 		s.key, s.gen, s.seq = key, randomID(6), 0
 		s.senders = map[string]*sender{}
+		m.sendOutput(s, nil)
 	}
 }
 
@@ -278,7 +288,8 @@ func (m *manager) input(msg message) {
 		debugf("input %s: replayed counter %d from %s", msg.ID, msg.K, msg.S)
 		return
 	}
-	aad := "eb:term-in:" + msg.ID + ":" + msg.S + ":" + strconv.FormatUint(msg.K, 10) + ":" + strconv.FormatInt(ts, 10)
+	// Binding the gen means frames captured before a restart or rekey can never be replayed into the new shell.
+	aad := "eb:term-in:" + msg.ID + ":" + s.gen + ":" + msg.S + ":" + strconv.FormatUint(msg.K, 10) + ":" + strconv.FormatInt(ts, 10)
 	pt, err := unbox(s.key, data, aad)
 	if err != nil {
 		m.mu.Unlock()

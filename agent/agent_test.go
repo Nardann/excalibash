@@ -67,6 +67,7 @@ type harness struct {
 	prev map[string][][]byte // keys replaced by a rekey, for output still in flight
 	// last output seq seen per terminal and gen, to check strict ordering
 	last map[string]uint64
+	gen  map[string]string // current gen per terminal, learned from output
 }
 
 func newHarness(t *testing.T) *harness {
@@ -75,16 +76,16 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{priv: priv, keys: map[string][]byte{}, prev: map[string][][]byte{}, last: map[string]uint64{}}
+	return &harness{priv: priv, keys: map[string][]byte{}, prev: map[string][][]byte{}, last: map[string]uint64{}, gen: map[string]string{}}
 }
 
-// sealedKey creates a fresh terminal key for id and seals it to the agent.
+// sealedKey creates a fresh terminal key for id, issued under the owner's machine auth key.
 func (h *harness) sealedKey(t *testing.T, id string) string {
 	t.Helper()
 	key := make([]byte, 32)
 	rand.Read(key)
 	h.keys[id] = key
-	sealed, err := seal(h.priv.PublicKey(), key, "eb:term:"+id)
+	sealed, err := box(machineAuthKey(h.priv), key, "eb:term:"+id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func (h *harness) sealedKey(t *testing.T, id string) string {
 
 func (h *harness) input(t *testing.T, id, sender string, k uint64, ts int64, text string) message {
 	t.Helper()
-	aad := fmt.Sprintf("eb:term-in:%s:%s:%d:%d", id, sender, k, ts)
+	aad := fmt.Sprintf("eb:term-in:%s:%s:%s:%d:%d", id, h.gen[id], sender, k, ts)
 	d, err := box(h.keys[id], []byte(text), aad)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +110,7 @@ func (h *harness) decrypt(t *testing.T, m message) string {
 		t.Fatalf("output seq %d not increasing (last %d)", m.Seq, h.last[slot])
 	}
 	h.last[slot] = m.Seq
+	h.gen[m.ID] = m.Gen
 	data, err := b64.DecodeString(m.D)
 	if err != nil {
 		t.Fatal(err)
@@ -138,6 +140,18 @@ func (h *harness) waitOutput(t *testing.T, c *websocket.Conn, id, want string) s
 		}
 	}
 	return got.String()
+}
+
+// waitGen reads frames until the agent announced the current gen of id (sent on open and rekey).
+func (h *harness) waitGen(t *testing.T, c *websocket.Conn, id string) {
+	t.Helper()
+	for {
+		m := recv(t, c)
+		if m.T == "output" && m.ID == id {
+			h.decrypt(t, m)
+			return
+		}
+	}
 }
 
 func startAgent(t *testing.T, base string, h *harness) {
@@ -175,6 +189,7 @@ func TestOpenInputClose(t *testing.T) {
 	if m := recv(t, c); m.T != "opened" || m.ID != "t1" || m.Pid == 0 {
 		t.Fatalf("expected opened, got %+v", m)
 	}
+	h.waitGen(t, c, "t1")
 
 	send(t, c, message{T: "ping", Ts: json.RawMessage("123")})
 	if m := recv(t, c); m.T != "pong" || string(m.Ts) != "123" {
@@ -244,12 +259,22 @@ func TestRekey(t *testing.T) {
 
 	send(t, c, message{T: "open", ID: "t6", Key: h.sealedKey(t, "t6")})
 	recv(t, c) // opened
+	h.waitGen(t, c, "t6")
 	send(t, c, h.input(t, "t6", "tab", 1, now(), "echo be''fore\n"))
 	h.waitOutput(t, c, "t6", "before")
 
 	oldKey := h.keys["t6"]
 	h.prev["t6"] = [][]byte{oldKey}
+	oldGen := h.gen["t6"]
 	send(t, c, message{T: "rekey", ID: "t6", Key: h.sealedKey(t, "t6")})
+	// Output of the old gen may still be in flight: wait for the announce of the new one.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.gen["t6"] == oldGen {
+		if time.Now().After(deadline) {
+			t.Fatal("rekey did not start a new gen")
+		}
+		h.waitGen(t, c, "t6")
+	}
 	// Input under the old key is now refused.
 	stale := h.keys["t6"]
 	h.keys["t6"] = oldKey
@@ -273,6 +298,7 @@ func TestReconnectKeepsSession(t *testing.T) {
 
 	send(t, c, message{T: "open", ID: "t2", Key: h.sealedKey(t, "t2")})
 	recv(t, c) // opened
+	h.waitGen(t, c, "t2")
 	send(t, c, h.input(t, "t2", "tab", 1, now(), "sleep 0.5; echo la''ter\n"))
 	c.Close(websocket.StatusGoingAway, "bye")
 
@@ -299,4 +325,53 @@ func TestAgentEndpoint(t *testing.T) {
 			t.Errorf("agentEndpoint(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
+}
+
+// A key sealed to the machine's public key (what a server knowing that key could forge)
+// is refused: only the owner, who holds the machine auth key, can issue terminal keys.
+func TestSealedKeyRefused(t *testing.T) {
+	base, conns := fakeServer(t)
+	h := newHarness(t)
+	startAgent(t, base, h)
+	c := <-conns
+	recv(t, c) // hello
+	key := make([]byte, 32)
+	rand.Read(key)
+	sealed, err := seal(h.priv.PublicKey(), key, "eb:term:t9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, message{T: "open", ID: "t9", Key: b64.EncodeToString(sealed)})
+	if m := recv(t, c); m.T != "exit" || m.ID != "t9" {
+		t.Fatalf("expected refusal, got %+v", m)
+	}
+}
+
+// Input captured in one gen cannot be replayed after a restart of the same terminal.
+func TestInputBoundToGen(t *testing.T) {
+	base, conns := fakeServer(t)
+	h := newHarness(t)
+	startAgent(t, base, h)
+	c := <-conns
+	recv(t, c) // hello
+	key := h.sealedKey(t, "t8")
+	send(t, c, message{T: "open", ID: "t8", Key: key})
+	recv(t, c) // opened
+	h.waitGen(t, c, "t8")
+	captured := h.input(t, "t8", "tab", 1, now(), "echo fi''rst\n")
+	send(t, c, captured)
+	h.waitOutput(t, c, "t8", "first")
+	send(t, c, message{T: "close", ID: "t8"})
+	for m := recv(t, c); m.T != "exit"; m = recv(t, c) {
+	}
+	// Same terminal id and key, new shell (what a restart does).
+	send(t, c, message{T: "open", ID: "t8", Key: key})
+	recv(t, c) // opened
+	h.waitGen(t, c, "t8")
+	send(t, c, captured)
+	send(t, c, h.input(t, "t8", "tab2", 1, now(), "echo se''cond\n"))
+	if out := h.waitOutput(t, c, "t8", "second"); strings.Contains(out, "first") {
+		t.Fatal("input from a previous gen was replayed into the new shell")
+	}
+	send(t, c, message{T: "close", ID: "t8"})
 }

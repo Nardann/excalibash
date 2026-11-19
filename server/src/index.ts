@@ -33,7 +33,7 @@ const CSP = [
 ].join("; ");
 
 const app = express();
-app.set("trust proxy", true);
+app.set("trust proxy", config.trustProxy);
 app.disable("x-powered-by");
 app.use((_req, res, next) => {
   res.set({
@@ -46,15 +46,17 @@ app.use((_req, res, next) => {
   });
   next();
 });
-app.use(express.json({ limit: "200mb" }));
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
 });
-app.use("/api/auth", authApi);
-app.use("/api/machines", machinesApi);
-app.use("/api/admin", adminApi);
-app.use("/api", itemsApi);
+// Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
+const small = express.json({ limit: "256kb" });
+const large = express.json({ limit: "200mb" });
+app.use("/api/auth", small, authApi);
+app.use("/api/machines", small, machinesApi);
+app.use("/api/admin", small, adminApi);
+app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)(req, res, next), itemsApi);
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Introuvable" });
 });
@@ -120,7 +122,13 @@ server.on("upgrade", (req, socket, head) => {
   if (url.pathname === "/ws") {
     // Cookies are SameSite=Strict, but a cross-site page could still open a socket: check the origin.
     const origin = req.headers.origin;
-    if (origin && new URL(origin).host !== req.headers.host) return reject(403, "Forbidden");
+    let sameOrigin = true;
+    try {
+      sameOrigin = !origin || new URL(origin).host === req.headers.host;
+    } catch {
+      sameOrigin = false; // "null" or garbage
+    }
+    if (!sameOrigin) return reject(403, "Forbidden");
     const user = userFromRequest(req);
     if (!user) return reject(401, "Unauthorized");
     const item = getItem(url.searchParams.get("board") ?? "");

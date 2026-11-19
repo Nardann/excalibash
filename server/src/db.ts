@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS machines (
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   enc_name TEXT NOT NULL,
   enc_pub TEXT NOT NULL,
+  enc_auth TEXT,
   token_hash TEXT NOT NULL UNIQUE,
   hostname TEXT,
   os TEXT,
@@ -121,6 +122,11 @@ CREATE INDEX IF NOT EXISTS terminals_board ON terminals(board_id);
 CREATE INDEX IF NOT EXISTS terminals_machine ON terminals(machine_id);
 PRAGMA user_version = ${SCHEMA_VERSION};
 `);
+
+// v2 databases created before machines carried an owner-only auth key.
+if (!(db.prepare("PRAGMA table_info(machines)").all() as { name: string }[]).some((c) => c.name === "enc_auth")) {
+  db.exec("ALTER TABLE machines ADD COLUMN enc_auth TEXT");
+}
 
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");

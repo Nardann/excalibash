@@ -25,6 +25,7 @@ export type MachineRow = {
   owner_id: string;
   enc_name: string;
   enc_pub: string;
+  enc_auth: string | null;
   hostname: string | null;
   os: string | null;
   arch: string | null;

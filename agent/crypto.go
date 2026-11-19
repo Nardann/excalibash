@@ -157,3 +157,13 @@ func randomID(n int) string {
 	_, _ = rand.Read(b)
 	return b64.EncodeToString(b)
 }
+
+// machineAuthKey derives the symmetric key the owner's browser uses to issue terminal keys
+// (HKDF-SHA256(rawPriv, info "excalibash/machine-auth")).
+func machineAuthKey(priv *ecdh.PrivateKey) []byte {
+	k, err := hkdf.Key(sha256.New, priv.Bytes(), nil, "excalibash/machine-auth", keyLen)
+	if err != nil {
+		panic(err)
+	}
+	return k
+}

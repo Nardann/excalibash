@@ -25,6 +25,7 @@ export type RawMachine = {
   id: string;
   encName: string;
   encPub: string;
+  encAuth: string;
   hostname: string | null;
   os: string | null;
   arch: string | null;

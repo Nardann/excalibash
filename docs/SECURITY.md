@@ -46,7 +46,9 @@ un chiffré d'un objet à un autre.
   (clés publiques épinglées de ses machines et de ses contacts).
 - `prelogin` renvoie un sel factice déterministe pour un email inconnu (pas d'énumération).
 - La clé privée déchiffrée est importée **non extractible** et gardée dans IndexedDB jusqu'à la
-  déconnexion.
+  déconnexion. Sa clé publique est **recalculée localement** : celle que fournit le serveur doit
+  correspondre, sinon on refuse la connexion. Une clé publique substituée amènerait sinon le client
+  à sceller ses propres clés pour quelqu'un d'autre.
 - **Admin** : il peut inviter, supprimer un compte, ouvrir ou fermer les inscriptions et nommer
   d'autres admins. Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
   ni s'ajouter à un partage. L'API ne le permet pas, et même en trafiquant la base il n'obtiendrait
@@ -73,9 +75,12 @@ Chaque dossier et chaque tableau a sa propre clé `K` et un `id` généré par l
   - Les terminaux qui tournent sur les machines du propriétaire reçoivent une nouvelle clé (`rekey`).
   - Les autres terminaux du sous-arbre sont fermés : le propriétaire ne peut pas authentifier la
     clé d'une machine qui ne lui appartient pas.
-- Épinglage (TOFU) : les clés publiques des destinataires sont épinglées dans le coffre de
-  l'utilisateur (`box(vaultKey, …)`). Une clé qui change déclenche une alerte. Les empreintes
-  sont affichées pour une vérification hors bande.
+- Épinglage (TOFU) : la clé publique de chaque destinataire est épinglée dans le coffre de
+  l'utilisateur (`box(vaultKey, …)`), **par id de compte et par email**. On détecte ainsi un compte
+  supprimé puis recréé avec la même adresse.
+  - Une clé qui ne correspond plus à l'épingle est refusée, sauf vérification explicite de l'empreinte.
+  - Lors d'une rotation, les nouvelles clés ne vont **qu'aux membres épinglés** : un membre ou une
+    clé glissés par le serveur font échouer la rotation au lieu de recevoir les clés.
 
 ## Contenu d'un tableau (clé `K_b`)
 
@@ -92,21 +97,28 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
 ## Machines et terminaux
 
-- Ajout d'une machine : **le navigateur** génère la paire X25519 de l'agent. La clé privée est
-  incluse uniquement dans la commande d'installation affichée à l'utilisateur. Le serveur ne reçoit
-  que `encMachinePub = box(vaultKey, pub, "eb:machine:<machineId>")`, que lui ne peut pas forger.
-  Le jeton d'authentification à `/agent` est distinct et ne sert qu'à la connexion.
+- Ajout d'une machine : **le navigateur** génère la clé privée X25519 de l'agent (32 octets). Elle
+  n'apparaît que dans la commande d'installation affichée à l'utilisateur.
+  - Clé d'autorisation : `machineAuth = HKDF(priv, "excalibash/machine-auth")`. Seuls le propriétaire
+    et l'agent la connaissent.
+  - Le serveur ne reçoit que des chiffrés du coffre, qu'il ne peut pas forger : la clé publique
+    (`eb:machine:<id>`, pour l'empreinte), `machineAuth` (`eb:machine-auth:<id>`) et le nom.
+  - Le jeton d'authentification à `/agent` est distinct et ne sert qu'à la connexion.
 - Chaque terminal a une clé `K_t` générée par le navigateur **du propriétaire de la machine**.
   Le serveur stocke :
   - `keyForBoard = box(K_b, K_t, "eb:termkey:<boardId>:<termId>")` ;
-  - `keyForAgent = seal(machinePub, K_t, "eb:term:<termId>")`.
+  - `keyForAgent = box(machineAuth, K_t, "eb:term:<termId>")`. Une clé simplement scellée avec la clé
+    publique de l'agent est refusée : connaître la clé publique ne suffit donc pas pour lui faire
+    ouvrir un shell.
 - Agent ⇄ serveur :
   - `open {id, cols, rows, key}` : `key = keyForAgent` (aussi renvoyé tel quel lors d'un redémarrage) ;
   - `rekey {id, key}` ;
   - `output {id, gen, seq, d}` avec `d = box(K_t, octets, "eb:term-out:<id>:<gen>:<seq>")`.
     `gen` (chaîne aléatoire) change à chaque lancement de PTY ou rekey ; `seq` part de 1 et croît
-    strictement. Le navigateur rejette `seq ≤ dernier` pour une même `gen`.
-  - `input {id, s, k, ts, d}` avec `d = box(K_t, octets, "eb:term-in:<id>:<s>:<k>:<ts>")`.
+    strictement. Le navigateur rejette `seq ≤ dernier` pour une même `gen`. L'agent annonce chaque
+    nouvelle `gen` par une trame vide authentifiée, envoyée au lancement, au rekey et à la reconnexion.
+  - `input {id, s, k, ts, d}` avec `d = box(K_t, octets, "eb:term-in:<id>:<gen>:<s>:<k>:<ts>")`.
+    Une frappe capturée ne peut donc pas être rejouée dans un shell relancé ou re-clé.
     `s` = id aléatoire d'un émetteur (onglet), `k` = compteur strictement croissant par émetteur,
     `ts` = horodatage en ms. L'agent rejette `|now − ts| > 5 min` et `k ≤ dernier k vu pour s`.
     Le serveur ne peut donc pas rejouer des frappes.
@@ -115,3 +127,21 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 - Les lecteurs (rôle viewer) reçoivent la sortie mais le serveur rejette leurs entrées.
   Ils ont la clé : c'est une restriction d'accès, pas une garantie cryptographique.
 - Il n'y a plus de machine intégrée : toute machine est un agent avec ses propres clés.
+
+## Risques résiduels (assumés, documentés)
+
+Voir [AUDIT.md](AUDIT.md) pour le détail.
+
+- **Code servi** : le serveur fournit le JavaScript et le binaire de l'agent (`/install.sh`). Un
+  hébergeur malveillant peut servir une version piégée. Parade : héberger soi-même, construire
+  l'agent depuis les sources, comparer les empreintes.
+- **Origine d'un partage non authentifiée** : un serveur malveillant peut présenter à quelqu'un un dossier
+  « partagé par Alice » qu'il a créé lui-même. Il ne lit rien de ce qui existe déjà, mais pourrait
+  lire ce qui y serait déposé ensuite.
+- **Disponibilité et retour en arrière** : le serveur peut refuser, retarder ou resservir une
+  ancienne version complète d'un élément (chiffré authentique mais périmé).
+- **Membres** : les éditeurs peuvent taper dans les terminaux du tableau, avec les droits du
+  propriétaire de la machine. Les lecteurs ont les clés : la lecture seule est appliquée par le
+  serveur, pas par la cryptographie.
+- **Suppression d'un compte par un admin** : elle ne déclenche pas de rotation sur les dossiers que
+  ce compte partageait.

@@ -16,6 +16,11 @@ export const config = {
   /** Public URL used in agent install commands (falls back to the request's host). */
   publicUrl: process.env.PUBLIC_URL ?? "",
   cookieSecure: process.env.COOKIE_SECURE === "true",
+  /**
+   * Which proxies may set X-Forwarded-*: by default only local/private networks (a reverse proxy
+   * on the host or in Docker), so internet clients cannot spoof their IP or the protocol.
+   */
+  trustProxy: process.env.TRUST_PROXY ?? "loopback, linklocal, uniquelocal",
   sessionDays: Number(process.env.SESSION_DAYS ?? 30),
   /** Encrypted scrollback kept per terminal, replayed to new viewers. */
   scrollbackBytes: Number(process.env.SCROLLBACK_BYTES ?? 768 * 1024),

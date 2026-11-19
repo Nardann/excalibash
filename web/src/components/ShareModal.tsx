@@ -39,7 +39,7 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
       setCandidate({
         ...user,
         fingerprint: await fingerprint(fromB64(user.publicKey)),
-        check: await checkContact(ctx.user, ctx.keys, user.id, user.publicKey),
+        check: await checkContact(ctx.user, ctx.keys, user.id, user.email, user.publicKey),
       });
     } catch (err) {
       toast.error(err);
@@ -50,7 +50,7 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
     if (!candidate) return;
     setBusy("share");
     try {
-      await shareItem(ctx, node.id, candidate, role);
+      await shareItem(ctx, node.id, candidate, role, candidate.check === "changed" && override);
       toast(`Partagé avec ${candidate.name}`);
       setCandidate(null);
       setEmail("");
@@ -65,7 +65,7 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
   const changeRole = async (m: Member, next: Role) => {
     setBusy(m.userId);
     try {
-      await shareItem(ctx, node.id, { id: m.userId, publicKey: m.publicKey }, next);
+      await shareItem(ctx, node.id, { id: m.userId, email: m.email, publicKey: m.publicKey }, next);
       await load();
     } catch (e) {
       toast.error(e);

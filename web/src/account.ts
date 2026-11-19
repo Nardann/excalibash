@@ -6,10 +6,10 @@ import {
   box,
   deriveAccountKeys,
   formatRecoveryKey,
-  fromB64,
   generateKeyPair,
   importPrivateKey,
   parseRecoveryKey,
+  publicKeyOf,
   randomBytes,
   randomId,
   recoveryKeys,
@@ -60,9 +60,18 @@ export async function forgetKeys(): Promise<void> {
   }
 }
 
+/**
+ * Decrypts the private key and derives its public key locally. A public key supplied by the
+ * server is never trusted: a substituted one would make us seal our own keys for someone else.
+ */
+async function openKeyPair(pkcs8: Uint8Array, claimedPublicKey: string): Promise<KeyPair> {
+  const pub = await publicKeyOf(pkcs8);
+  if (toB64(pub) !== claimedPublicKey) throw new Error("La clé publique fournie par le serveur ne correspond pas à ta clé privée : connexion refusée.");
+  return { priv: await importPrivateKey(pkcs8), pub };
+}
+
 async function openPrivateKey(encPrivateKey: string, key: Parameters<typeof unbox>[0], userId: string, publicKey: string): Promise<KeyPair> {
-  const pkcs8 = await unbox(key, encPrivateKey, AAD.priv(userId));
-  return { priv: await importPrivateKey(pkcs8), pub: fromB64(publicKey) };
+  return openKeyPair(await unbox(key, encPrivateKey, AAD.priv(userId)), publicKey);
 }
 
 export type Session = { user: User; keys: KeyPair };
@@ -104,12 +113,13 @@ export async function login(email: string, password: string): Promise<Session> {
 export async function unlock(user: User, password: string): Promise<KeyPair> {
   const k = await api.get<{ salt: string; publicKey: string; encPrivateKey: string }>("/auth/keys");
   const { masterKey } = await deriveAccountKeys(password, k.salt);
-  let keys: KeyPair;
+  let pkcs8: Uint8Array;
   try {
-    keys = await openPrivateKey(k.encPrivateKey, masterKey, user.id, k.publicKey);
+    pkcs8 = await unbox(masterKey, k.encPrivateKey, AAD.priv(user.id));
   } catch {
     throw new Error("Mot de passe incorrect");
   }
+  const keys = await openKeyPair(pkcs8, k.publicKey);
   await storeKeys(user.id, keys);
   return keys;
 }
@@ -118,6 +128,7 @@ export async function recover(email: string, recoveryKey: string, newPassword: s
   const rec = await recoveryKeys(parseRecoveryKey(recoveryKey));
   const r = await api.post<{ userId: string; publicKey: string; recoveryEncPrivateKey: string }>("/auth/recover", { email, recoveryAuth: rec.recoveryAuth });
   const pkcs8 = await unbox(rec.recoveryEnc, r.recoveryEncPrivateKey, AAD.priv(r.userId));
+  await openKeyPair(pkcs8, r.publicKey); // refuse before touching the account if the server lies
   const salt = toB64(randomBytes(16));
   const { authKey, masterKey } = await deriveAccountKeys(newPassword, salt);
   const done = await api.post<{ user: User }>("/auth/recover/finish", {
@@ -127,7 +138,7 @@ export async function recover(email: string, recoveryKey: string, newPassword: s
     authKey,
     encPrivateKey: await box(masterKey, pkcs8, AAD.priv(r.userId)),
   });
-  const keys = { priv: await importPrivateKey(pkcs8), pub: fromB64(r.publicKey) };
+  const keys = await openKeyPair(pkcs8, r.publicKey);
   await storeKeys(done.user.id, keys);
   return { user: done.user, keys };
 }

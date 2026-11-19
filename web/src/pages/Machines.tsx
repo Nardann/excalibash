@@ -147,14 +147,15 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
 }
 
 function EnrollmentModal({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
-  const base = `curl -fsSL ${enrollment.server}/install.sh | sh -s -- --token ${enrollment.token} --key ${enrollment.privateKey}`;
-  const manual = `EXCALIBASH_TOKEN=${enrollment.token} EXCALIBASH_KEY=${enrollment.privateKey} ./excalibash-agent --server ${enrollment.server}`;
+  // Leading space: shells with ignorespace (bash default on most distros, zsh HIST_IGNORE_SPACE) keep it out of history.
+  const base = ` curl -fsSL ${enrollment.server}/install.sh | sh -s -- --token ${enrollment.token} --key ${enrollment.privateKey}`;
+  const manual = ` EXCALIBASH_TOKEN=${enrollment.token} EXCALIBASH_KEY=${enrollment.privateKey} ./excalibash-agent --server ${enrollment.server}`;
   return (
     <Modal onClose={onClose} width={680}>
       <h2 className="display">Connecte « {enrollment.name} »</h2>
       <p>
         Lance cette commande sur la machine (Linux ou macOS). Elle contient la <b>clé privée</b> de l'agent, générée dans ton navigateur : elle n'a jamais été
-        envoyée au serveur et ne sera plus jamais affichée.
+        envoyée au serveur et ne sera plus jamais affichée. L'espace au début évite qu'elle reste dans l'historique du shell.
       </p>
       <Code text={base} />
       <p style={{ marginTop: 16 }}>Pour qu'il tourne en arrière-plan et redémarre tout seul (service systemd utilisateur) :</p>

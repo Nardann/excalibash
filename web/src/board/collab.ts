@@ -2,7 +2,7 @@ import { CaptureUpdateAction, reconcileElements, restoreElements } from "@excali
 import type { ExcalidrawImperativeAPI, Collaborator, SocketId, BinaryFiles, AppState } from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { Entry, Role, TerminalInfo } from "../api.ts";
-import { AAD, box, boxText, newSymKey, randomId, seal, unbox, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
+import { AAD, box, boxText, newSymKey, randomId, unbox, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
 import { decryptEntry, decryptFile, decryptPointer, encryptEntry, encryptFile, encryptPointer } from "./boardCrypto.ts";
 
 export type Peer = { id: string; userId: string; name: string; color: string; role: Role };
@@ -67,6 +67,10 @@ export class BoardSession {
   private termListeners = new Map<string, Set<TermListener>>();
   /** Last output sequence accepted per terminal, to drop replayed or reordered chunks. */
   private termSeq = new Map<string, { gen: string; seq: number }>();
+  /** Replays we asked for: anything else is ignored (it would reset the replay protection). */
+  private awaitingReplay = new Set<string>();
+  /** Resolvers waiting for a terminal's current gen, which keystrokes are bound to. */
+  private genWaiters = new Map<string, (() => void)[]>();
   private pendingCreates = new Map<string, { resolve: (t: TerminalInfo) => void; reject: (e: Error) => void }>();
   /** Input frames: sender id + strictly increasing counter, checked by the agent. */
   private readonly sender = randomId().slice(0, 12);
@@ -225,7 +229,7 @@ export class BoardSession {
       }
       case "term.replay": {
         const ls = this.termListeners.get(msg.id);
-        if (!ls?.size) return;
+        if (!ls?.size || !this.awaitingReplay.delete(msg.id)) return;
         this.termSeq.delete(msg.id);
         const parts: Uint8Array[] = [];
         for (const c of msg.chunks as Chunk[]) {
@@ -270,7 +274,10 @@ export class BoardSession {
     await this.applyRemoteFiles(msg.files ?? {});
     this.setState("online");
     if (this.canEdit) this.queueSend();
-    for (const id of this.termListeners.keys()) this.send({ t: "term.sub", id });
+    for (const id of this.termListeners.keys()) {
+      this.awaitingReplay.add(id);
+      this.send({ t: "term.sub", id });
+    }
   }
 
   private async applyRemoteElements(entries: Entry[], initial = false) {
@@ -393,14 +400,16 @@ export class BoardSession {
     if (last && last.gen === c.gen && c.seq <= last.seq) return null;
     try {
       const data = await unbox(await kp, c.d, AAD.termOut(id, c.gen, c.seq));
-      this.termSeq.set(id, { gen: c.gen, seq: c.seq });
+      if (last?.gen !== c.gen) this.termSeq.set(id, { gen: c.gen, seq: c.seq });
+      else last.seq = c.seq;
+      for (const wake of this.genWaiters.get(id)?.splice(0) ?? []) wake();
       return data;
     } catch {
       return null;
     }
   }
 
-  async createTerminal(machine: { id: string; name: string; pub: Uint8Array }, cols: number, rows: number): Promise<TerminalInfo> {
+  async createTerminal(machine: { id: string; name: string; auth: SymKey }, cols: number, rows: number): Promise<TerminalInfo> {
     const id = randomId();
     const kt = await newSymKey();
     const frame = {
@@ -409,7 +418,8 @@ export class BoardSession {
       cols,
       rows,
       keyForBoard: await wrapKey(this.key, kt, AAD.termKey(this.boardId, id)),
-      keyForAgent: await seal(machine.pub, kt.raw, AAD.termAgent(id)),
+      // Boxed under the owner-only machine auth key: the agent refuses keys anyone else could forge.
+      keyForAgent: await box(machine.auth, kt.raw, AAD.termAgent(id)),
       encLabel: await boxText(this.key, machine.name, AAD.termLabel(this.boardId, id)),
     };
     const reqId = randomId();
@@ -429,6 +439,7 @@ export class BoardSession {
     let set = this.termListeners.get(id);
     if (!set) this.termListeners.set(id, (set = new Set()));
     set.add(listener);
+    this.awaitingReplay.add(id);
     this.send({ t: "term.sub", id });
     return () => {
       set!.delete(listener);
@@ -444,12 +455,27 @@ export class BoardSession {
       .then(async () => {
         const kp = this.termKeys.get(id);
         if (!kp) return;
+        const gen = await this.currentGen(id);
+        if (!gen) return;
         const k = ++this.inputCounter;
         const ts = Date.now();
-        const d = await box(await kp, bytes, AAD.termIn(id, this.sender, k, ts));
+        const d = await box(await kp, bytes, AAD.termIn(id, gen, this.sender, k, ts));
         this.send({ t: "term.input", id, s: this.sender, k, ts, d });
       })
       .catch((e) => console.error("[excalibash]", e));
+  }
+
+  /** The agent announces each new gen (shell start, rekey, reconnect); wait briefly for it. */
+  private async currentGen(id: string): Promise<string | undefined> {
+    const known = this.termSeq.get(id)?.gen;
+    if (known) return known;
+    await new Promise<void>((resolve) => {
+      const list = this.genWaiters.get(id) ?? [];
+      list.push(resolve);
+      this.genWaiters.set(id, list);
+      setTimeout(resolve, 5000);
+    });
+    return this.termSeq.get(id)?.gen;
   }
 
   resizeTerminal(id: string, cols: number, rows: number) {
