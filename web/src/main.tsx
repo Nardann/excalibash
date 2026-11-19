@@ -12,6 +12,7 @@ import { Dashboard } from "./pages/Dashboard.tsx";
 import { Machines } from "./pages/Machines.tsx";
 import { Admin } from "./pages/Admin.tsx";
 import { Account } from "./pages/Account.tsx";
+import { Landing } from "./landing/Landing.tsx";
 
 const BoardPage = lazy(() => import("./pages/BoardPage.tsx"));
 
@@ -19,7 +20,8 @@ function RequireAuth() {
   const { user, keys } = useAuth();
   const location = useLocation();
   if (user === undefined) return null;
-  if (!user) return <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />;
+  // Visitors land on the presentation page; deep links still go through the login.
+  if (!user) return location.pathname === "/" ? <Landing /> : <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />;
   if (!keys) return <UnlockScreen user={user} />;
   return (
     <LibraryProvider>
