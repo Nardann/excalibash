@@ -17,7 +17,7 @@ import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, Modal, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
-import { HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
+import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
   LINK_BASE,
@@ -194,10 +194,11 @@ function Editor({ node }: { node: Node }) {
   const [picker, setPicker] = useState<{ anchor: MenuAnchor; nodeId?: string } | null>(null);
   /** Shell list of a node with several shells, opened by clicking its icon. */
   const [nodeMenu, setNodeMenu] = useState<{ anchor: MenuAnchor; nodeId: string } | null>(null);
-  /** "New web view" form for a node. */
-  const [webForm, setWebForm] = useState<string | null>(null);
-  /** "Telnet / SSH to a device" form, for a node or a brand-new one. */
-  const [remoteForm, setRemoteForm] = useState<{ nodeId?: string } | null>(null);
+  /**
+   * "Add" dialog: a Telnet / SSH session or a web view. On a node both are offered as tabs; from
+   * the machine picker (no node yet) only the Telnet / SSH form, since it creates its node.
+   */
+  const [access, setAccess] = useState<{ nodeId?: string; kind: "remote" | "web" } | null>(null);
 
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
@@ -588,13 +589,10 @@ function Editor({ node }: { node: Node }) {
                   );
                 })}
                 <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
+                  <TerminalSquare size={14} />
+                </button>
+                <button title="Ajouter : Telnet / SSH vers un équipement, ou site web de la machine" onClick={() => setAccess({ nodeId: selTerm.id, kind: "remote" })}>
                   <Plus size={14} />
-                </button>
-                <button title="Telnet / SSH vers un équipement" onClick={() => setRemoteForm({ nodeId: selTerm.id })}>
-                  <Cable size={14} />
-                </button>
-                <button title="Ouvrir un site web de la machine (tunnel chiffré)" onClick={() => setWebForm(selTerm.id)}>
-                  <Globe size={14} />
                 </button>
                 <span className="sep" />
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
@@ -669,7 +667,7 @@ function Editor({ node }: { node: Node }) {
           onClose={() => setPicker(null)}
           onPick={(m) => newShell(m, picker.nodeId)}
           onRemote={() => {
-            setRemoteForm({ nodeId: picker.nodeId });
+            setAccess({ nodeId: picker.nodeId, kind: "remote" });
             setPicker(null);
           }}
         />
@@ -689,43 +687,49 @@ function Editor({ node }: { node: Node }) {
             setCustomizing(nodeMenu.nodeId);
             setNodeMenu(null);
           }}
-          onNewWeb={() => {
-            setWebForm(nodeMenu.nodeId);
-            setNodeMenu(null);
-          }}
-          onNewRemote={() => {
-            setRemoteForm({ nodeId: nodeMenu.nodeId });
+          onNewAccess={() => {
+            setAccess({ nodeId: nodeMenu.nodeId, kind: "remote" });
             setNodeMenu(null);
           }}
         />
       )}
-      {remoteForm && (
-        <RemoteForm
-          defaultMachineId={(remoteForm.nodeId && nodeMachineId(remoteForm.nodeId)) || localStorage.getItem(LAST_MACHINE)}
-          onClose={() => setRemoteForm(null)}
-          onCreate={(machine, target) => {
-            setRemoteForm(null);
-            void newShell(machine, remoteForm.nodeId, target);
-          }}
-        />
-      )}
-      {webForm && (
-        <WebForm
-          defaultMachineId={nodeMachineId(webForm) ?? localStorage.getItem(LAST_MACHINE)}
-          onClose={() => setWebForm(null)}
-          onCreate={async (machine, target) => {
-            const x = excalidrawRef.current;
-            const nodeId = webForm;
-            setWebForm(null);
-            try {
-              const web = await session.createWeb(machine, target);
-              if (x) addWeb(x, nodeId, web.id);
-            } catch (e) {
-              toast.error(e);
-            }
-          }}
-        />
-      )}
+      {access &&
+        (() => {
+          const remote = (bare?: boolean) => (
+            <RemoteForm
+              bare={bare}
+              defaultMachineId={(access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)}
+              onClose={() => setAccess(null)}
+              onCreate={(machine, target) => {
+                setAccess(null);
+                void newShell(machine, access.nodeId, target);
+              }}
+            />
+          );
+          // No node yet (machine picker): the session creates its node, a site needs one.
+          if (!access.nodeId) return remote();
+          const nodeId = access.nodeId;
+          return (
+            <AccessDialog kind={access.kind} onKind={(kind) => setAccess({ nodeId, kind })} onClose={() => setAccess(null)}>
+              {remote(true)}
+              <WebForm
+                bare
+                defaultMachineId={nodeMachineId(nodeId) ?? localStorage.getItem(LAST_MACHINE)}
+                onClose={() => setAccess(null)}
+                onCreate={async (machine, target) => {
+                  const x = excalidrawRef.current;
+                  setAccess(null);
+                  try {
+                    const web = await session.createWeb(machine, target);
+                    if (x) addWeb(x, nodeId, web.id);
+                  } catch (e) {
+                    toast.error(e);
+                  }
+                }}
+              />
+            </AccessDialog>
+          );
+        })()}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>
   );
@@ -844,8 +848,7 @@ function NodeMenu(p: {
   onClose: () => void;
   onNewShell: () => void;
   onCustomize: () => void;
-  onNewWeb: () => void;
-  onNewRemote: () => void;
+  onNewAccess: () => void;
 }) {
   const api = p.api;
   const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
@@ -905,11 +908,8 @@ function NodeMenu(p: {
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
-      <button className="menu-item" onClick={p.onNewRemote}>
-        <Cable size={16} /> Telnet / SSH vers un équipement…
-      </button>
-      <button className="menu-item" onClick={p.onNewWeb}>
-        <Globe size={16} /> Nouveau site web…
+      <button className="menu-item" onClick={p.onNewAccess}>
+        <Cable size={16} /> Telnet / SSH ou site web…
       </button>
       <button className="menu-item" onClick={p.onCustomize}>
         <Palette size={16} /> Icône et libellé…
@@ -918,13 +918,66 @@ function NodeMenu(p: {
   );
 }
 
+/**
+ * "Add" dialog of a node: Telnet / SSH or web view. Both forms stay mounted side by side and the
+ * tabs slide between them (what was typed is kept), the height following the visible one.
+ */
+function AccessDialog({
+  kind,
+  onKind,
+  onClose,
+  children,
+}: {
+  kind: "remote" | "web";
+  onKind: (k: "remote" | "web") => void;
+  onClose: () => void;
+  children: [React.ReactNode, React.ReactNode];
+}) {
+  const panels = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
+  const active = kind === "remote" ? 0 : 1;
+  const [height, setHeight] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const el = panels[active].current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setHeight(el.offsetHeight));
+    ro.observe(el);
+    // The hidden panel must not be reachable with Tab.
+    panels.forEach((p, i) => p.current?.toggleAttribute("inert", i !== active));
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+  return (
+    <Modal onClose={onClose} width={560}>
+      <div className="access-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={kind === "remote"} onClick={() => onKind("remote")}>
+          <Cable size={15} /> SSH / Telnet
+        </button>
+        <button type="button" role="tab" aria-selected={kind === "web"} onClick={() => onKind("web")}>
+          <Globe size={15} /> Site web
+        </button>
+      </div>
+      <div className="access-slider" style={{ height }}>
+        <div className="access-track" style={{ transform: `translateX(${active * -50}%)` }}>
+          {children.map((c, i) => (
+            <div key={i} ref={panels[i]} className="access-panel" role="tabpanel" aria-hidden={i !== active}>
+              {c}
+            </div>
+          ))}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 /** Target of a new web view: a service reachable from the chosen machine (itself or its LAN). */
 function WebForm({
   defaultMachineId,
   onClose,
   onCreate,
+  bare,
 }: {
   defaultMachineId: string | null;
+  bare?: boolean;
   onClose: () => void;
   onCreate: (m: Machine, target: { url: string; insecure: boolean; hostHeader?: string; legacyTls?: boolean }) => void;
 }) {
@@ -945,7 +998,7 @@ function WebForm({
   const url = `${scheme}://${cleanHost.includes(":") ? `[${cleanHost}]` : cleanHost}:${port}${path.startsWith("/") ? path : `/${path}`}`;
   const https = scheme === "https";
   return (
-    <Modal onClose={onClose} width={560}>
+    <FormFrame bare={bare} onClose={onClose}>
       <h2 className="display">Ouvrir un site de la machine</h2>
       <p>
         Le site est joint <b>depuis la machine</b> (son propre port, ou un autre appareil de son réseau). Tout le trafic est chiffré de bout en bout entre ton
@@ -1035,6 +1088,6 @@ function WebForm({
           </button>
         </div>
       </form>
-    </Modal>
+    </FormFrame>
   );
 }

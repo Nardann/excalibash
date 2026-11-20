@@ -1616,3 +1616,64 @@ html.dark .term-tile.custom {
   text-align: center;
   word-spacing: 6px;
 }
+
+/* Kind switch of the "add" dialog (Telnet / SSH or web view) */
+.access-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.access-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.access-tabs button[aria-selected="true"] {
+  background: var(--brand);
+  color: #fff;
+}
+.access-tabs button:not([aria-selected="true"]):hover {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.access-slider {
+  overflow: hidden;
+  /* Room for focus rings at the panel edges (the panels' padding) */
+  margin: -4px;
+  transition: height 0.25s ease;
+}
+.access-track {
+  display: flex;
+  align-items: flex-start;
+  width: 200%;
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.access-panel {
+  flex: 0 0 50%;
+  min-width: 0;
+  padding: 4px;
+  box-sizing: border-box;
+}
+.access-panel[aria-hidden="true"] {
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .access-slider,
+  .access-track {
+    transition: none;
+  }
+}
