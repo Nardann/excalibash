@@ -3,6 +3,7 @@ import { ExternalLink, Globe, Minimize2, Power, RotateCw } from "lucide-react";
 import type { BoardSession } from "./collab.ts";
 import { confirmDialog } from "../components/ui.tsx";
 import { serverConfig } from "../api.ts";
+import { keepFramesOnMove } from "./nodes.ts";
 
 /** Origin serving tunnelled sites (separate from Excalibash's own, see server/src/proxy.ts). */
 const proxyUrl = () => serverConfig().then((c) => c.proxyUrl.replace(/\/$/, ""));
@@ -24,6 +25,8 @@ export function WebEmbed(p: { session: BoardSession; webId: string; active: bool
 
   useEffect(() => {
     proxyUrl().then(setBase).catch(() => setBase(null));
+    // A reorder of the windows (raised here or by someone else) must not reload this page.
+    keepFramesOnMove();
   }, []);
 
   // Key handshake with the proxy origin's boot page.

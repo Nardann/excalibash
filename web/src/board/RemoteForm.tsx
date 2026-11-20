@@ -5,6 +5,11 @@ import { useKeys } from "../auth.tsx";
 import { listMachines, type Machine } from "../vault.ts";
 import { Modal, toast } from "../components/ui.tsx";
 
+/** A form in its own modal, or bare when it is one panel of a larger dialog. */
+export function FormFrame({ bare, onClose, children }: { bare?: boolean; onClose: () => void; children: React.ReactNode }) {
+  return bare ? <>{children}</> : <Modal onClose={onClose} width={560}>{children}</Modal>;
+}
+
 export const HOST_RE = /^[A-Za-z0-9._:-]{1,253}$/;
 const USER_RE = /^[A-Za-z0-9._@-]{0,64}$/;
 const DEFAULT_PORT: Record<RemoteTarget["kind"], string> = { telnet: "23", ssh: "22", raw: "" };
@@ -59,17 +64,31 @@ export function RemoteForm({
   defaultMachineId,
   onClose,
   onCreate,
+  bare,
+  defaultHost,
+  defaultTarget,
 }: {
   defaultMachineId: string | null;
+  /** Prefilled device (the icon's own device, when adding a session to it). */
+  defaultHost?: string;
+  /**
+   * Prefilled session (a device icon's own target, from the board: anyone editing the board could
+   * have written it). Only its protocol, host, port and user are taken, and the user submits it.
+   */
+  defaultTarget?: RemoteTarget;
+  /** Rendered without its modal: a panel of the "add" dialog. */
+  bare?: boolean;
   onClose: () => void;
   onCreate: (m: Machine, target: RemoteTarget) => void;
 }) {
   const choice = useMachineChoice(defaultMachineId);
-  const [kind, setKind] = useState<RemoteTarget["kind"]>("ssh");
-  const [host, setHost] = useState("");
-  const [port, setPort] = useState("22");
-  const [portEdited, setPortEdited] = useState(false);
-  const [user, setUser] = useState("");
+  const pre = defaultTarget && (["telnet", "ssh", "raw"] as const).includes(defaultTarget.kind) ? defaultTarget : undefined;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const [kind, setKind] = useState<RemoteTarget["kind"]>(pre?.kind ?? "ssh");
+  const [host, setHost] = useState(str(pre?.host) || defaultHost || "");
+  const [port, setPort] = useState(pre && Number.isInteger(pre.port) ? String(pre.port) : DEFAULT_PORT[pre?.kind ?? "ssh"]);
+  const [portEdited, setPortEdited] = useState(!!pre);
+  const [user, setUser] = useState(str(pre?.user));
   const [legacy, setLegacy] = useState({ legacyKex: false, legacyHostKey: false, legacyCiphers: false });
   const [hostKeyCheck, setHostKeyCheck] = useState<"tofu" | "off">("tofu");
   const legacyAll = useRef<HTMLInputElement>(null);
@@ -102,7 +121,7 @@ export function RemoteForm({
   );
 
   return (
-    <Modal onClose={onClose} width={560}>
+    <FormFrame bare={bare} onClose={onClose}>
       <h2 className="display">Connexion à un équipement</h2>
       <p>
         Un switch, un routeur ou un PC joint <b>depuis la machine</b> en Telnet ou SSH. La session s'ouvre dans un terminal du tableau, chiffrée de bout en
@@ -220,6 +239,6 @@ export function RemoteForm({
           </button>
         </div>
       </form>
-    </Modal>
+    </FormFrame>
   );
 }

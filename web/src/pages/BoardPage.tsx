@@ -4,9 +4,9 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
-import { BoardSession, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
+import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
@@ -14,10 +14,13 @@ import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
-import { Avatar, Menu, Modal, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
+import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
-import { HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
+import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
+import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
+import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
+import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
   LINK_BASE,
@@ -26,15 +29,19 @@ import {
   activate,
   addShell,
   addWeb,
+  bringToFront,
   createNode,
   deactivate,
   deleteElements,
   findEl,
   hideShell,
   nodeDataOf,
+  openWeb,
+  openShell,
   openWebWindowOf,
   openWindowOf,
   orphanWindows,
+  removeShell,
   removeWeb,
   setNodeLook,
   toggleAll,
@@ -42,6 +49,7 @@ import {
   toggleWeb,
   windowNodeId,
   migrateLegacyTerminals,
+  type RemoteRef,
 } from "../board/nodes.ts";
 
 const TILE = 120;
@@ -114,10 +122,28 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
+    /** A Telnet / SSH device: no agent on it, so nothing can be reached through it. */
+    remote: boolean;
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
   const [customizing, setCustomizing] = useState<string | null>(null);
+  /** Every machine icon with its shells and sites, for the side dock. */
+  const [dock, setDock] = useState<DockGroup[]>([]);
+  /** Cable tool: the arrow tool with cable styling; the next arrow drawn becomes a cable. */
+  const [cableMode, setCableMode] = useState(false);
+  const cableModeRef = useRef(false);
+  const pendingCable = useRef<string | null>(null);
+  /** Arrow styling to give back when the cable tool ends. */
+  const savedArrow = useRef<Partial<AppState> | null>(null);
+  const cableFrame = useRef<number | null>(null);
+  const cableKey = useRef(-1);
+  /** Ends of the cables with something to show (or of the selected cable), in viewport coordinates. */
+  const [cableMarks, setCableMarks] = useState<CableMark[]>([]);
+  const [cableEdit, setCableEdit] = useState<{ cableId: string; end: End } | null>(null);
+  const [cableZoom, setCableZoom] = useState(1);
+  /** Last window raised, so it is raised once per focus and not on every change. */
+  const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
   const previewTimer = useRef<number | undefined>(undefined);
   const editor = node.role !== "viewer";
@@ -191,10 +217,16 @@ function Editor({ node }: { node: Node }) {
   const [picker, setPicker] = useState<{ anchor: MenuAnchor; nodeId?: string } | null>(null);
   /** Shell list of a node with several shells, opened by clicking its icon. */
   const [nodeMenu, setNodeMenu] = useState<{ anchor: MenuAnchor; nodeId: string } | null>(null);
-  /** "New web view" form for a node. */
-  const [webForm, setWebForm] = useState<string | null>(null);
-  /** "Telnet / SSH to a device" form, for a node or a brand-new one. */
-  const [remoteForm, setRemoteForm] = useState<{ nodeId?: string } | null>(null);
+  /**
+   * "Add" dialog: a Telnet / SSH session or a web view. On a node both are offered as tabs; from
+   * the machine picker (no node yet) only the Telnet / SSH form, since it creates its node.
+   */
+  const [access, setAccess] = useState<{
+    nodeId?: string;
+    kind: "remote" | "web";
+    /** A new session to a device icon's own device: the Telnet / SSH form alone, prefilled. */
+    device?: RemoteRef;
+  } | null>(null);
 
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
@@ -204,8 +236,16 @@ function Editor({ node }: { node: Node }) {
       try {
         const info = await session.createTerminal(machine, 100, 30, target);
         localStorage.setItem(LAST_MACHINE, machine.id);
-        if (nodeId && findEl(x, nodeId) && !findEl(x, nodeId)!.isDeleted) addShell(x, nodeId, info.id);
-        else createNode(x, info.id);
+        const near = nodeId ? findEl(x, nodeId) : undefined;
+        const owner = near && !near.isDeleted ? near : undefined;
+        if (target) {
+          // A device gets an icon of its own, like a machine with an agent; sessions to the
+          // same device (another port, user or protocol) gather on that icon.
+          const rem = nodeDataOf(owner)?.remote;
+          if (owner && rem && rem.machineId === machine.id && rem.target.host === target.host) addShell(x, owner.id, info.id);
+          else createNode(x, info.id, { near: owner, title: target.host, remote: { machineId: machine.id, target } });
+        } else if (owner) addShell(x, owner.id, info.id, machine.id, machine.name);
+        else createNode(x, info.id, { machineId: machine.id, machineName: machine.name });
       } catch (e) {
         toast.error(e);
       }
@@ -233,7 +273,9 @@ function Editor({ node }: { node: Node }) {
       if (!data) return;
       const anchor = anchorBelow(nodeId);
       const webs = data.webs ?? [];
-      if (data.shells.length + webs.length === 0) anchor && setPicker({ anchor, nodeId });
+      // No shell yet: an icon that knows its machine (or its device) opens its own menu, whose
+      // "new shell" goes there; only an icon with no known machine asks which one.
+      if (data.shells.length + webs.length === 0) anchor && (nodeMachineId(nodeId) ? setNodeMenu({ anchor, nodeId }) : setPicker({ anchor, nodeId }));
       else if (data.shells.length === 1 && !webs.length) toggleShell(x, nodeId, data.shells[0].terminalId);
       else if (webs.length === 1 && !data.shells.length) toggleWeb(x, nodeId, webs[0].webId);
       else anchor && setNodeMenu({ anchor, nodeId });
@@ -241,7 +283,13 @@ function Editor({ node }: { node: Node }) {
     [editor, anchorBelow],
   );
   /** The machine a node already talks to (through its shells or sites), so new views default to it. */
-  const nodeMachineId = (nodeId: string): string | null => {
+  /** The machine name of a local shell (its label), for an icon about to lose its last shell. */
+  const shellMachineName = (terminalId: string) => {
+    const label = session.terminals.get(terminalId)?.label;
+    return label && !isRemoteLabel(label) ? label : undefined;
+  };
+  /** The machine of a node's running shells or sites, as the server reports them. */
+  const liveMachineId = (nodeId: string): string | null => {
     const x = excalidrawRef.current;
     const data = x && nodeDataOf(findEl(x, nodeId));
     if (!data) return null;
@@ -254,6 +302,50 @@ function Editor({ node }: { node: Node }) {
       if (v) return v.machineId;
     }
     return null;
+  };
+  /**
+   * The machine a node talks to: its live shells' or sites', else the one it remembers. What it
+   * remembers is board data, which any editor can write: a default for forms the user submits,
+   * never a machine to open a session on without asking.
+   */
+  const nodeMachineId = (nodeId: string): string | null => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!data) return null;
+    return liveMachineId(nodeId) ?? data.remote?.machineId ?? data.machineId ?? null;
+  };
+  /**
+   * New shell on a node, on the machine it already uses. A device's icon opens the Telnet / SSH
+   * form prefilled with its device (the target comes from the board, so the user checks and
+   * submits it). A machine known only from the icon's memory is confirmed first, named from the
+   * user's own machine list. The picker opens when the node has no machine, or it is offline.
+   */
+  const newShellOnNode = async (nodeId: string, anchor: MenuAnchor) => {
+    const x = excalidrawRef.current;
+    const data = x ? nodeDataOf(findEl(x, nodeId)) : undefined;
+    if (data?.remote) return setAccess({ nodeId, kind: "remote", device: data.remote });
+    const live = liveMachineId(nodeId);
+    const machineId = live ?? data?.machineId;
+    if (machineId) {
+      try {
+        const m = (await listMachines(keys)).find((x) => x.id === machineId);
+        if (m?.online) {
+          const ok =
+            !!live ||
+            (await confirmDialog({
+              title: `Ouvrir un shell sur ${m.name} ?`,
+              text: `Le shell s'ouvre sur ta machine ${m.name}, et les éditeurs de ce tableau pourront s'en servir.`,
+              confirm: "Ouvrir",
+            }));
+          if (ok) newShell(m, nodeId);
+          return;
+        }
+        toast(m ? `${m.name} est hors ligne : choisis une autre machine` : "Machine introuvable : choisis-en une autre");
+      } catch (e) {
+        toast.error(e);
+      }
+    }
+    setPicker({ anchor, nodeId });
   };
   const onNodeActivateRef = useRef(onNodeActivate);
   onNodeActivateRef.current = onNodeActivate;
@@ -296,9 +388,82 @@ function Editor({ node }: { node: Node }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [editor, reduce]);
 
+  const startCable = useCallback(() => {
+    const x = excalidrawRef.current;
+    if (!x) return;
+    const st = x.getAppState();
+    if (!cableModeRef.current)
+      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType };
+    cableModeRef.current = true;
+    pendingCable.current = null;
+    setCableMode(true);
+    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round" } as any, captureUpdate: CaptureUpdateAction.NEVER });
+    x.setActiveTool({ type: "arrow" });
+  }, []);
+  const stopCable = useCallback(() => {
+    const x = excalidrawRef.current;
+    cableModeRef.current = false;
+    pendingCable.current = null;
+    setCableMode(false);
+    if (x && savedArrow.current) x.updateScene({ appState: savedArrow.current as any, captureUpdate: CaptureUpdateAction.NEVER });
+    savedArrow.current = null;
+  }, []);
+
   const onChange = useCallback(
     (elements: readonly OrderedExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
       session.handleChange(elements, files);
+      const xc = excalidrawRef.current;
+      if (cableModeRef.current && xc) {
+        if (appState.newElement?.type === "arrow") pendingCable.current = appState.newElement.id;
+        const idle = !appState.newElement && !appState.multiElement && appState.cursorButton === "up";
+        if (idle && pendingCable.current) {
+          const id = pendingCable.current;
+          pendingCable.current = null;
+          setTimeout(() => {
+            const err = finishCable(xc, id);
+            if (err) toast.error(err);
+            stopCable();
+          }, 0);
+        } else if (idle && appState.activeTool.type !== "arrow") stopCable();
+      }
+      // Interface / IP / VLAN labels at the cable ends, and the "int" buttons of the selected cable.
+      const zoom = appState.zoom.value;
+      const marks: CableMark[] = [];
+      if (zoom >= 0.35) {
+        for (const e of elements) {
+          const c = !e.isDeleted ? cableOf(e) : undefined;
+          if (!c) continue;
+          const sel = Object.keys(appState.selectedElementIds);
+          const isSel = sel.length === 1 && sel[0] === e.id && !appState.newElement;
+          for (const en of cableEnds(e)) {
+            const info = c.ends?.[en.end];
+            if (!info && !isSel) continue;
+            marks.push({
+              cableId: e.id,
+              end: en.end,
+              x: Math.round((en.p.x + appState.scrollX) * zoom),
+              y: Math.round((en.p.y + appState.scrollY) * zoom),
+              dir: { x: Math.round(en.dir.x * 1000) / 1000, y: Math.round(en.dir.y * 1000) / 1000 },
+              info,
+              selected: isSel,
+            });
+          }
+        }
+      }
+      setCableMarks((prev) => (JSON.stringify(prev) === JSON.stringify(marks) ? prev : marks));
+      setCableZoom(zoom);
+      // Cables follow their items (and go with them): settled once per frame, and only when the
+      // scene (or the pointer, which ends a drag) changed since the last pass.
+      let sceneKey = appState.cursorButton === "down" ? 1 : 0;
+      for (const e of elements) sceneKey += e.version;
+      const changedScene = sceneKey !== cableKey.current;
+      cableKey.current = sceneKey;
+      if (editor && xc && changedScene && cableFrame.current === null) {
+        cableFrame.current = requestAnimationFrame(() => {
+          cableFrame.current = null;
+          maintainCables(xc);
+        });
+      }
       if (appState.theme !== theme) toggle();
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
@@ -317,16 +482,48 @@ function Editor({ node }: { node: Node }) {
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
+              remote: !!nd?.remote,
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // The window being used (active, or just selected) goes above the windows it overlaps.
+      const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId);
+      const activeEl = appState.activeEmbeddable?.state === "active" ? appState.activeEmbeddable.element : undefined;
+      const focusId = isWindow(activeEl) ? activeEl!.id : isWindow(el) ? el!.id : null;
+      if (focusId !== frontRef.current) {
+        frontRef.current = focusId;
+        if (editor && x && focusId) {
+          const wasActive = activeEl?.id === focusId;
+          setTimeout(() => {
+            if (bringToFront(x, focusId) && wasActive) activate(x, focusId);
+          }, 0);
+        }
+      }
+      // The dock is for editors only (it opens, hides and closes windows).
+      if (x && editor) {
+        const groups: DockGroup[] = elements
+          .filter((e) => !e.isDeleted && nodeDataOf(e))
+          .map((e) => {
+            const nd = nodeDataOf(e)!;
+            return {
+              nodeId: e.id,
+              title: nd.title?.split("\n")[0] || null,
+              shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
+              webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
+              remote: !!nd.remote,
+              machineName: nd.machineName,
+            };
+          })
+          .filter((g) => g.shells.length + g.webs.length > 0);
+        setDock((prev) => (JSON.stringify(prev) === JSON.stringify(groups) ? prev : groups));
+      }
       // A node was deleted (here or by someone else): its windows go with it.
       if (editor && x) {
         const orphans = orphanWindows(elements);
         if (orphans.length) setTimeout(() => deleteElements(x, orphans), 0);
       }
     },
-    [session, theme, toggle, editor],
+    [session, theme, toggle, editor, stopCable],
   );
 
   /**
@@ -404,6 +601,8 @@ function Editor({ node }: { node: Node }) {
             session={session}
             shells={nd.shells.map((s) => s.terminalId)}
             webCount={(nd.webs ?? []).length}
+            machineName={nd.machineName}
+            remote={!!nd.remote}
             openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length + (nd.webs ?? []).filter((w) => openWebWindowOf(x, w.webId)).length : 0}
             title={nd.title}
             icon={nd.icon}
@@ -448,6 +647,10 @@ function Editor({ node }: { node: Node }) {
             title={owner?.title?.split("\n")[0] ?? null}
             onToggleCollapsed={editor ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
             toggleTitle="Masquer (le shell continue, l'icône reste sur le schéma)"
+            onKill={() => {
+              session.closeTerminal(tid);
+              if (excalidrawRef.current) removeShell(excalidrawRef.current, nodeId, tid, shellMachineName(tid));
+            }}
           />
         );
       }
@@ -504,6 +707,16 @@ function Editor({ node }: { node: Node }) {
           )}
         </div>
         {editor && (
+          <button
+            className={`btn btn-sm ${cableMode ? "btn-primary" : ""}`}
+            aria-pressed={cableMode}
+            title="Câble : relie deux éléments (formes, éléments de bibliothèque, machines). Tire-le d'un élément à l'autre."
+            onClick={() => (cableMode ? (excalidrawRef.current?.setActiveTool({ type: "selection" }), stopCable()) : startCable())}
+          >
+            <Spline size={16} /> Câble
+          </button>
+        )}
+        {editor && (
           <button ref={termButton} className="btn btn-primary btn-sm" title="Nouvelle machine + shell (Alt+T)" onClick={(e) => setPicker(picker ? null : { anchor: e.currentTarget })}>
             <TerminalSquare size={16} /> Terminal
           </button>
@@ -534,6 +747,49 @@ function Editor({ node }: { node: Node }) {
             if (element.link?.startsWith(LINK_BASE)) event.preventDefault();
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
+        />
+        {editor && dock.length > 0 && (
+          <WindowDock
+            session={session}
+            groups={dock}
+            onOpen={(nodeId, kind, id) => {
+              const x = excalidrawRef.current;
+              if (!x) return;
+              const win = kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id);
+              if (win) {
+                // Already open: bring it into view and to the front.
+                x.scrollToContent(win, { animate: true });
+                bringToFront(x, win.id);
+                activate(x, win.id);
+              } else if (kind === "web") openWeb(x, nodeId, id);
+              else openShell(x, nodeId, id);
+            }}
+            onHide={(kind, id) => {
+              const x = excalidrawRef.current;
+              const win = x && (kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id));
+              if (x && win) hideShell(x, win.id);
+            }}
+            onToggleAll={(nodeId) => excalidrawRef.current && toggleAll(excalidrawRef.current, nodeId)}
+            onAdd={(nodeId) => setAccess({ nodeId, kind: "remote" })}
+            onAddShell={(nodeId, anchor) => void newShellOnNode(nodeId, anchor)}
+            onKill={(nodeId, kind, id) => {
+              const x = excalidrawRef.current;
+              if (kind === "terminal") {
+                session.closeTerminal(id);
+                if (x) removeShell(x, nodeId, id, shellMachineName(id));
+              } else {
+                session.closeWeb(id);
+                if (x) removeWeb(x, nodeId, id);
+              }
+            }}
+          />
+        )}
+        <CableOverlay
+          marks={cableMarks}
+          zoom={cableZoom}
+          editable={editor}
+          onEdit={(m) => setCableEdit({ cableId: m.cableId, end: m.end })}
+          onMoveLabel={(m, dx, dy) => excalidrawRef.current && m.info && setCableEnd(excalidrawRef.current, m.cableId, m.end, { ...m.info, dx, dy })}
         />
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
@@ -571,15 +827,15 @@ function Editor({ node }: { node: Node }) {
                     </button>
                   );
                 })}
-                <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
-                  <Plus size={14} />
+                <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
+                  <TerminalSquare size={14} />
                 </button>
-                <button title="Telnet / SSH vers un équipement" onClick={() => setRemoteForm({ nodeId: selTerm.id })}>
-                  <Cable size={14} />
-                </button>
-                <button title="Ouvrir un site web de la machine (tunnel chiffré)" onClick={() => setWebForm(selTerm.id)}>
-                  <Globe size={14} />
-                </button>
+                {/* A device has no agent: no hop to another device or site through it. */}
+                {!selTerm.remote && (
+                  <button title="Ajouter : Telnet / SSH vers un équipement, ou site web de la machine" onClick={() => setAccess({ nodeId: selTerm.id, kind: "remote" })}>
+                    <Plus size={14} />
+                  </button>
+                )}
                 <span className="sep" />
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
                   <Palette size={14} />
@@ -623,7 +879,7 @@ function Editor({ node }: { node: Node }) {
           const el = x?.getSceneElements().find((e) => e.id === customizing);
           const nd = nodeDataOf(el);
           if (nd) {
-            const label = (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || "Machine";
+            const label = (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || nd.machineName || "Machine";
             return (
               <TileCustomizer
                 node
@@ -653,7 +909,7 @@ function Editor({ node }: { node: Node }) {
           onClose={() => setPicker(null)}
           onPick={(m) => newShell(m, picker.nodeId)}
           onRemote={() => {
-            setRemoteForm({ nodeId: picker.nodeId });
+            setAccess({ nodeId: picker.nodeId, kind: "remote" });
             setPicker(null);
           }}
         />
@@ -666,50 +922,94 @@ function Editor({ node }: { node: Node }) {
           api={excalidrawRef.current}
           onClose={() => setNodeMenu(null)}
           onNewShell={() => {
-            setPicker({ anchor: nodeMenu.anchor, nodeId: nodeMenu.nodeId });
+            void newShellOnNode(nodeMenu.nodeId, nodeMenu.anchor);
             setNodeMenu(null);
           }}
           onCustomize={() => {
             setCustomizing(nodeMenu.nodeId);
             setNodeMenu(null);
           }}
-          onNewWeb={() => {
-            setWebForm(nodeMenu.nodeId);
-            setNodeMenu(null);
-          }}
-          onNewRemote={() => {
-            setRemoteForm({ nodeId: nodeMenu.nodeId });
+          onNewAccess={() => {
+            setAccess({ nodeId: nodeMenu.nodeId, kind: "remote" });
             setNodeMenu(null);
           }}
         />
       )}
-      {remoteForm && (
-        <RemoteForm
-          defaultMachineId={(remoteForm.nodeId && nodeMachineId(remoteForm.nodeId)) || localStorage.getItem(LAST_MACHINE)}
-          onClose={() => setRemoteForm(null)}
-          onCreate={(machine, target) => {
-            setRemoteForm(null);
-            void newShell(machine, remoteForm.nodeId, target);
-          }}
-        />
-      )}
-      {webForm && (
-        <WebForm
-          defaultMachineId={nodeMachineId(webForm) ?? localStorage.getItem(LAST_MACHINE)}
-          onClose={() => setWebForm(null)}
-          onCreate={async (machine, target) => {
-            const x = excalidrawRef.current;
-            const nodeId = webForm;
-            setWebForm(null);
-            try {
-              const web = await session.createWeb(machine, target);
-              if (x) addWeb(x, nodeId, web.id);
-            } catch (e) {
-              toast.error(e);
-            }
-          }}
-        />
-      )}
+      {access &&
+        (() => {
+          const device = access.nodeId && excalidrawRef.current ? nodeDataOf(findEl(excalidrawRef.current, access.nodeId))?.remote : undefined;
+          const remote = (bare?: boolean) => (
+            <RemoteForm
+              bare={bare}
+              defaultHost={device?.target.host}
+              defaultTarget={access.device?.target}
+              defaultMachineId={access.device?.machineId || (access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)}
+              onClose={() => setAccess(null)}
+              onCreate={(machine, target) => {
+                setAccess(null);
+                void newShell(machine, access.nodeId, target);
+              }}
+            />
+          );
+          // No node yet (machine picker): the session creates its node, a site needs one.
+          if (!access.nodeId || access.device) return remote();
+          const nodeId = access.nodeId;
+          return (
+            <AccessDialog kind={access.kind} onKind={(kind) => setAccess({ nodeId, kind })} onClose={() => setAccess(null)}>
+              {remote(true)}
+              <WebForm
+                bare
+                defaultHost={device?.target.host}
+                defaultMachineId={nodeMachineId(nodeId) ?? localStorage.getItem(LAST_MACHINE)}
+                onClose={() => setAccess(null)}
+                onCreate={async (machine, target) => {
+                  const x = excalidrawRef.current;
+                  setAccess(null);
+                  try {
+                    const web = await session.createWeb(machine, target);
+                    if (x) addWeb(x, nodeId, web.id, machine.id, machine.name);
+                  } catch (e) {
+                    toast.error(e);
+                  }
+                }}
+              />
+            </AccessDialog>
+          );
+        })()}
+      {cableEdit &&
+        (() => {
+          const x = excalidrawRef.current;
+          const el = x ? findEl(x, cableEdit.cableId) : undefined;
+          const c = cableOf(el);
+          if (!x || !el || !c) return null;
+          const anchor = c[cableEdit.end];
+          const item = anchor.id ? findEl(x, anchor.id) : undefined;
+          const nd = nodeDataOf(item);
+          const itemName = nd
+            ? nd.title?.split("\n")[0] || (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || "machine"
+            : item?.type === "text"
+              ? `« ${(item as any).text.slice(0, 30)} »`
+              : anchor.group
+                ? "élément de bibliothèque"
+                : item?.type === "ellipse"
+                  ? "ellipse"
+                  : item?.type === "diamond"
+                    ? "losange"
+                    : "rectangle";
+          return (
+            <CableEndForm
+              info={c.ends?.[cableEdit.end]}
+              itemName={itemName}
+              onClose={() => setCableEdit(null)}
+              onSave={(info) => {
+                // Keep where the label was moved to (an empty info clears everything).
+                const cur = c.ends?.[cableEdit.end];
+                setCableEnd(x, cableEdit.cableId, cableEdit.end, Object.keys(info).length ? { ...info, dx: cur?.dx, dy: cur?.dy } : {});
+                setCableEdit(null);
+              }}
+            />
+          );
+        })()}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>
   );
@@ -828,8 +1128,7 @@ function NodeMenu(p: {
   onClose: () => void;
   onNewShell: () => void;
   onCustomize: () => void;
-  onNewWeb: () => void;
-  onNewRemote: () => void;
+  onNewAccess: () => void;
 }) {
   const api = p.api;
   const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
@@ -837,7 +1136,7 @@ function NodeMenu(p: {
   const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId)) || (data.webs ?? []).some((w) => openWebWindowOf(api, w.webId));
   return (
     <Menu anchor={p.anchor} onClose={p.onClose}>
-      <div className="menu-label">{data.title?.split("\n")[0] || "Shells"}</div>
+      <div className="menu-label">{data.title?.split("\n")[0] || data.machineName || "Shells"}</div>
       {data.shells.map((sh, i) => {
         const t = p.session.terminals.get(sh.terminalId);
         const open = !!openWindowOf(api, sh.terminalId);
@@ -876,29 +1175,83 @@ function NodeMenu(p: {
           </button>
         );
       })}
-      <div className="menu-sep" />
-      <button
-        className="menu-item"
-        onClick={() => {
-          p.onClose();
-          toggleAll(api, p.nodeId);
-        }}
-      >
-        {anyOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} {anyOpen ? "Tout masquer" : "Tout ouvrir"}
-      </button>
+      {data.shells.length + (data.webs ?? []).length > 0 && (
+        <>
+          <div className="menu-sep" />
+          <button
+            className="menu-item"
+            onClick={() => {
+              p.onClose();
+              toggleAll(api, p.nodeId);
+            }}
+          >
+            {anyOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} {anyOpen ? "Tout masquer" : "Tout ouvrir"}
+          </button>
+        </>
+      )}
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
-      <button className="menu-item" onClick={p.onNewRemote}>
-        <Cable size={16} /> Telnet / SSH vers un équipement…
-      </button>
-      <button className="menu-item" onClick={p.onNewWeb}>
-        <Globe size={16} /> Nouveau site web…
-      </button>
+      {!data.remote && (
+        <button className="menu-item" onClick={p.onNewAccess}>
+          <Cable size={16} /> Telnet / SSH ou site web…
+        </button>
+      )}
       <button className="menu-item" onClick={p.onCustomize}>
         <Palette size={16} /> Icône et libellé…
       </button>
     </Menu>
+  );
+}
+
+/**
+ * "Add" dialog of a node: Telnet / SSH or web view. Both forms stay mounted side by side and the
+ * tabs slide between them (what was typed is kept), the height following the visible one.
+ */
+function AccessDialog({
+  kind,
+  onKind,
+  onClose,
+  children,
+}: {
+  kind: "remote" | "web";
+  onKind: (k: "remote" | "web") => void;
+  onClose: () => void;
+  children: [React.ReactNode, React.ReactNode];
+}) {
+  const panels = [useRef<HTMLDivElement>(null), useRef<HTMLDivElement>(null)];
+  const active = kind === "remote" ? 0 : 1;
+  const [height, setHeight] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const el = panels[active].current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setHeight(el.offsetHeight));
+    ro.observe(el);
+    // The hidden panel must not be reachable with Tab.
+    panels.forEach((p, i) => p.current?.toggleAttribute("inert", i !== active));
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+  return (
+    <Modal onClose={onClose} width={560}>
+      <div className="access-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={kind === "remote"} onClick={() => onKind("remote")}>
+          <Cable size={15} /> SSH / Telnet
+        </button>
+        <button type="button" role="tab" aria-selected={kind === "web"} onClick={() => onKind("web")}>
+          <Globe size={15} /> Site web
+        </button>
+      </div>
+      <div className="access-slider" style={{ height }}>
+        <div className="access-track" style={{ transform: `translateX(${active * -50}%)` }}>
+          {children.map((c, i) => (
+            <div key={i} ref={panels[i]} className="access-panel" role="tabpanel" aria-hidden={i !== active}>
+              {c}
+            </div>
+          ))}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -907,14 +1260,19 @@ function WebForm({
   defaultMachineId,
   onClose,
   onCreate,
+  bare,
+  defaultHost,
 }: {
   defaultMachineId: string | null;
+  bare?: boolean;
+  /** The device of the icon, whose web interface is the likely target. */
+  defaultHost?: string;
   onClose: () => void;
   onCreate: (m: Machine, target: { url: string; insecure: boolean; hostHeader?: string; legacyTls?: boolean }) => void;
 }) {
   const choice = useMachineChoice(defaultMachineId);
   const [scheme, setScheme] = useState("http");
-  const [host, setHost] = useState("127.0.0.1");
+  const [host, setHost] = useState(defaultHost ?? "127.0.0.1");
   const [port, setPort] = useState("80");
   const [path, setPath] = useState("/");
   const [insecure, setInsecure] = useState(true);
@@ -929,7 +1287,7 @@ function WebForm({
   const url = `${scheme}://${cleanHost.includes(":") ? `[${cleanHost}]` : cleanHost}:${port}${path.startsWith("/") ? path : `/${path}`}`;
   const https = scheme === "https";
   return (
-    <Modal onClose={onClose} width={560}>
+    <FormFrame bare={bare} onClose={onClose}>
       <h2 className="display">Ouvrir un site de la machine</h2>
       <p>
         Le site est joint <b>depuis la machine</b> (son propre port, ou un autre appareil de son réseau). Tout le trafic est chiffré de bout en bout entre ton
@@ -1019,6 +1377,6 @@ function WebForm({
           </button>
         </div>
       </form>
-    </Modal>
+    </FormFrame>
   );
 }

@@ -5,6 +5,7 @@ import { CaptureUpdateAction, convertToExcalidrawElements, newElementWith } from
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { TileIcon } from "./personalLibrary.ts";
+import type { RemoteTarget } from "../api.ts";
 
 export const LINK_BASE = "https://excalibash.local/";
 export const TERMINAL_LINK = `${LINK_BASE}terminal/`;
@@ -19,7 +20,23 @@ const GAP = 40;
 type Geometry = { x?: number; y?: number; w?: number; h?: number };
 export type ShellRef = Geometry & { terminalId: string };
 export type WebRef = Geometry & { webId: string };
-export type NodeData = { node: true; title?: string | null; icon?: TileIcon | null; shells: ShellRef[]; webs?: WebRef[] };
+/** A device reached over Telnet / SSH through an agent: new shells of its icon reopen this target. */
+export type RemoteRef = { machineId: string; target: RemoteTarget };
+/**
+ * `machineId`: the agent machine of the icon, remembered so a new shell can open on it even once
+ * all its shells are closed. A device (`remote`) keeps its machine in `remote` instead.
+ */
+export type NodeData = {
+  node: true;
+  title?: string | null;
+  icon?: TileIcon | null;
+  shells: ShellRef[];
+  webs?: WebRef[];
+  remote?: RemoteRef;
+  machineId?: string;
+  /** Name of that machine, so the icon keeps its label once its last shell is closed. */
+  machineName?: string;
+};
 
 type El = ExcalidrawElement;
 type Api = ExcalidrawImperativeAPI;
@@ -33,7 +50,46 @@ type Kind = keyof typeof KINDS;
 
 const cd = (el: El | null | undefined) => (el?.customData ?? {}) as Record<string, any>;
 
-export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => (cd(el).node ? (el!.customData as NodeData) : undefined);
+// Node data comes from the board, which any editor (or an older client) can write: read it through
+// one normalizer, so a malformed value can't crash rendering for everyone (strings stay strings,
+// lists stay lists of well-formed entries).
+const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const geometry = (r: Record<string, unknown>): Geometry => {
+  const g: Geometry = {};
+  for (const k of ["x", "y", "w", "h"] as const) if (num(r[k]) !== undefined) g[k] = num(r[k]);
+  return g;
+};
+function refs<T extends string>(v: unknown, field: T): (Geometry & Record<T, string>)[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((r) => r && typeof r === "object" && str(r[field])).map((r) => ({ ...geometry(r), [field]: r[field] }) as Geometry & Record<T, string>);
+}
+const KINDS_OK = ["telnet", "ssh", "raw"];
+function remoteRef(v: any): RemoteRef | undefined {
+  const t = v?.target;
+  if (!str(v?.machineId) || !t || !KINDS_OK.includes(t.kind) || !str(t.host) || !Number.isInteger(t.port)) return undefined;
+  return { machineId: v.machineId, target: { kind: t.kind, host: t.host, port: t.port, ...(str(t.user) !== undefined ? { user: t.user } : {}) } };
+}
+const normalized = new WeakMap<object, NodeData>();
+export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => {
+  const raw = cd(el);
+  if (!raw.node) return undefined;
+  const hit = normalized.get(raw);
+  if (hit) return hit;
+  const icon = raw.icon && Array.isArray(raw.icon.elements) ? (raw.icon as TileIcon) : null;
+  const data: NodeData = {
+    node: true,
+    title: str(raw.title) ?? null,
+    icon,
+    shells: refs(raw.shells, "terminalId"),
+    webs: refs(raw.webs, "webId"),
+    ...(remoteRef(raw.remote) ? { remote: remoteRef(raw.remote) } : {}),
+    ...(str(raw.machineId) ? { machineId: raw.machineId } : {}),
+    ...(str(raw.machineName) ? { machineName: raw.machineName } : {}),
+  };
+  normalized.set(raw, data);
+  return data;
+};
 
 /** The node a window belongs to (undefined for standalone, older terminals). */
 export const windowNodeId = (el: El | null | undefined): string | undefined =>
@@ -80,16 +136,22 @@ export function deactivate(api: Api) {
   api.updateScene({ appState: { activeEmbeddable: null } as any, captureUpdate: CaptureUpdateAction.NEVER });
 }
 
-/** A new node at the center of the view with its first shell open next to it. */
-export function createNode(api: Api, terminalId: string) {
+/**
+ * A new node with its first shell open next to it: at the center of the view, or below `near`
+ * (a device reached from that machine's icon).
+ */
+export function createNode(api: Api, terminalId: string, opts: { near?: El; title?: string; remote?: RemoteRef; machineId?: string; machineName?: string } = {}) {
   const st = api.getAppState();
   const zoom = st.zoom.value;
   const cx = -st.scrollX + st.width / 2 / zoom;
   const cy = -st.scrollY + st.height / 2 / zoom;
-  const nx = cx - (NODE_SIZE + GAP + TERM_W) / 2;
-  const ny = cy - NODE_SIZE / 2;
-  const node = embeddable(nx, ny, NODE_SIZE, NODE_SIZE, (id) => NODE_LINK + id, { node: true, shells: [{ terminalId }], webs: [] } satisfies NodeData);
-  const win = embeddable(nx + NODE_SIZE + GAP, cy - TERM_H / 2, TERM_W, TERM_H, () => TERMINAL_LINK + terminalId, { terminalId, nodeId: node.id });
+  const near = opts.near;
+  const nx = near ? near.x : cx - (NODE_SIZE + GAP + TERM_W) / 2;
+  const ny = near ? near.y + near.height + GAP * 2 : cy - NODE_SIZE / 2;
+  const data: NodeData = { node: true, shells: [{ terminalId }], webs: [], ...(opts.title ? { title: opts.title } : {}), ...(opts.remote ? { remote: opts.remote } : opts.machineId ? { machineId: opts.machineId, ...(opts.machineName ? { machineName: opts.machineName } : {}) } : {}) };
+  const node = embeddable(nx, ny, NODE_SIZE, NODE_SIZE, (id) => NODE_LINK + id, data);
+  const wy = near ? ny : cy - TERM_H / 2;
+  const win = embeddable(nx + NODE_SIZE + GAP, wy, TERM_W, TERM_H, () => TERMINAL_LINK + terminalId, { terminalId, nodeId: node.id });
   commit(api, [], [node, win]);
   activate(api, win.id);
 }
@@ -98,16 +160,23 @@ function refsOf(data: NodeData, kind: Kind): (Geometry & Record<string, any>)[] 
   return ((data as any)[KINDS[kind].list] as any[] | undefined) ?? [];
 }
 
-function add(api: Api, kind: Kind, nodeId: string, id: string) {
+function add(api: Api, kind: Kind, nodeId: string, id: string, machineId?: string, machineName?: string) {
   const node = findEl(api, nodeId);
   const data = nodeDataOf(node);
   if (!node || !data) return;
   const k = KINDS[kind];
-  commit(api, [newElementWith(node, { customData: { ...data, [k.list]: [...refsOf(data, kind), { [k.field]: id }] } })]);
+  // Icons from before machines were remembered learn theirs from their next shell or site, and
+  // the name follows a renamed machine (the icon's own machine only).
+  const learn =
+    machineId && !data.remote && (!data.machineId || data.machineId === machineId)
+      ? { machineId, ...(machineName ? { machineName } : {}) }
+      : {};
+  commit(api, [newElementWith(node, { customData: { ...data, ...learn, [k.list]: [...refsOf(data, kind), { [k.field]: id }] } })]);
   open(api, kind, nodeId, id);
 }
-export const addShell = (api: Api, nodeId: string, terminalId: string) => add(api, "terminal", nodeId, terminalId);
-export const addWeb = (api: Api, nodeId: string, webId: string) => add(api, "web", nodeId, webId);
+export const addShell = (api: Api, nodeId: string, terminalId: string, machineId?: string, machineName?: string) =>
+  add(api, "terminal", nodeId, terminalId, machineId, machineName);
+export const addWeb = (api: Api, nodeId: string, webId: string, machineId?: string, machineName?: string) => add(api, "web", nodeId, webId, machineId, machineName);
 
 function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
   const k = KINDS[kind];
@@ -139,6 +208,56 @@ function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
   }
 }
 export const openShell = (api: Api, nodeId: string, terminalId: string, focus = true) => open(api, "terminal", nodeId, terminalId, focus);
+export const openWeb = (api: Api, nodeId: string, webId: string, focus = true) => open(api, "web", nodeId, webId, focus);
+
+const overlap = (a: El, b: El) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/**
+ * Puts a window above the others. Stacking (on screen and for clicks) follows the scene order, so
+ * the element moves to the end of the scene, but only when a window it overlaps is drawn above
+ * it: no change, no sync traffic otherwise. Returns whether it moved.
+ */
+export function bringToFront(api: Api, id: string): boolean {
+  const els = all(api);
+  const i = els.findIndex((e) => e.id === id);
+  const win = els[i];
+  if (!win || win.isDeleted) return false;
+  if (!els.slice(i + 1).some((e) => !e.isDeleted && e.type === "embeddable" && overlap(e, win))) return false;
+  // Without a state-preserving move, raising a web view would reload its page (here and for
+  // everyone else): leave it where it is.
+  if (cd(win).webId && typeof (Element.prototype as any).moveBefore !== "function") return false;
+  keepFramesOnMove();
+  // A null index is recomputed by Excalidraw from the position in the array (like a new element).
+  const moved = newElementWith(win, { index: null } as any);
+  api.updateScene({ elements: [...els.slice(0, i), ...els.slice(i + 1), moved], captureUpdate: CaptureUpdateAction.NEVER });
+  return true;
+}
+
+/**
+ * Embeds are DOM nodes laid out in scene order, so reordering moves the DOM node of the raised
+ * window, and a moved iframe reloads (a web view would lose its page). Where the browser has
+ * Element.moveBefore (state-preserving move), make React's moves use it in the embeds' container.
+ * Installed by every web view when it mounts, for every role: a window raised by someone else
+ * moves here too, when their reorder arrives.
+ */
+export function keepFramesOnMove() {
+  const parent = document.querySelector(".excalidraw__embeddable-container")?.parentElement as (HTMLElement & { ebPatched?: boolean; moveBefore?: (n: Node, r: Node | null) => void }) | null;
+  if (!parent || parent.ebPatched || typeof parent.moveBefore !== "function") return;
+  parent.ebPatched = true;
+  const insertBefore = parent.insertBefore.bind(parent);
+  const appendChild = parent.appendChild.bind(parent);
+  const move = <T extends Node>(node: T, ref: Node | null, fallback: () => T): T => {
+    if (node.parentNode !== parent) return fallback();
+    try {
+      parent.moveBefore!(node, ref);
+      return node;
+    } catch {
+      return fallback();
+    }
+  };
+  parent.insertBefore = <T extends Node>(node: T, ref: Node | null) => move(node, ref, () => insertBefore(node, ref));
+  parent.appendChild = <T extends Node>(node: T) => move(node, null, () => appendChild(node));
+}
 
 /** Hides a window; the shell / tunnel keeps running and the node remembers where it was. */
 export function hideShell(api: Api, windowId: string) {
@@ -197,6 +316,20 @@ export function deleteElements(api: Api, list: El[]) {
   if (!list.length) return;
   const byId = new Map(list.map((e) => [e.id, newElementWith(e, { isDeleted: true })]));
   api.updateScene({ elements: all(api).map((e) => byId.get(e.id) ?? e), captureUpdate: CaptureUpdateAction.NEVER });
+}
+
+/**
+ * Removes a shell from its node (it was closed): its entry and its window go away. `machineName`
+ * (the shell's machine) is kept on an icon that had none yet, so it doesn't lose its label.
+ */
+export function removeShell(api: Api, nodeId: string, terminalId: string, machineName?: string) {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  const changed: El[] = [];
+  const keep = machineName && !data?.remote && !data?.machineName ? { machineName } : {};
+  if (node && data) changed.push(newElementWith(node, { customData: { ...data, ...keep, shells: data.shells.filter((s) => s.terminalId !== terminalId) } }));
+  for (const e of all(api)) if (cd(e).terminalId === terminalId && cd(e).nodeId === nodeId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
+  commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }
 
 /** Removes a web view from its node (its tunnel was closed). */
