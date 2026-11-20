@@ -140,6 +140,55 @@ function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
 }
 export const openShell = (api: Api, nodeId: string, terminalId: string, focus = true) => open(api, "terminal", nodeId, terminalId, focus);
 
+const overlap = (a: El, b: El) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/**
+ * Puts a window above the others. Stacking (on screen and for clicks) follows the scene order, so
+ * the element moves to the end of the scene, but only when a window it overlaps is drawn above
+ * it: no change, no sync traffic otherwise. Returns whether it moved.
+ */
+export function bringToFront(api: Api, id: string): boolean {
+  const els = all(api);
+  const i = els.findIndex((e) => e.id === id);
+  const win = els[i];
+  if (!win || win.isDeleted) return false;
+  if (!els.slice(i + 1).some((e) => !e.isDeleted && e.type === "embeddable" && overlap(e, win))) return false;
+  // Without a state-preserving move, raising a web view would reload its page (here and for
+  // everyone else): leave it where it is.
+  if (cd(win).webId && typeof (Element.prototype as any).moveBefore !== "function") return false;
+  keepFramesOnMove();
+  // A null index is recomputed by Excalidraw from the position in the array (like a new element).
+  const moved = newElementWith(win, { index: null } as any);
+  api.updateScene({ elements: [...els.slice(0, i), ...els.slice(i + 1), moved], captureUpdate: CaptureUpdateAction.NEVER });
+  return true;
+}
+
+/**
+ * Embeds are DOM nodes laid out in scene order, so reordering moves the DOM node of the raised
+ * window, and a moved iframe reloads (a web view would lose its page). Where the browser has
+ * Element.moveBefore (state-preserving move), make React's moves use it in the embeds' container.
+ * Installed by every web view when it mounts, for every role: a window raised by someone else
+ * moves here too, when their reorder arrives.
+ */
+export function keepFramesOnMove() {
+  const parent = document.querySelector(".excalidraw__embeddable-container")?.parentElement as (HTMLElement & { ebPatched?: boolean; moveBefore?: (n: Node, r: Node | null) => void }) | null;
+  if (!parent || parent.ebPatched || typeof parent.moveBefore !== "function") return;
+  parent.ebPatched = true;
+  const insertBefore = parent.insertBefore.bind(parent);
+  const appendChild = parent.appendChild.bind(parent);
+  const move = <T extends Node>(node: T, ref: Node | null, fallback: () => T): T => {
+    if (node.parentNode !== parent) return fallback();
+    try {
+      parent.moveBefore!(node, ref);
+      return node;
+    } catch {
+      return fallback();
+    }
+  };
+  parent.insertBefore = <T extends Node>(node: T, ref: Node | null) => move(node, ref, () => insertBefore(node, ref));
+  parent.appendChild = <T extends Node>(node: T) => move(node, null, () => appendChild(node));
+}
+
 /** Hides a window; the shell / tunnel keeps running and the node remembers where it was. */
 export function hideShell(api: Api, windowId: string) {
   const win = findEl(api, windowId);

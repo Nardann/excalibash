@@ -26,6 +26,7 @@ import {
   activate,
   addShell,
   addWeb,
+  bringToFront,
   createNode,
   deactivate,
   deleteElements,
@@ -118,6 +119,8 @@ function Editor({ node }: { node: Node }) {
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
   const [customizing, setCustomizing] = useState<string | null>(null);
+  /** Last window raised, so it is raised once per focus and not on every change. */
+  const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
   const previewTimer = useRef<number | undefined>(undefined);
   const editor = node.role !== "viewer";
@@ -320,6 +323,19 @@ function Editor({ node }: { node: Node }) {
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // The window being used (active, or just selected) goes above the windows it overlaps.
+      const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId);
+      const activeEl = appState.activeEmbeddable?.state === "active" ? appState.activeEmbeddable.element : undefined;
+      const focusId = isWindow(activeEl) ? activeEl!.id : isWindow(el) ? el!.id : null;
+      if (focusId !== frontRef.current) {
+        frontRef.current = focusId;
+        if (editor && x && focusId) {
+          const wasActive = activeEl?.id === focusId;
+          setTimeout(() => {
+            if (bringToFront(x, focusId) && wasActive) activate(x, focusId);
+          }, 0);
+        }
+      }
       // A node was deleted (here or by someone else): its windows go with it.
       if (editor && x) {
         const orphans = orphanWindows(elements);
