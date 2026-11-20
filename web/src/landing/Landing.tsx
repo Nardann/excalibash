@@ -158,6 +158,8 @@ export function Landing() {
       <footer className="lp-foot">
         <span className="lp-hand">Excalibash</span>
         <span>Pour les TP de réseaux et d'informatique. Auto-hébergé, chiffré de bout en bout.</span>
+        <a href="https://excalibash.fr">excalibash.fr</a>
+        <a href="https://github.com/excalibash-fr/excalibash" rel="noopener">Code source</a>
         <Link to="/confidentialite">Confidentialité</Link>
         <Link to="/login">Se connecter</Link>
       </footer>

@@ -1,5 +1,12 @@
 {
   "name": "excalibash-server",
+  "description": "Serveur Excalibash : relais chiffré pour tableaux Excalidraw avec terminaux",
+  "homepage": "https://excalibash.fr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/excalibash-fr/excalibash.git",
+    "directory": "server"
+  },
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",

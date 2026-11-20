@@ -1,5 +1,12 @@
 {
   "name": "excalibash-web",
+  "description": "Application web Excalibash : tableaux Excalidraw avec terminaux, chiffrés de bout en bout",
+  "homepage": "https://excalibash.fr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/excalibash-fr/excalibash.git",
+    "directory": "web"
+  },
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
