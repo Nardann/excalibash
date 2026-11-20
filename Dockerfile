@@ -38,6 +38,8 @@ COPY server/package.json server/
 COPY server/src server/src
 COPY --from=web /src/web/dist web/dist
 COPY --from=agent /src/dist agent/dist
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY licenses licenses
 
 ENV NODE_ENV=production \
     PORT=6767 \
