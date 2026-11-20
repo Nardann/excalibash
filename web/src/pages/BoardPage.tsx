@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -18,6 +18,7 @@ import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } 
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
+import { finishCable, maintainCables } from "../board/cables.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -128,6 +129,14 @@ function Editor({ node }: { node: Node }) {
   const [customizing, setCustomizing] = useState<string | null>(null);
   /** Every machine icon with its shells and sites, for the side dock. */
   const [dock, setDock] = useState<DockGroup[]>([]);
+  /** Cable tool: the arrow tool with cable styling; the next arrow drawn becomes a cable. */
+  const [cableMode, setCableMode] = useState(false);
+  const cableModeRef = useRef(false);
+  const pendingCable = useRef<string | null>(null);
+  /** Arrow styling to give back when the cable tool ends. */
+  const savedArrow = useRef<Partial<AppState> | null>(null);
+  const cableFrame = useRef<number | null>(null);
+  const cableKey = useRef(-1);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
@@ -374,9 +383,56 @@ function Editor({ node }: { node: Node }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [editor, reduce]);
 
+  const startCable = useCallback(() => {
+    const x = excalidrawRef.current;
+    if (!x) return;
+    const st = x.getAppState();
+    if (!cableModeRef.current)
+      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType };
+    cableModeRef.current = true;
+    pendingCable.current = null;
+    setCableMode(true);
+    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round" } as any, captureUpdate: CaptureUpdateAction.NEVER });
+    x.setActiveTool({ type: "arrow" });
+  }, []);
+  const stopCable = useCallback(() => {
+    const x = excalidrawRef.current;
+    cableModeRef.current = false;
+    pendingCable.current = null;
+    setCableMode(false);
+    if (x && savedArrow.current) x.updateScene({ appState: savedArrow.current as any, captureUpdate: CaptureUpdateAction.NEVER });
+    savedArrow.current = null;
+  }, []);
+
   const onChange = useCallback(
     (elements: readonly OrderedExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
       session.handleChange(elements, files);
+      const xc = excalidrawRef.current;
+      if (cableModeRef.current && xc) {
+        if (appState.newElement?.type === "arrow") pendingCable.current = appState.newElement.id;
+        const idle = !appState.newElement && !appState.multiElement && appState.cursorButton === "up";
+        if (idle && pendingCable.current) {
+          const id = pendingCable.current;
+          pendingCable.current = null;
+          setTimeout(() => {
+            const err = finishCable(xc, id);
+            if (err) toast.error(err);
+            stopCable();
+          }, 0);
+        } else if (idle && appState.activeTool.type !== "arrow") stopCable();
+      }
+      // Cables follow their items (and go with them): settled once per frame, and only when the
+      // scene (or the pointer, which ends a drag) changed since the last pass.
+      let sceneKey = appState.cursorButton === "down" ? 1 : 0;
+      for (const e of elements) sceneKey += e.version;
+      const changedScene = sceneKey !== cableKey.current;
+      cableKey.current = sceneKey;
+      if (editor && xc && changedScene && cableFrame.current === null) {
+        cableFrame.current = requestAnimationFrame(() => {
+          cableFrame.current = null;
+          maintainCables(xc);
+        });
+      }
       if (appState.theme !== theme) toggle();
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
@@ -436,7 +492,7 @@ function Editor({ node }: { node: Node }) {
         if (orphans.length) setTimeout(() => deleteElements(x, orphans), 0);
       }
     },
-    [session, theme, toggle, editor],
+    [session, theme, toggle, editor, stopCable],
   );
 
   /**
@@ -619,6 +675,16 @@ function Editor({ node }: { node: Node }) {
             </div>
           )}
         </div>
+        {editor && (
+          <button
+            className={`btn btn-sm ${cableMode ? "btn-primary" : ""}`}
+            aria-pressed={cableMode}
+            title="Câble : relie deux éléments (formes, éléments de bibliothèque, machines). Tire-le d'un élément à l'autre."
+            onClick={() => (cableMode ? (excalidrawRef.current?.setActiveTool({ type: "selection" }), stopCable()) : startCable())}
+          >
+            <Spline size={16} /> Câble
+          </button>
+        )}
         {editor && (
           <button ref={termButton} className="btn btn-primary btn-sm" title="Nouvelle machine + shell (Alt+T)" onClick={(e) => setPicker(picker ? null : { anchor: e.currentTarget })}>
             <TerminalSquare size={16} /> Terminal
