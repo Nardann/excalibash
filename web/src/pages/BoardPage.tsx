@@ -394,11 +394,11 @@ function Editor({ node }: { node: Node }) {
     if (!x) return;
     const st = x.getAppState();
     if (!cableModeRef.current)
-      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType };
+      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType, currentItemRoughness: st.currentItemRoughness };
     cableModeRef.current = true;
     pendingCable.current = null;
     setCableMode(true);
-    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round" } as any, captureUpdate: CaptureUpdateAction.NEVER });
+    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round", currentItemRoughness: 0 } as any, captureUpdate: CaptureUpdateAction.NEVER });
     x.setActiveTool({ type: "arrow" });
   }, []);
   const stopCable = useCallback(() => {
