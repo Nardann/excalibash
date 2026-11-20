@@ -159,8 +159,6 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
 ## Risques résiduels (assumés, documentés)
 
-Voir [AUDIT.md](AUDIT.md) pour le détail.
-
 - **Code servi** : le serveur fournit le JavaScript et le binaire de l'agent (`/install.sh`). Un
   hébergeur malveillant peut servir une version piégée. Parade : héberger soi-même, construire
   l'agent depuis les sources, comparer les empreintes.

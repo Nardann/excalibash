@@ -4,4 +4,11 @@ data-dev/
 web/dist/
 web/public/fonts/
 agent/dist/
+
+# Secrets and local-only files
 .env
+.claude/
+docs/AUDIT.md
+docs/PROTOCOL.md
+*.log
+.DS_Store
