@@ -7,8 +7,8 @@ pas non plus se faire passer pour un utilisateur afin d'obtenir ses données.
 ## Ce que le serveur voit (métadonnées)
 
 Emails et noms d'affichage, la forme de l'arbre (qui est parent de qui, qui a accès à quoi),
-les dates, les tailles, le nombre d'éléments, les ids et versions des éléments, qui est connecté,
-les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
+les dates (dont la dernière activité de chaque compte), les tailles, le nombre d'éléments, les ids
+et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
@@ -49,11 +49,15 @@ un chiffré d'un objet à un autre.
   déconnexion. Sa clé publique est **recalculée localement** : celle que fournit le serveur doit
   correspondre, sinon on refuse la connexion. Une clé publique substituée amènerait sinon le client
   à sceller ses propres clés pour quelqu'un d'autre.
-- **Admin** : il peut inviter, supprimer un compte, ouvrir ou fermer les inscriptions et nommer
-  d'autres admins. Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
+- **Admin** : il peut inviter, ouvrir ou fermer les inscriptions, suspendre ou supprimer un compte,
+  nommer d'autres admins, et voir les métadonnées ci-dessus (stockage, machines, dernière activité). Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
   ni s'ajouter à un partage. L'API ne le permet pas, et même en trafiquant la base il n'obtiendrait
   que des chiffrés.
 - Mot de passe perdu : la clé de récupération permet d'en redéfinir un. Sans elle, les données sont perdues.
+- **Inscription** : quand un serveur SMTP est configuré, l'email est vérifié par un code à 6 chiffres
+  (stocké haché, 5 essais, 15 min). Une preuve de travail calculée par le navigateur, un champ piège
+  et un plafond horaire limitent les inscriptions automatiques. Ces mesures protègent le serveur,
+  pas les données : elles n'ont aucun rôle dans le chiffrement.
 
 ## Arbre de dossiers et partages
 

@@ -236,6 +236,21 @@ function Editor({ node }: { node: Node }) {
     },
     [editor, anchorBelow],
   );
+  /** The machine a node already talks to (through its shells or sites), so new views default to it. */
+  const nodeMachineId = (nodeId: string): string | null => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!data) return null;
+    for (const sh of data.shells) {
+      const t = session.terminals.get(sh.terminalId);
+      if (t) return t.machineId;
+    }
+    for (const w of data.webs ?? []) {
+      const v = session.webs.get(w.webId);
+      if (v) return v.machineId;
+    }
+    return null;
+  };
   const onNodeActivateRef = useRef(onNodeActivate);
   onNodeActivateRef.current = onNodeActivate;
 
@@ -649,6 +664,7 @@ function Editor({ node }: { node: Node }) {
       )}
       {webForm && (
         <WebForm
+          defaultMachineId={nodeMachineId(webForm)}
           onClose={() => setWebForm(null)}
           onCreate={async (machine, target) => {
             const x = excalidrawRef.current;
@@ -847,10 +863,18 @@ function NodeMenu(p: {
 }
 
 /** Target of a new web view: a service reachable from the chosen machine (itself or its LAN). */
-function WebForm({ onClose, onCreate }: { onClose: () => void; onCreate: (m: Machine, target: { url: string; insecure: boolean }) => void }) {
+function WebForm({
+  defaultMachineId,
+  onClose,
+  onCreate,
+}: {
+  defaultMachineId: string | null;
+  onClose: () => void;
+  onCreate: (m: Machine, target: { url: string; insecure: boolean }) => void;
+}) {
   const keys = useKeys();
   const [machines, setMachines] = useState<Machine[] | null>(null);
-  const [machineId, setMachineId] = useState(() => localStorage.getItem(LAST_MACHINE) ?? "");
+  const [machineId, setMachineId] = useState(() => defaultMachineId ?? localStorage.getItem(LAST_MACHINE) ?? "");
   const [scheme, setScheme] = useState("http");
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("80");
