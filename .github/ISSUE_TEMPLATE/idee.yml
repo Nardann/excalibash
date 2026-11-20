@@ -1,0 +1,21 @@
+name: Idée
+description: Proposer une fonctionnalité ou une amélioration
+labels: [enhancement]
+body:
+  - type: textarea
+    id: besoin
+    attributes:
+      label: Le besoin
+      description: La situation concrète (en TP, en cours, à la maison) que la proposition règle.
+    validations:
+      required: true
+  - type: textarea
+    id: proposition
+    attributes:
+      label: La proposition
+      description: Ce qui changerait pour l'utilisateur.
+  - type: textarea
+    id: securite
+    attributes:
+      label: Effet sur le chiffrement
+      description: La proposition fait-elle passer de nouvelles données par le serveur ? Si oui, comment restent-elles chiffrées ?

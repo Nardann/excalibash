@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Faille de sécurité
+    url: https://github.com/excalibash-fr/excalibash/security/advisories/new
+    about: Signalement privé, à utiliser à la place d'une issue publique.
+  - name: Site du projet
+    url: https://excalibash.fr
+    about: Présentation d'Excalibash.
