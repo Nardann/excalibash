@@ -6,7 +6,7 @@ import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
-import { BoardSession, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
+import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
@@ -17,6 +17,7 @@ import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
+import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -33,9 +34,12 @@ import {
   findEl,
   hideShell,
   nodeDataOf,
+  openWeb,
+  openShell,
   openWebWindowOf,
   openWindowOf,
   orphanWindows,
+  removeShell,
   removeWeb,
   setNodeLook,
   toggleAll,
@@ -122,6 +126,8 @@ function Editor({ node }: { node: Node }) {
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
   const [customizing, setCustomizing] = useState<string | null>(null);
+  /** Every machine icon with its shells and sites, for the side dock. */
+  const [dock, setDock] = useState<DockGroup[]>([]);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
@@ -263,6 +269,11 @@ function Editor({ node }: { node: Node }) {
     [editor, anchorBelow],
   );
   /** The machine a node already talks to (through its shells or sites), so new views default to it. */
+  /** The machine name of a local shell (its label), for an icon about to lose its last shell. */
+  const shellMachineName = (terminalId: string) => {
+    const label = session.terminals.get(terminalId)?.label;
+    return label && !isRemoteLabel(label) ? label : undefined;
+  };
   /** The machine of a node's running shells or sites, as the server reports them. */
   const liveMachineId = (nodeId: string): string | null => {
     const x = excalidrawRef.current;
@@ -401,6 +412,24 @@ function Editor({ node }: { node: Node }) {
           }, 0);
         }
       }
+      // The dock is for editors only (it opens, hides and closes windows).
+      if (x && editor) {
+        const groups: DockGroup[] = elements
+          .filter((e) => !e.isDeleted && nodeDataOf(e))
+          .map((e) => {
+            const nd = nodeDataOf(e)!;
+            return {
+              nodeId: e.id,
+              title: nd.title?.split("\n")[0] || null,
+              shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
+              webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
+              remote: !!nd.remote,
+              machineName: nd.machineName,
+            };
+          })
+          .filter((g) => g.shells.length + g.webs.length > 0);
+        setDock((prev) => (JSON.stringify(prev) === JSON.stringify(groups) ? prev : groups));
+      }
       // A node was deleted (here or by someone else): its windows go with it.
       if (editor && x) {
         const orphans = orphanWindows(elements);
@@ -531,6 +560,10 @@ function Editor({ node }: { node: Node }) {
             title={owner?.title?.split("\n")[0] ?? null}
             onToggleCollapsed={editor ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
             toggleTitle="Masquer (le shell continue, l'icône reste sur le schéma)"
+            onKill={() => {
+              session.closeTerminal(tid);
+              if (excalidrawRef.current) removeShell(excalidrawRef.current, nodeId, tid, shellMachineName(tid));
+            }}
           />
         );
       }
@@ -618,6 +651,42 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        {editor && dock.length > 0 && (
+          <WindowDock
+            session={session}
+            groups={dock}
+            onOpen={(nodeId, kind, id) => {
+              const x = excalidrawRef.current;
+              if (!x) return;
+              const win = kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id);
+              if (win) {
+                // Already open: bring it into view and to the front.
+                x.scrollToContent(win, { animate: true });
+                bringToFront(x, win.id);
+                activate(x, win.id);
+              } else if (kind === "web") openWeb(x, nodeId, id);
+              else openShell(x, nodeId, id);
+            }}
+            onHide={(kind, id) => {
+              const x = excalidrawRef.current;
+              const win = x && (kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id));
+              if (x && win) hideShell(x, win.id);
+            }}
+            onToggleAll={(nodeId) => excalidrawRef.current && toggleAll(excalidrawRef.current, nodeId)}
+            onAdd={(nodeId) => setAccess({ nodeId, kind: "remote" })}
+            onAddShell={(nodeId, anchor) => void newShellOnNode(nodeId, anchor)}
+            onKill={(nodeId, kind, id) => {
+              const x = excalidrawRef.current;
+              if (kind === "terminal") {
+                session.closeTerminal(id);
+                if (x) removeShell(x, nodeId, id, shellMachineName(id));
+              } else {
+                session.closeWeb(id);
+                if (x) removeWeb(x, nodeId, id);
+              }
+            }}
+          />
+        )}
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
             {selTerm.kind === "node" ? (

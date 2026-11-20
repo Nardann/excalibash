@@ -66,6 +66,8 @@ type Props = {
   /** Tooltip of the header's reduce button (windows of a node are hidden, not collapsed). */
   toggleTitle?: string;
   onCustomize?: (patch: TilePatch, collapse: boolean) => void;
+  /** Replaces the plain close: the shell of a machine icon is also removed from it. */
+  onKill?: () => void;
 };
 
 export function useIconUrl(icon: TileIcon | null | undefined) {
@@ -82,7 +84,7 @@ export function useIconUrl(icon: TileIcon | null | undefined) {
   return url;
 }
 
-export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, toggleTitle, onCustomize }: Props) {
+export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, toggleTitle, onCustomize, onKill }: Props) {
   const info = useTerminalInfo(session, terminalId);
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -195,11 +197,13 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
   const kill = async () => {
     const ok = await confirmDialog({
       title: "Fermer le terminal ?",
-      text: "Le shell et les programmes qui tournent dedans seront arrêtés.",
+      text: `Le shell et les programmes qui tournent dedans seront arrêtés${onKill ? ", et le shell retiré de la machine" : ""}.`,
       confirm: "Fermer",
       danger: true,
     });
-    if (ok) session.closeTerminal(terminalId);
+    if (!ok) return;
+    if (onKill) onKill();
+    else session.closeTerminal(terminalId);
   };
 
   const dot = `dot ${status === "running" ? "on" : status === "starting" ? "warn" : ""}`;
@@ -255,7 +259,7 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
             <Minimize2 size={14} />
           </button>
         )}
-        {(status === "running" || status === "starting") && session.canEdit && (
+        {(status === "running" || status === "starting" || onKill) && session.canEdit && (
           <button title="Fermer le shell" onClick={kill}>
             <Power size={14} />
           </button>

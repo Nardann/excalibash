@@ -208,6 +208,7 @@ function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
   }
 }
 export const openShell = (api: Api, nodeId: string, terminalId: string, focus = true) => open(api, "terminal", nodeId, terminalId, focus);
+export const openWeb = (api: Api, nodeId: string, webId: string, focus = true) => open(api, "web", nodeId, webId, focus);
 
 const overlap = (a: El, b: El) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
@@ -315,6 +316,20 @@ export function deleteElements(api: Api, list: El[]) {
   if (!list.length) return;
   const byId = new Map(list.map((e) => [e.id, newElementWith(e, { isDeleted: true })]));
   api.updateScene({ elements: all(api).map((e) => byId.get(e.id) ?? e), captureUpdate: CaptureUpdateAction.NEVER });
+}
+
+/**
+ * Removes a shell from its node (it was closed): its entry and its window go away. `machineName`
+ * (the shell's machine) is kept on an icon that had none yet, so it doesn't lose its label.
+ */
+export function removeShell(api: Api, nodeId: string, terminalId: string, machineName?: string) {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  const changed: El[] = [];
+  const keep = machineName && !data?.remote && !data?.machineName ? { machineName } : {};
+  if (node && data) changed.push(newElementWith(node, { customData: { ...data, ...keep, shells: data.shells.filter((s) => s.terminalId !== terminalId) } }));
+  for (const e of all(api)) if (cd(e).terminalId === terminalId && cd(e).nodeId === nodeId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
+  commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }
 
 /** Removes a web view from its node (its tunnel was closed). */
