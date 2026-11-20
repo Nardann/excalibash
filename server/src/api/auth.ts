@@ -318,11 +318,17 @@ authApi.post("/password", (req, res) => {
   res.json({ ok: true });
 });
 
-/** Public key lookup for sharing. Exact email match only. */
+/** Whether `a` and `b` already share an item (either way): a hidden account stays findable by its collaborators. */
+function shareSomething(a: string, b: string): boolean {
+  return !!db.prepare("SELECT 1 FROM grants g1 JOIN grants g2 ON g2.item_id = g1.item_id WHERE g1.user_id = ? AND g2.user_id = ? LIMIT 1").get(a, b);
+}
+
+/** Public key lookup for sharing. Exact email match only; a hidden account answers like a missing one. */
 authApi.get("/lookup", (req, res) => {
   limit(`lookup:${req.user!.id}`, 30);
   const row = findUserByEmail(str(req.query.email));
-  if (!row) throw new HttpError(404, "Aucun compte avec cet email");
+  const hidden = row && !row.discoverable && row.id !== req.user!.id && !shareSomething(req.user!.id, row.id);
+  if (!row || hidden) throw new HttpError(404, "Aucun compte avec cet email");
   res.json({ user: { id: row.id, name: row.name, email: row.email, publicKey: row.public_key } });
 });
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { EyeOff, Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
 import { api, type User } from "../api.ts";
 import { useAuth, useKeys, useUser } from "../auth.tsx";
 import { changePassword, forgetKeys } from "../account.ts";
@@ -18,10 +18,29 @@ export function Account() {
   const [name, setName] = useState(user.name);
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [busy, setBusy] = useState(false);
+  const [discoverable, setDiscoverable] = useState<boolean | null>(null);
 
   useEffect(() => {
     fingerprint(keys.pub).then(setFp);
   }, [keys]);
+
+  useEffect(() => {
+    api
+      .get<{ discoverable: boolean }>("/account")
+      .then((r) => setDiscoverable(r.discoverable))
+      .catch(toast.error);
+  }, []);
+
+  const toggleDiscoverable = async (value: boolean) => {
+    setDiscoverable(value);
+    try {
+      await api.put("/account/discoverable", { discoverable: value });
+      toast(value ? "Ton compte est trouvable par son email" : "Ton compte n'apparaît plus dans la recherche");
+    } catch (err) {
+      setDiscoverable(!value);
+      toast.error(err);
+    }
+  };
 
   const deleteAccount = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,6 +125,26 @@ export function Account() {
             Enregistrer
           </button>
         </form>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>
+            <EyeOff size={16} /> Visibilité
+          </h3>
+        </div>
+        <div style={{ padding: 20 }}>
+          <label className="check">
+            <input type="checkbox" checked={!!discoverable} disabled={discoverable === null} onChange={(e) => toggleDiscoverable(e.target.checked)} />
+            <span>
+              Trouvable par mon email au moment d'un partage
+              <small>
+                Décoché, quelqu'un qui tape ton email pour te partager un tableau voit « Aucun compte avec cet email », comme si tu n'existais pas. Les
+                personnes avec qui tu partages déjà quelque chose te trouvent toujours.
+              </small>
+            </span>
+          </label>
+        </div>
       </div>
 
       <div className="panel">

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.ts";
-import { createItem, useLibraryCtx } from "../library.tsx";
+import { createItem, useLibrary, useLibraryCtx } from "../library.tsx";
 import { toast } from "./ui.tsx";
 import "./onboarding.css";
 
@@ -25,9 +25,10 @@ const STEPS = [
 
 export function Onboarding() {
   const ctx = useLibraryCtx();
+  const { refresh } = useLibrary();
   const navigate = useNavigate();
   const [show, setShow] = useState(false);
-  const [step, setStep] = useState(0);
+  const [stepState, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
   const card = useRef<HTMLDivElement>(null);
 
@@ -47,6 +48,8 @@ export function Onboarding() {
   }, [show]);
 
   if (!show) return null;
+  // Back from the first board (the guide is not mounted on the board page): its step is done.
+  const step = Math.max(stepState, [...ctx.nodes.values()].some((n) => n.kind === "board" && !n.deletedAt) ? 1 : 0);
   const s = STEPS[step];
   const last = step === STEPS.length - 1;
 
@@ -60,6 +63,7 @@ export function Onboarding() {
       setBusy(true);
       try {
         const id = await createItem(ctx, "board", null, "Mon premier TP");
+        await refresh();
         setStep(1);
         navigate(`/board/${id}`);
       } catch (e) {
