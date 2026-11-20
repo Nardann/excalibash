@@ -158,6 +158,7 @@ addColumn("users", "verify_attempts", "INTEGER NOT NULL DEFAULT 0");
 addColumn("users", "suspended", "INTEGER NOT NULL DEFAULT 0");
 addColumn("users", "last_seen_at", "INTEGER");
 addColumn("users", "onboarded", "INTEGER NOT NULL DEFAULT 0", "UPDATE users SET onboarded = 1"); // existing users skip the guide
+addColumn("users", "discoverable", "INTEGER NOT NULL DEFAULT 1");
 
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");

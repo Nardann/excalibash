@@ -9,8 +9,14 @@ export const accountApi = Router();
 accountApi.use(requireUser);
 
 accountApi.get("/", (req, res) => {
-  const row = db.prepare("SELECT onboarded FROM users WHERE id = ?").get(req.user!.id) as { onboarded: number };
-  res.json({ onboarded: !!row.onboarded });
+  const row = db.prepare("SELECT onboarded, discoverable FROM users WHERE id = ?").get(req.user!.id) as { onboarded: number; discoverable: number };
+  res.json({ onboarded: !!row.onboarded, discoverable: !!row.discoverable });
+});
+
+accountApi.put("/discoverable", (req, res) => {
+  if (typeof req.body?.discoverable !== "boolean") throw new HttpError(400, "Valeur invalide");
+  db.prepare("UPDATE users SET discoverable = ? WHERE id = ?").run(req.body.discoverable ? 1 : 0, req.user!.id);
+  res.json({ discoverable: req.body.discoverable });
 });
 
 accountApi.post("/onboarded", (req, res) => {

@@ -234,9 +234,21 @@ const bob = await register("bob@test.local", "Bob", "bob-password-12");
   ok(after.status === 200, "connexion possible après vérification");
 }
 await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: false }));
+// A hidden account answers like a missing one, except to the people it already shares with.
+await as(bob, () => api("PUT", "/account/discoverable", { discoverable: false }));
+{
+  const hidden = await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"));
+  const missing = await as(alice, () => api("GET", "/auth/lookup?email=personne@test.local"));
+  ok(hidden.status === 404 && JSON.stringify(hidden.body) === JSON.stringify(missing.body), "compte masqué : même réponse qu'un compte inexistant");
+  ok((await as(bob, () => api("GET", "/account"))).body.discoverable === false, "le réglage de visibilité est enregistré");
+}
+await as(bob, () => api("PUT", "/account/discoverable", { discoverable: true }));
 const bobPub = (await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.user;
 nA = await tree(alice);
 await as(alice, () => lib.shareItem(ctxOf(alice, nA), F, bobPub, "editor"));
+await as(bob, () => api("PUT", "/account/discoverable", { discoverable: false }));
+ok((await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.user?.id === bob.user.id, "compte masqué : toujours trouvable par qui partage déjà avec lui");
+await as(bob, () => api("PUT", "/account/discoverable", { discoverable: true }));
 let nB = await tree(bob);
 ok(nB.get(F)?.name === "Projet secret" && nB.get(F)?.root, "Bob voit le dossier partagé à la racine de ses partages");
 ok(nB.get(S)?.name === "Sous-dossier infra", "le sous-dossier est partagé par héritage");

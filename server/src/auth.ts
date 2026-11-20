@@ -26,6 +26,7 @@ export type UserRow = {
   enc_vault: string | null;
   is_admin: number;
   color: string;
+  discoverable: number;
   created_at: number;
 };
 
