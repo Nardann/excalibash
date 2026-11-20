@@ -14,7 +14,7 @@ import { listMachines, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
-import { Avatar, Menu, Modal, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
+import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
@@ -43,6 +43,7 @@ import {
   toggleWeb,
   windowNodeId,
   migrateLegacyTerminals,
+  type RemoteRef,
 } from "../board/nodes.ts";
 
 const TILE = 120;
@@ -115,6 +116,8 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
+    /** A Telnet / SSH device: no agent on it, so nothing can be reached through it. */
+    remote: boolean;
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
@@ -198,7 +201,12 @@ function Editor({ node }: { node: Node }) {
    * "Add" dialog: a Telnet / SSH session or a web view. On a node both are offered as tabs; from
    * the machine picker (no node yet) only the Telnet / SSH form, since it creates its node.
    */
-  const [access, setAccess] = useState<{ nodeId?: string; kind: "remote" | "web" } | null>(null);
+  const [access, setAccess] = useState<{
+    nodeId?: string;
+    kind: "remote" | "web";
+    /** A new session to a device icon's own device: the Telnet / SSH form alone, prefilled. */
+    device?: RemoteRef;
+  } | null>(null);
 
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
@@ -208,8 +216,16 @@ function Editor({ node }: { node: Node }) {
       try {
         const info = await session.createTerminal(machine, 100, 30, target);
         localStorage.setItem(LAST_MACHINE, machine.id);
-        if (nodeId && findEl(x, nodeId) && !findEl(x, nodeId)!.isDeleted) addShell(x, nodeId, info.id);
-        else createNode(x, info.id);
+        const near = nodeId ? findEl(x, nodeId) : undefined;
+        const owner = near && !near.isDeleted ? near : undefined;
+        if (target) {
+          // A device gets an icon of its own, like a machine with an agent; sessions to the
+          // same device (another port, user or protocol) gather on that icon.
+          const rem = nodeDataOf(owner)?.remote;
+          if (owner && rem && rem.machineId === machine.id && rem.target.host === target.host) addShell(x, owner.id, info.id);
+          else createNode(x, info.id, { near: owner, title: target.host, remote: { machineId: machine.id, target } });
+        } else if (owner) addShell(x, owner.id, info.id, machine.id, machine.name);
+        else createNode(x, info.id, { machineId: machine.id, machineName: machine.name });
       } catch (e) {
         toast.error(e);
       }
@@ -237,7 +253,9 @@ function Editor({ node }: { node: Node }) {
       if (!data) return;
       const anchor = anchorBelow(nodeId);
       const webs = data.webs ?? [];
-      if (data.shells.length + webs.length === 0) anchor && setPicker({ anchor, nodeId });
+      // No shell yet: an icon that knows its machine (or its device) opens its own menu, whose
+      // "new shell" goes there; only an icon with no known machine asks which one.
+      if (data.shells.length + webs.length === 0) anchor && (nodeMachineId(nodeId) ? setNodeMenu({ anchor, nodeId }) : setPicker({ anchor, nodeId }));
       else if (data.shells.length === 1 && !webs.length) toggleShell(x, nodeId, data.shells[0].terminalId);
       else if (webs.length === 1 && !data.shells.length) toggleWeb(x, nodeId, webs[0].webId);
       else anchor && setNodeMenu({ anchor, nodeId });
@@ -245,7 +263,8 @@ function Editor({ node }: { node: Node }) {
     [editor, anchorBelow],
   );
   /** The machine a node already talks to (through its shells or sites), so new views default to it. */
-  const nodeMachineId = (nodeId: string): string | null => {
+  /** The machine of a node's running shells or sites, as the server reports them. */
+  const liveMachineId = (nodeId: string): string | null => {
     const x = excalidrawRef.current;
     const data = x && nodeDataOf(findEl(x, nodeId));
     if (!data) return null;
@@ -258,6 +277,50 @@ function Editor({ node }: { node: Node }) {
       if (v) return v.machineId;
     }
     return null;
+  };
+  /**
+   * The machine a node talks to: its live shells' or sites', else the one it remembers. What it
+   * remembers is board data, which any editor can write: a default for forms the user submits,
+   * never a machine to open a session on without asking.
+   */
+  const nodeMachineId = (nodeId: string): string | null => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!data) return null;
+    return liveMachineId(nodeId) ?? data.remote?.machineId ?? data.machineId ?? null;
+  };
+  /**
+   * New shell on a node, on the machine it already uses. A device's icon opens the Telnet / SSH
+   * form prefilled with its device (the target comes from the board, so the user checks and
+   * submits it). A machine known only from the icon's memory is confirmed first, named from the
+   * user's own machine list. The picker opens when the node has no machine, or it is offline.
+   */
+  const newShellOnNode = async (nodeId: string, anchor: MenuAnchor) => {
+    const x = excalidrawRef.current;
+    const data = x ? nodeDataOf(findEl(x, nodeId)) : undefined;
+    if (data?.remote) return setAccess({ nodeId, kind: "remote", device: data.remote });
+    const live = liveMachineId(nodeId);
+    const machineId = live ?? data?.machineId;
+    if (machineId) {
+      try {
+        const m = (await listMachines(keys)).find((x) => x.id === machineId);
+        if (m?.online) {
+          const ok =
+            !!live ||
+            (await confirmDialog({
+              title: `Ouvrir un shell sur ${m.name} ?`,
+              text: `Le shell s'ouvre sur ta machine ${m.name}, et les éditeurs de ce tableau pourront s'en servir.`,
+              confirm: "Ouvrir",
+            }));
+          if (ok) newShell(m, nodeId);
+          return;
+        }
+        toast(m ? `${m.name} est hors ligne : choisis une autre machine` : "Machine introuvable : choisis-en une autre");
+      } catch (e) {
+        toast.error(e);
+      }
+    }
+    setPicker({ anchor, nodeId });
   };
   const onNodeActivateRef = useRef(onNodeActivate);
   onNodeActivateRef.current = onNodeActivate;
@@ -321,6 +384,7 @@ function Editor({ node }: { node: Node }) {
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
+              remote: !!nd?.remote,
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
@@ -421,6 +485,8 @@ function Editor({ node }: { node: Node }) {
             session={session}
             shells={nd.shells.map((s) => s.terminalId)}
             webCount={(nd.webs ?? []).length}
+            machineName={nd.machineName}
+            remote={!!nd.remote}
             openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length + (nd.webs ?? []).filter((w) => openWebWindowOf(x, w.webId)).length : 0}
             title={nd.title}
             icon={nd.icon}
@@ -588,12 +654,15 @@ function Editor({ node }: { node: Node }) {
                     </button>
                   );
                 })}
-                <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
+                <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
                   <TerminalSquare size={14} />
                 </button>
-                <button title="Ajouter : Telnet / SSH vers un équipement, ou site web de la machine" onClick={() => setAccess({ nodeId: selTerm.id, kind: "remote" })}>
-                  <Plus size={14} />
-                </button>
+                {/* A device has no agent: no hop to another device or site through it. */}
+                {!selTerm.remote && (
+                  <button title="Ajouter : Telnet / SSH vers un équipement, ou site web de la machine" onClick={() => setAccess({ nodeId: selTerm.id, kind: "remote" })}>
+                    <Plus size={14} />
+                  </button>
+                )}
                 <span className="sep" />
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
                   <Palette size={14} />
@@ -637,7 +706,7 @@ function Editor({ node }: { node: Node }) {
           const el = x?.getSceneElements().find((e) => e.id === customizing);
           const nd = nodeDataOf(el);
           if (nd) {
-            const label = (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || "Machine";
+            const label = (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || nd.machineName || "Machine";
             return (
               <TileCustomizer
                 node
@@ -680,7 +749,7 @@ function Editor({ node }: { node: Node }) {
           api={excalidrawRef.current}
           onClose={() => setNodeMenu(null)}
           onNewShell={() => {
-            setPicker({ anchor: nodeMenu.anchor, nodeId: nodeMenu.nodeId });
+            void newShellOnNode(nodeMenu.nodeId, nodeMenu.anchor);
             setNodeMenu(null);
           }}
           onCustomize={() => {
@@ -695,10 +764,13 @@ function Editor({ node }: { node: Node }) {
       )}
       {access &&
         (() => {
+          const device = access.nodeId && excalidrawRef.current ? nodeDataOf(findEl(excalidrawRef.current, access.nodeId))?.remote : undefined;
           const remote = (bare?: boolean) => (
             <RemoteForm
               bare={bare}
-              defaultMachineId={(access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)}
+              defaultHost={device?.target.host}
+              defaultTarget={access.device?.target}
+              defaultMachineId={access.device?.machineId || (access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)}
               onClose={() => setAccess(null)}
               onCreate={(machine, target) => {
                 setAccess(null);
@@ -707,13 +779,14 @@ function Editor({ node }: { node: Node }) {
             />
           );
           // No node yet (machine picker): the session creates its node, a site needs one.
-          if (!access.nodeId) return remote();
+          if (!access.nodeId || access.device) return remote();
           const nodeId = access.nodeId;
           return (
             <AccessDialog kind={access.kind} onKind={(kind) => setAccess({ nodeId, kind })} onClose={() => setAccess(null)}>
               {remote(true)}
               <WebForm
                 bare
+                defaultHost={device?.target.host}
                 defaultMachineId={nodeMachineId(nodeId) ?? localStorage.getItem(LAST_MACHINE)}
                 onClose={() => setAccess(null)}
                 onCreate={async (machine, target) => {
@@ -721,7 +794,7 @@ function Editor({ node }: { node: Node }) {
                   setAccess(null);
                   try {
                     const web = await session.createWeb(machine, target);
-                    if (x) addWeb(x, nodeId, web.id);
+                    if (x) addWeb(x, nodeId, web.id, machine.id, machine.name);
                   } catch (e) {
                     toast.error(e);
                   }
@@ -856,7 +929,7 @@ function NodeMenu(p: {
   const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId)) || (data.webs ?? []).some((w) => openWebWindowOf(api, w.webId));
   return (
     <Menu anchor={p.anchor} onClose={p.onClose}>
-      <div className="menu-label">{data.title?.split("\n")[0] || "Shells"}</div>
+      <div className="menu-label">{data.title?.split("\n")[0] || data.machineName || "Shells"}</div>
       {data.shells.map((sh, i) => {
         const t = p.session.terminals.get(sh.terminalId);
         const open = !!openWindowOf(api, sh.terminalId);
@@ -895,22 +968,28 @@ function NodeMenu(p: {
           </button>
         );
       })}
-      <div className="menu-sep" />
-      <button
-        className="menu-item"
-        onClick={() => {
-          p.onClose();
-          toggleAll(api, p.nodeId);
-        }}
-      >
-        {anyOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} {anyOpen ? "Tout masquer" : "Tout ouvrir"}
-      </button>
+      {data.shells.length + (data.webs ?? []).length > 0 && (
+        <>
+          <div className="menu-sep" />
+          <button
+            className="menu-item"
+            onClick={() => {
+              p.onClose();
+              toggleAll(api, p.nodeId);
+            }}
+          >
+            {anyOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} {anyOpen ? "Tout masquer" : "Tout ouvrir"}
+          </button>
+        </>
+      )}
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
-      <button className="menu-item" onClick={p.onNewAccess}>
-        <Cable size={16} /> Telnet / SSH ou site web…
-      </button>
+      {!data.remote && (
+        <button className="menu-item" onClick={p.onNewAccess}>
+          <Cable size={16} /> Telnet / SSH ou site web…
+        </button>
+      )}
       <button className="menu-item" onClick={p.onCustomize}>
         <Palette size={16} /> Icône et libellé…
       </button>
@@ -975,15 +1054,18 @@ function WebForm({
   onClose,
   onCreate,
   bare,
+  defaultHost,
 }: {
   defaultMachineId: string | null;
   bare?: boolean;
+  /** The device of the icon, whose web interface is the likely target. */
+  defaultHost?: string;
   onClose: () => void;
   onCreate: (m: Machine, target: { url: string; insecure: boolean; hostHeader?: string; legacyTls?: boolean }) => void;
 }) {
   const choice = useMachineChoice(defaultMachineId);
   const [scheme, setScheme] = useState("http");
-  const [host, setHost] = useState("127.0.0.1");
+  const [host, setHost] = useState(defaultHost ?? "127.0.0.1");
   const [port, setPort] = useState("80");
   const [path, setPath] = useState("/");
   const [insecure, setInsecure] = useState(true);

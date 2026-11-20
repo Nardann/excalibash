@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { Monitor } from "lucide-react";
+import { Monitor, Router } from "lucide-react";
 import type { BoardSession } from "./collab.ts";
 import type { TileIcon } from "./personalLibrary.ts";
 import { useIconUrl } from "./TerminalEmbed.tsx";
@@ -12,6 +12,10 @@ export function NodeTile(p: {
   openCount: number;
   title?: string | null;
   icon?: TileIcon | null;
+  /** Name of the icon's machine, for when it has no shell left. */
+  machineName?: string;
+  /** A device reached over Telnet / SSH (no agent on it). */
+  remote?: boolean;
   active: boolean;
   onActivate: () => void;
 }) {
@@ -23,7 +27,7 @@ export function NodeTile(p: {
   );
   const statuses = statusKey.split(",");
   const state = statuses.includes("running") ? "on" : statuses.includes("starting") ? "warn" : "";
-  const label = p.title || (p.shells.length ? (p.session.terminals.get(p.shells[0])?.label ?? "Machine") : "Nouvelle machine");
+  const label = p.title || (p.shells.length && p.session.terminals.get(p.shells[0])?.label) || p.machineName || (p.shells.length ? "Machine" : "Nouvelle machine");
 
   // Clicking the icon activates it: that is the "open its shells" gesture. Fire once per
   // activation (the callback changes on every render while Excalidraw catches up).
@@ -54,8 +58,8 @@ export function NodeTile(p: {
           </div>
         ) : (
           <div className="tile-icon">
-            <Monitor size={40} strokeWidth={1.6} />
-            <span className="prompt">&gt;_</span>
+            {p.remote ? <Router size={40} strokeWidth={1.6} /> : <Monitor size={40} strokeWidth={1.6} />}
+            {!p.remote && <span className="prompt">&gt;_</span>}
             <span className={`dot ${state}`} />
           </div>
         )}

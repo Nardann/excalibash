@@ -65,19 +65,30 @@ export function RemoteForm({
   onClose,
   onCreate,
   bare,
+  defaultHost,
+  defaultTarget,
 }: {
   defaultMachineId: string | null;
+  /** Prefilled device (the icon's own device, when adding a session to it). */
+  defaultHost?: string;
+  /**
+   * Prefilled session (a device icon's own target, from the board: anyone editing the board could
+   * have written it). Only its protocol, host, port and user are taken, and the user submits it.
+   */
+  defaultTarget?: RemoteTarget;
   /** Rendered without its modal: a panel of the "add" dialog. */
   bare?: boolean;
   onClose: () => void;
   onCreate: (m: Machine, target: RemoteTarget) => void;
 }) {
   const choice = useMachineChoice(defaultMachineId);
-  const [kind, setKind] = useState<RemoteTarget["kind"]>("ssh");
-  const [host, setHost] = useState("");
-  const [port, setPort] = useState("22");
-  const [portEdited, setPortEdited] = useState(false);
-  const [user, setUser] = useState("");
+  const pre = defaultTarget && (["telnet", "ssh", "raw"] as const).includes(defaultTarget.kind) ? defaultTarget : undefined;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const [kind, setKind] = useState<RemoteTarget["kind"]>(pre?.kind ?? "ssh");
+  const [host, setHost] = useState(str(pre?.host) || defaultHost || "");
+  const [port, setPort] = useState(pre && Number.isInteger(pre.port) ? String(pre.port) : DEFAULT_PORT[pre?.kind ?? "ssh"]);
+  const [portEdited, setPortEdited] = useState(!!pre);
+  const [user, setUser] = useState(str(pre?.user));
   const [legacy, setLegacy] = useState({ legacyKex: false, legacyHostKey: false, legacyCiphers: false });
   const [hostKeyCheck, setHostKeyCheck] = useState<"tofu" | "off">("tofu");
   const legacyAll = useRef<HTMLInputElement>(null);
