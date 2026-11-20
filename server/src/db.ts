@@ -143,6 +143,22 @@ if (!(db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).some((
   db.exec("ALTER TABLE users ADD COLUMN enc_library TEXT");
 }
 
+/** Adds a column to an existing table if it is missing (lightweight migrations). */
+function addColumn(table: string, column: string, ddl: string, backfill?: string) {
+  if ((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  if (backfill) db.exec(backfill);
+}
+
+// Registration, verification and administration.
+addColumn("users", "email_verified", "INTEGER NOT NULL DEFAULT 1"); // accounts from before verification count as verified
+addColumn("users", "verify_code_hash", "TEXT");
+addColumn("users", "verify_expires", "INTEGER");
+addColumn("users", "verify_attempts", "INTEGER NOT NULL DEFAULT 0");
+addColumn("users", "suspended", "INTEGER NOT NULL DEFAULT 0");
+addColumn("users", "last_seen_at", "INTEGER");
+addColumn("users", "onboarded", "INTEGER NOT NULL DEFAULT 0", "UPDATE users SET onboarded = 1"); // existing users skip the guide
+
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");
 }

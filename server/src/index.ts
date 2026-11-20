@@ -15,6 +15,7 @@ import { joinBoard, flushAllRooms } from "./rooms.ts";
 import { authenticateAgent, handleAgent } from "./terminals.ts";
 import { installScript } from "./install.ts";
 import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
+import { accountApi } from "./api/account.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
 
 const CSP = [
@@ -54,7 +55,12 @@ app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
 });
 app.get("/api/config", (req, res) => {
-  res.json({ proxyUrl: proxyUrl(req) });
+  res.json({
+    proxyUrl: proxyUrl(req),
+    emailVerification: !!(config.smtp.host || config.smtp.transport === "log"),
+    contactEmail: config.contactEmail || null,
+    legalName: config.legalName || null,
+  });
 });
 // Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
 const small = express.json({ limit: "256kb" });
@@ -64,6 +70,7 @@ app.use("/api/machines/pairings", small, pairingOwnerApi);
 app.use("/api/machines", small, machinesApi);
 app.use("/api/pair", small, pairingAgentApi);
 app.use("/api/admin", small, adminApi);
+app.use("/api/account", small, accountApi);
 app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)(req, res, next), itemsApi);
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Introuvable" });
