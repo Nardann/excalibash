@@ -1,10 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
-import { Download, KeyRound, Loader2, LockKeyhole, ShieldCheck } from "lucide-react";
-import { api, type User } from "../api.ts";
+import { Download, KeyRound, Loader2, LockKeyhole, MailCheck, ShieldCheck } from "lucide-react";
+import { api, ApiError, type User } from "../api.ts";
 import { useAuth } from "../auth.tsx";
-import { login, recover, register, unlock, type Session } from "../account.ts";
+import { checkCode, login, recover, register, resendCode, unlock, verifyEmail, type Session } from "../account.ts";
+import type { KeyPair } from "../crypto.ts";
 import { Logo, copyText } from "../components/ui.tsx";
+import "./auth.css";
 
 type Status = { needsSetup: boolean; registrationOpen: boolean };
 type Mode = "login" | "register" | "recover";
@@ -20,6 +22,9 @@ export function AuthPage({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ email: "", name: "", password: "", confirm: "", recoveryKey: "" });
   const [pending, setPending] = useState<(Session & { recoveryKey: string }) | null>(null);
+  const [website, setWebsite] = useState("");
+  // Email step: after sign-up (keys + recovery key in memory) or after a login refused for an unverified email.
+  const [verifying, setVerifying] = useState<{ email: string; keys?: KeyPair; recoveryKey?: string; password?: string } | null>(null);
 
   useEffect(() => {
     api.get<Status>("/auth/status").then(setStatus).catch(() => {});
@@ -39,6 +44,26 @@ export function AuthPage({ mode }: { mode: Mode }) {
       />
     );
   }
+  if (verifying) {
+    return (
+      <VerifyScreen
+        email={verifying.email}
+        onSubmit={async (code) => {
+          if (verifying.keys && verifying.recoveryKey) {
+            const s = await verifyEmail(verifying.email, code, verifying.keys);
+            setPending({ ...s, recoveryKey: verifying.recoveryKey });
+            setVerifying(null);
+          } else {
+            await checkCode(verifying.email, code);
+            const s = await login(verifying.email, verifying.password ?? "");
+            signedIn(s.user, s.keys);
+            navigate(next, { replace: true });
+          }
+        }}
+        onBack={() => setVerifying(null)}
+      />
+    );
+  }
   if (user && keys) return <Navigate to={next} replace />;
   if (status?.needsSetup && mode === "login") return <Navigate to="/register" replace />;
 
@@ -55,7 +80,10 @@ export function AuthPage({ mode }: { mode: Mode }) {
     setBusy(true);
     try {
       if (mode === "register") {
-        setPending(await register({ email: form.email, name: form.name, password: form.password, invite }));
+        if (website) return;
+        const r = await register({ email: form.email, name: form.name, password: form.password, invite });
+        if ("needsVerification" in r) setVerifying({ email: r.email, keys: r.keys, recoveryKey: r.recoveryKey });
+        else setPending(r);
       } else if (mode === "recover") {
         const s = await recover(form.email, form.recoveryKey, form.password);
         signedIn(s.user, s.keys);
@@ -66,7 +94,14 @@ export function AuthPage({ mode }: { mode: Mode }) {
         navigate(next, { replace: true });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (err instanceof ApiError && err.code === "EMAIL_NOT_VERIFIED") {
+        resendCode(form.email).catch(() => {});
+        setVerifying({ email: form.email, password: form.password });
+      } else if (err instanceof ApiError && err.code === "SUSPENDED") {
+        setError("Compte suspendu. Contacte l'administrateur.");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -131,11 +166,23 @@ export function AuthPage({ mode }: { mode: Mode }) {
                 <input className="input" type="password" required minLength={10} autoComplete="new-password" {...field("confirm")} />
               </label>
             )}
+            {mode === "register" && (
+              <input
+                className="hp"
+                name="website"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-hidden="true"
+                value={website}
+                onChange={(e) => setWebsite(e.target.value)}
+              />
+            )}
             {error && <div className="form-error">{error}</div>}
             <button className="btn btn-primary" disabled={busy} style={{ height: 44 }}>
               {busy ? (
                 <>
-                  <Loader2 size={16} className="spin" /> {mode === "login" ? "Déchiffrement des clés…" : "Génération des clés…"}
+                  <Loader2 size={16} className="spin" />{" "}
+                  {mode === "login" ? "Déchiffrement des clés…" : "Génération des clés et vérification anti-robot…"}
                 </>
               ) : mode === "register" ? (
                 "Créer le compte"
@@ -166,6 +213,85 @@ export function AuthPage({ mode }: { mode: Mode }) {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function VerifyScreen({ email, onSubmit, onBack }: { email: string; onSubmit: (code: string) => Promise<void>; onBack: () => void }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [wait, setWait] = useState(30);
+  useEffect(() => {
+    if (wait <= 0) return;
+    const t = setTimeout(() => setWait(wait - 1), 1000);
+    return () => clearTimeout(t);
+  }, [wait]);
+  return (
+    <div className="auth">
+      <div className="auth-card">
+        <MailCheck size={44} style={{ color: "var(--brand)" }} />
+        <h1 className="display">Vérifie ton email</h1>
+        <p className="hint">
+          Nous avons envoyé un code à 6 chiffres à <b>{email}</b>. Il est valable 15 minutes.
+        </p>
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setError("");
+            try {
+              await onSubmit(code.trim());
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+              setBusy(false);
+            }
+          }}
+        >
+          <label className="field">
+            Code
+            <input
+              className="input mono"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              required
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+            />
+          </label>
+          {error && <div className="form-error">{error}</div>}
+          {info && <p className="hint">{info}</p>}
+          <button className="btn btn-primary" disabled={busy || code.length !== 6} style={{ height: 44 }}>
+            {busy ? <Loader2 size={16} className="spin" /> : "Valider"}
+          </button>
+        </form>
+        <div className="hint" style={{ marginTop: 16, textAlign: "center", display: "grid", gap: 6 }}>
+          <button
+            className="link"
+            style={{ background: "none", border: 0, cursor: wait > 0 ? "default" : "pointer" }}
+            disabled={wait > 0}
+            onClick={async () => {
+              setWait(30);
+              setError("");
+              try {
+                await resendCode(email);
+                setInfo("Un nouveau code vient d'être envoyé.");
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+              }
+            }}
+          >
+            {wait > 0 ? `Renvoyer le code (${wait} s)` : "Renvoyer le code"}
+          </button>
+          <button className="link" style={{ background: "none", border: 0, cursor: "pointer" }} onClick={onBack}>
+            Retour
+          </button>
+        </div>
       </div>
     </div>
   );

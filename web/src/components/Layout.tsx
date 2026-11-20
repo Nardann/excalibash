@@ -4,6 +4,7 @@ import { ChevronRight, Folder, FolderOpen, HardDrive, LogOut, Moon, Server, Shie
 import { useAuth, useUser } from "../auth.tsx";
 import { childrenOf, moveItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { Avatar, Logo, toast, useTheme } from "./ui.tsx";
+import { Onboarding } from "./Onboarding.tsx";
 
 export const DRAG_TYPE = "application/x-excalibash-items";
 
@@ -70,6 +71,7 @@ export function Layout() {
       <main className="main">
         <Outlet />
       </main>
+      <Onboarding />
     </div>
   );
 }

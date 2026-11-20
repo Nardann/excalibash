@@ -6,6 +6,9 @@ import { createServer } from "node:http";
 import WebSocket from "../server/node_modules/ws/index.js";
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
+import { solveChallenge } from "../web/src/pow.ts";
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 
@@ -35,6 +38,14 @@ async function api(method: string, path: string, body?: unknown) {
 
 type U = { user: any; keys: c.KeyPair; cookie: string; recovery: string };
 
+const pow = async () => solveChallenge((await api("GET", "/auth/challenge")).body);
+
+/** Last verification code emailed to `email`, read from the server log (SMTP_TRANSPORT=log). */
+function mailCode(email: string): string {
+  const lines = readFileSync(`${dirname(DB)}/server.log`, "utf8").split("\n").filter((l) => l.startsWith(`[mail] to=${email} `));
+  return lines.at(-1)?.match(/code=(\d{6})/)?.[1] ?? "";
+}
+
 async function register(email: string, name: string, password: string, invite?: string): Promise<U> {
   jar.current = "";
   const id = c.randomId();
@@ -44,6 +55,7 @@ async function register(email: string, name: string, password: string, invite?: 
   const rraw = c.randomBytes(32);
   const rec = await c.recoveryKeys(rraw);
   const r = await api("POST", "/auth/register", {
+    pow: await pow(), website: "",
     id, email, name, invite, salt, authKey,
     publicKey: c.toB64(kp.pub),
     encPrivateKey: await c.box(masterKey, kp.pkcs8, c.AAD.priv(id)),
@@ -51,7 +63,13 @@ async function register(email: string, name: string, password: string, invite?: 
     recoveryAuth: rec.recoveryAuth,
   });
   if (r.status !== 200) throw new Error(`register ${email}: ${JSON.stringify(r.body)}`);
-  return { user: r.body.user, keys: { priv: await c.importPrivateKey(kp.pkcs8), pub: kp.pub }, cookie: jar.current, recovery: c.formatRecoveryKey(rraw) };
+  let user = r.body.user;
+  if (r.body.needsVerification) {
+    const v = await api("POST", "/auth/verify", { email, code: mailCode(email) });
+    if (v.status !== 200) throw new Error(`verify ${email}: ${JSON.stringify(v.body)}`);
+    user = v.body.user;
+  }
+  return { user, keys: { priv: await c.importPrivateKey(kp.pkcs8), pub: kp.pub }, cookie: jar.current, recovery: c.formatRecoveryKey(rraw) };
 }
 
 async function as<T>(u: U, fn: () => Promise<T>): Promise<T> {
@@ -163,6 +181,48 @@ ok(agentLog.includes(machine.fingerprint), "l'agent affiche la même empreinte q
 // Bob + share F.
 await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: true }));
 const bob = await register("bob@test.local", "Bob", "bob-password-12");
+// Anti-bot and email verification (registrations are open here).
+{
+  const noPow = await api("POST", "/auth/register", { email: "x@test.local", name: "X" });
+  ok(noPow.status === 400 && /anti-robot/.test(noPow.body.error), "inscription sans preuve de travail refusée");
+  const trap = await api("POST", "/auth/register", { pow: await pow(), website: "http://spam", email: "x@test.local", name: "X" });
+  ok(trap.status === 400, "champ piège rempli refusé");
+  const badSig = await api("POST", "/auth/register", { pow: { ...(await pow()), signature: "00" }, website: "", email: "x@test.local", name: "X" });
+  ok(badSig.status === 400, "signature de défi invalide refusée");
+
+  const id = c.randomId();
+  const b64 = "AAAAAAAAAAAAAAAA";
+  const dave = "dave@test.local";
+  jar.current = "";
+  const usedPow = await pow();
+  const reg = await api("POST", "/auth/register", {
+    pow: usedPow, website: "", id, email: dave, name: "Dave", salt: b64, authKey: b64,
+    publicKey: b64, encPrivateKey: b64, recoveryEncPrivateKey: b64, recoveryAuth: b64,
+  });
+  ok(reg.status === 200 && reg.body.needsVerification && !reg.body.user && !jar.current, "inscription : en attente de vérification, sans session");
+  const replay = await api("POST", "/auth/register", { pow: usedPow, website: "", email: "x@test.local", name: "X" });
+  ok(replay.status === 400 && /anti-robot/.test(replay.body.error), "preuve de travail rejouée refusée");
+  const dup = await api("POST", "/auth/register", {
+    pow: await pow(), website: "", id: c.randomId(), email: dave, name: "Dave", salt: b64, authKey: b64,
+    publicKey: b64, encPrivateKey: b64, recoveryEncPrivateKey: b64, recoveryAuth: b64,
+  });
+  ok(dup.status === 409 && /renvoyer/i.test(dup.body.error), "email non vérifié déjà inscrit : 409 avec invitation à renvoyer le code");
+  const early = await api("POST", "/auth/login", { email: dave, authKey: b64 });
+  ok(early.status === 403 && early.body.code === "EMAIL_NOT_VERIFIED", "connexion avant vérification : EMAIL_NOT_VERIFIED");
+  const code = mailCode(dave);
+  ok(/^\d{6}$/.test(code), "un code à 6 chiffres est envoyé par email");
+  const wrong = await api("POST", "/auth/verify", { email: dave, code: code === "000000" ? "111111" : "000000" });
+  ok(wrong.status === 400 && !jar.current, "mauvais code refusé");
+  const resend = await api("POST", "/auth/resend", { email: dave });
+  const ghost = await api("POST", "/auth/resend", { email: "personne@test.local" });
+  ok(resend.status === 200 && ghost.status === 200 && JSON.stringify(resend.body) === JSON.stringify(ghost.body), "renvoi du code : même réponse si le compte existe ou non");
+  const oldCode = await api("POST", "/auth/verify", { email: dave, code });
+  ok(oldCode.status === 400 || mailCode(dave) === code, "un code remplacé n'est plus accepté");
+  const good = await api("POST", "/auth/verify", { email: dave, code: mailCode(dave) });
+  ok(good.status === 200 && good.body.user?.email === dave && !!jar.current, "bon code accepté : session ouverte");
+  const after = await api("POST", "/auth/login", { email: dave, authKey: b64 });
+  ok(after.status === 200, "connexion possible après vérification");
+}
 await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: false }));
 const bobPub = (await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.user;
 nA = await tree(alice);

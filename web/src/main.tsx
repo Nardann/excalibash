@@ -12,6 +12,7 @@ import { Dashboard } from "./pages/Dashboard.tsx";
 import { Machines } from "./pages/Machines.tsx";
 import { Admin } from "./pages/Admin.tsx";
 import { Account } from "./pages/Account.tsx";
+import { Privacy } from "./pages/Privacy.tsx";
 import { Landing } from "./landing/Landing.tsx";
 
 const BoardPage = lazy(() => import("./pages/BoardPage.tsx"));
@@ -36,6 +37,7 @@ function App() {
       <Route path="/login" element={<AuthPage mode="login" />} />
       <Route path="/register" element={<AuthPage mode="register" />} />
       <Route path="/recover" element={<AuthPage mode="recover" />} />
+      <Route path="/confidentialite" element={<Privacy />} />
       <Route element={<RequireAuth />}>
         <Route
           path="/board/:id"

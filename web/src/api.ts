@@ -52,9 +52,11 @@ export type TerminalInfo = {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -66,7 +68,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error ?? `Erreur ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, data.error ?? `Erreur ${res.status}`, data.code);
   return data as T;
 }
 

@@ -1,6 +1,7 @@
 // Account key management: the password never leaves the browser, the private key is only
 // ever stored encrypted on the server and as a non-extractable CryptoKey in IndexedDB.
 import { api, type User } from "./api.ts";
+import { solveChallenge, type Challenge } from "./pow.ts";
 import {
   AAD,
   box,
@@ -76,14 +77,21 @@ async function openPrivateKey(encPrivateKey: string, key: Parameters<typeof unbo
 
 export type Session = { user: User; keys: KeyPair };
 
-export async function register(o: { email: string; name: string; password: string; invite?: string | null }): Promise<Session & { recoveryKey: string }> {
+export type Registered = Session & { recoveryKey: string };
+/** Account created but the email is not verified yet: keys stay in memory until the code is accepted. */
+export type PendingRegistration = { needsVerification: true; email: string; keys: KeyPair; recoveryKey: string };
+
+export async function register(o: { email: string; name: string; password: string; invite?: string | null }): Promise<Registered | PendingRegistration> {
   const id = randomId();
   const salt = toB64(randomBytes(16));
   const { authKey, masterKey } = await deriveAccountKeys(o.password, salt);
   const kp = await generateKeyPair();
   const recoveryRaw = randomBytes(32);
   const rec = await recoveryKeys(recoveryRaw);
-  const r = await api.post<{ user: User }>("/auth/register", {
+  const pow = await solveChallenge(await api.get<Challenge>("/auth/challenge"));
+  const r = await api.post<{ user?: User; needsVerification?: boolean }>("/auth/register", {
+    pow,
+    website: "",
     id,
     email: o.email,
     name: o.name,
@@ -96,8 +104,25 @@ export async function register(o: { email: string; name: string; password: strin
     recoveryAuth: rec.recoveryAuth,
   });
   const keys = { priv: await importPrivateKey(kp.pkcs8), pub: kp.pub };
+  if (r.needsVerification || !r.user) return { needsVerification: true, email: o.email, keys, recoveryKey: formatRecoveryKey(recoveryRaw) };
   await storeKeys(r.user.id, keys);
   return { user: r.user, keys, recoveryKey: formatRecoveryKey(recoveryRaw) };
+}
+
+/** Checks the emailed code, then keeps the keys on this device. */
+export async function verifyEmail(email: string, code: string, keys: KeyPair): Promise<Session> {
+  const r = await api.post<{ user: User }>("/auth/verify", { email, code });
+  await storeKeys(r.user.id, keys);
+  return { user: r.user, keys };
+}
+
+/** Verification for an account whose keys are not in memory (login path): the caller then logs in. */
+export async function checkCode(email: string, code: string): Promise<void> {
+  await api.post("/auth/verify", { email, code });
+}
+
+export async function resendCode(email: string): Promise<void> {
+  await api.post("/auth/resend", { email });
 }
 
 export async function login(email: string, password: string): Promise<Session> {

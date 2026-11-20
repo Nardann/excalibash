@@ -1,0 +1,27 @@
+.priv {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 24px 56px;
+}
+.priv h1 {
+  font-size: 40px;
+  margin: 8px 0 20px;
+}
+.priv h2 {
+  font-size: 26px;
+  margin: 32px 0 8px;
+}
+.priv p,
+.priv li {
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--lp-ink-soft);
+}
+.priv ul {
+  padding-left: 22px;
+}
+.priv a {
+  color: var(--lp-ink);
+  font-weight: 600;
+  text-decoration: underline;
+}

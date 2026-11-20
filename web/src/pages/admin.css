@@ -1,0 +1,79 @@
+.admin-summary {
+  margin: 0 0 18px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.admin-summary b {
+  color: var(--ink);
+}
+.admin-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.admin-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.admin-search .input {
+  width: 180px;
+}
+.admin-tools select.input {
+  width: auto;
+}
+.admin-note {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+.admin-user {
+  flex-wrap: wrap;
+}
+.admin-user.is-suspended .title,
+.admin-user.is-suspended .sub {
+  opacity: 0.6;
+}
+.admin-user .badge {
+  margin-left: 6px;
+}
+.admin-badge-off {
+  background: var(--danger);
+  color: #fff;
+}
+.admin-facts {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+.admin-facts dt {
+  font-size: 0.75em;
+  color: var(--muted);
+}
+.admin-facts dd {
+  margin: 0;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.admin-actions {
+  display: flex;
+  gap: 6px;
+}
+@media (max-width: 760px) {
+  .admin-user .grow {
+    flex-basis: calc(100% - 60px);
+  }
+  .admin-facts {
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    flex-basis: 100%;
+  }
+  .admin-actions {
+    flex-basis: 100%;
+  }
+  .admin-search .input {
+    width: 140px;
+  }
+}

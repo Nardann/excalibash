@@ -246,6 +246,10 @@ class Room implements BoardRoom {
     db.prepare("UPDATE items SET updated_at = ? WHERE id = ?").run(Date.now(), this.boardId);
   }
 
+  kick(userId: string, code: number, reason: string): void {
+    for (const [ws, c] of this.clients) if (c.user.id === userId) ws.close(code, reason);
+  }
+
   /** Disconnects everyone; pending edits are dropped when `discard` (content was replaced). */
   evict(code: number, reason: string, discard = false): void {
     if (discard) {
@@ -274,6 +278,11 @@ export function flushRoom(boardId: string): void {
 
 export function evictRoom(boardId: string, code: number, reason: string, discard = false): void {
   (rooms.get(boardId) as Room | undefined)?.evict(code, reason, discard);
+}
+
+/** Closes every board socket of a user (e.g. suspended account). */
+export function kickUser(userId: string, code: number, reason: string): void {
+  for (const r of rooms.values()) (r as Room).kick(userId, code, reason);
 }
 
 export function flushAllRooms(): void {

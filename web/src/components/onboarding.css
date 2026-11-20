@@ -1,0 +1,68 @@
+.onb {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  width: min(340px, calc(100vw - 24px));
+  padding: 16px 18px;
+  border: 2px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  animation: onb-in 0.18s ease-out;
+}
+.onb:focus {
+  outline: none;
+}
+.onb:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+.onb-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.onb-head h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.onb-count {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.onb p {
+  margin: 8px 0 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.onb-do {
+  width: 100%;
+  margin-bottom: 12px;
+}
+.onb-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+@keyframes onb-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onb {
+    animation: none;
+  }
+}
+@media (max-width: 640px) {
+  .onb {
+    right: 12px;
+    bottom: 12px;
+  }
+}

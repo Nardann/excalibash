@@ -292,6 +292,13 @@ export function dropMachine(machineId: string): void {
   }
 }
 
+/** Disconnects the agents of all machines owned by a user (suspended account). */
+export function disconnectUserMachines(userId: string): void {
+  for (const { id } of db.prepare("SELECT id FROM machines WHERE owner_id = ?").all(userId) as { id: string }[]) {
+    agents.get(id)?.ws.close(4403, "compte suspendu");
+  }
+}
+
 export function disconnectMachine(machineId: string): void {
   agents.get(machineId)?.ws.close(4001, "jeton régénéré");
 }
@@ -303,7 +310,9 @@ export function authenticateAgent(req: IncomingMessage): string | undefined {
   const header = req.headers.authorization ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : (url.searchParams.get("token") ?? "");
   if (!token) return undefined;
-  const row = db.prepare("SELECT id FROM machines WHERE token_hash = ?").get(sha256(token)) as { id: string } | undefined;
+  const row = db
+    .prepare("SELECT m.id FROM machines m JOIN users u ON u.id = m.owner_id WHERE m.token_hash = ? AND u.suspended = 0")
+    .get(sha256(token)) as { id: string } | undefined;
   return row?.id;
 }
 

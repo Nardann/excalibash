@@ -15,6 +15,21 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Public URL of the web-tunnel origin behind a reverse proxy (e.g. https://tunnel.example.com)
       PROXY_URL: ${PROXY_URL:-}
+      # Outgoing email for sign-up verification codes (put the real values in .env, not here).
+      # Without SMTP_HOST, new accounts are not email-verified.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      # "true" for port 465 (implicit TLS)
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      # Sender, e.g. "Excalibash <no-reply@example.com>"
+      SMTP_FROM: ${SMTP_FROM:-}
+      # Shown on the privacy page
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      LEGAL_NAME: ${LEGAL_NAME:-}
+      # Global cap on new accounts per hour (anti-abuse)
+      REGISTRATIONS_PER_HOUR: ${REGISTRATIONS_PER_HOUR:-50}
     volumes:
       - excalibash-data:/data
 

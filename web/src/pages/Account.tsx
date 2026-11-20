@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
-import { Fingerprint, KeyRound, Loader2 } from "lucide-react";
+import { useNavigate, Link } from "react-router-dom";
+import { Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
 import { api, type User } from "../api.ts";
 import { useAuth, useKeys, useUser } from "../auth.tsx";
-import { changePassword } from "../account.ts";
-import { fingerprint } from "../crypto.ts";
-import { copyText, toast } from "../components/ui.tsx";
+import { changePassword, forgetKeys } from "../account.ts";
+import { deriveAccountKeys, fingerprint } from "../crypto.ts";
+import { confirmDialog, copyText, toast } from "../components/ui.tsx";
 
 export function Account() {
   const user = useUser();
   const keys = useKeys();
-  const { setUser } = useAuth();
+  const { setUser, logout } = useAuth();
+  const navigate = useNavigate();
+  const [delPw, setDelPw] = useState("");
+  const [delBusy, setDelBusy] = useState(false);
   const [fp, setFp] = useState("");
   const [name, setName] = useState(user.name);
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
@@ -18,6 +22,38 @@ export function Account() {
   useEffect(() => {
     fingerprint(keys.pub).then(setFp);
   }, [keys]);
+
+  const deleteAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const ok = await confirmDialog({
+      title: "Supprimer ton compte ?",
+      text: "C'est définitif. Tes dossiers disparaissent pour tout le monde, et tes machines sont déconnectées.",
+      confirm: "Supprimer mon compte",
+      danger: true,
+    });
+    if (!ok) return;
+    setDelBusy(true);
+    try {
+      const { salt } = await api.post<{ salt: string }>("/auth/prelogin", { email: user.email });
+      const { authKey } = await deriveAccountKeys(delPw, salt);
+      const res = await fetch("/api/account", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ authKey }),
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? (res.status === 401 || res.status === 403 ? "Mot de passe incorrect" : `Erreur ${res.status}`));
+      }
+      await forgetKeys();
+      await logout();
+      navigate("/");
+    } catch (err) {
+      toast.error(err);
+      setDelBusy(false);
+    }
+  };
 
   return (
     <>
@@ -115,6 +151,31 @@ export function Account() {
           </button>
         </form>
       </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>
+            <Trash2 size={16} /> Supprimer mon compte
+          </h3>
+        </div>
+        <form style={{ padding: 20, display: "grid", gap: 12, maxWidth: 420 }} onSubmit={deleteAccount}>
+          <p className="sub" style={{ margin: 0 }}>
+            La suppression est définitive. Tes données sont chiffrées avec tes clés : une fois le compte supprimé, elles sont irrécupérables. Les dossiers que tu
+            possèdes, même partagés, disparaissent pour tout le monde. Tes machines sont déconnectées.
+          </p>
+          <label className="field">
+            Mot de passe
+            <input className="input" type="password" required autoComplete="current-password" value={delPw} onChange={(e) => setDelPw(e.target.value)} />
+          </label>
+          <button className="btn btn-danger" disabled={delBusy || !delPw}>
+            {delBusy ? <Loader2 size={16} className="spin" /> : "Supprimer mon compte"}
+          </button>
+        </form>
+      </div>
+
+      <p className="sub" style={{ marginTop: 8 }}>
+        <Link to="/confidentialite">Confidentialité</Link>
+      </p>
     </>
   );
 }

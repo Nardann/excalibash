@@ -126,9 +126,21 @@ export function userFromRequest(req: IncomingMessage): User | undefined {
   const hash = currentSessionHash(req);
   if (!hash) return undefined;
   const row = db
-    .prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?")
+    .prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.suspended = 0")
     .get(hash, Date.now()) as UserRow | undefined;
-  return row ? toUser(row) : undefined;
+  if (!row) return undefined;
+  touchUser(row.id);
+  return toUser(row);
+}
+
+const seen = new Map<string, number>();
+
+/** Records activity at most once every 5 minutes per user. */
+function touchUser(id: string): void {
+  const now = Date.now();
+  if ((seen.get(id) ?? 0) > now - 300_000) return;
+  seen.set(id, now);
+  db.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?").run(now, id);
 }
 
 declare module "express-serve-static-core" {
