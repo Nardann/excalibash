@@ -18,7 +18,8 @@ import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } 
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
-import { finishCable, maintainCables } from "../board/cables.ts";
+import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
+import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -137,6 +138,10 @@ function Editor({ node }: { node: Node }) {
   const savedArrow = useRef<Partial<AppState> | null>(null);
   const cableFrame = useRef<number | null>(null);
   const cableKey = useRef(-1);
+  /** Ends of the cables with something to show (or of the selected cable), in viewport coordinates. */
+  const [cableMarks, setCableMarks] = useState<CableMark[]>([]);
+  const [cableEdit, setCableEdit] = useState<{ cableId: string; end: End } | null>(null);
+  const [cableZoom, setCableZoom] = useState(1);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
@@ -421,6 +426,32 @@ function Editor({ node }: { node: Node }) {
           }, 0);
         } else if (idle && appState.activeTool.type !== "arrow") stopCable();
       }
+      // Interface / IP / VLAN labels at the cable ends, and the "int" buttons of the selected cable.
+      const zoom = appState.zoom.value;
+      const marks: CableMark[] = [];
+      if (zoom >= 0.35) {
+        for (const e of elements) {
+          const c = !e.isDeleted ? cableOf(e) : undefined;
+          if (!c) continue;
+          const sel = Object.keys(appState.selectedElementIds);
+          const isSel = sel.length === 1 && sel[0] === e.id && !appState.newElement;
+          for (const en of cableEnds(e)) {
+            const info = c.ends?.[en.end];
+            if (!info && !isSel) continue;
+            marks.push({
+              cableId: e.id,
+              end: en.end,
+              x: Math.round((en.p.x + appState.scrollX) * zoom),
+              y: Math.round((en.p.y + appState.scrollY) * zoom),
+              dir: { x: Math.round(en.dir.x * 1000) / 1000, y: Math.round(en.dir.y * 1000) / 1000 },
+              info,
+              selected: isSel,
+            });
+          }
+        }
+      }
+      setCableMarks((prev) => (JSON.stringify(prev) === JSON.stringify(marks) ? prev : marks));
+      setCableZoom(zoom);
       // Cables follow their items (and go with them): settled once per frame, and only when the
       // scene (or the pointer, which ends a drag) changed since the last pass.
       let sceneKey = appState.cursorButton === "down" ? 1 : 0;
@@ -753,6 +784,13 @@ function Editor({ node }: { node: Node }) {
             }}
           />
         )}
+        <CableOverlay
+          marks={cableMarks}
+          zoom={cableZoom}
+          editable={editor}
+          onEdit={(m) => setCableEdit({ cableId: m.cableId, end: m.end })}
+          onMoveLabel={(m, dx, dy) => excalidrawRef.current && m.info && setCableEnd(excalidrawRef.current, m.cableId, m.end, { ...m.info, dx, dy })}
+        />
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
             {selTerm.kind === "node" ? (
@@ -936,6 +974,40 @@ function Editor({ node }: { node: Node }) {
                 }}
               />
             </AccessDialog>
+          );
+        })()}
+      {cableEdit &&
+        (() => {
+          const x = excalidrawRef.current;
+          const el = x ? findEl(x, cableEdit.cableId) : undefined;
+          const c = cableOf(el);
+          if (!x || !el || !c) return null;
+          const anchor = c[cableEdit.end];
+          const item = anchor.id ? findEl(x, anchor.id) : undefined;
+          const nd = nodeDataOf(item);
+          const itemName = nd
+            ? nd.title?.split("\n")[0] || (nd.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label) || "machine"
+            : item?.type === "text"
+              ? `« ${(item as any).text.slice(0, 30)} »`
+              : anchor.group
+                ? "élément de bibliothèque"
+                : item?.type === "ellipse"
+                  ? "ellipse"
+                  : item?.type === "diamond"
+                    ? "losange"
+                    : "rectangle";
+          return (
+            <CableEndForm
+              info={c.ends?.[cableEdit.end]}
+              itemName={itemName}
+              onClose={() => setCableEdit(null)}
+              onSave={(info) => {
+                // Keep where the label was moved to (an empty info clears everything).
+                const cur = c.ends?.[cableEdit.end];
+                setCableEnd(x, cableEdit.cableId, cableEdit.end, Object.keys(info).length ? { ...info, dx: cur?.dx, dy: cur?.dy } : {});
+                setCableEdit(null);
+              }}
+            />
           );
         })()}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}

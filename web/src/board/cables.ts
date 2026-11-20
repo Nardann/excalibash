@@ -13,15 +13,20 @@ type Pt = { x: number; y: number };
 
 /** One end of a cable: an element, or a whole group (library items are groups). */
 export type Anchor = { id?: string; group?: string; /** A group's members when it was attached: still there if it is ungrouped. */ ids?: string[] };
+/** What sits at one end of a cable: the item's interface, its address and its VLANs (all optional). */
+export type EndInfo = { iface?: string; ip?: string; vlans?: string; /** Label moved by hand (scene units). */ dx?: number; dy?: number };
 /** `a` is the start of the cable (its first point), `b` its end. */
-export type CableData = { a: Anchor; b: Anchor; orphaned?: boolean };
+export type CableData = { a: Anchor; b: Anchor; orphaned?: boolean; ends?: { a?: EndInfo; b?: EndInfo } };
+export type End = "a" | "b";
 
 /** Distance between an item's border and the cable's end. */
 const GAP = 3;
 
 const cd = (el: El | null | undefined) => (el?.customData ?? {}) as Record<string, any>;
 // Cable data comes from the board (any editor, older clients): normalized in one place so a
-// malformed value can't crash rendering.
+// malformed value can't crash rendering, and a label offset stays within its radius.
+/** How far a label can be moved from its spot (scene units): it stays by its cable end. */
+export const LABEL_RADIUS = 90;
 const s = (v: unknown) => (typeof v === "string" && v ? v : undefined);
 const anchorData = (v: any): Anchor | undefined => {
   if (s(v?.group)) {
@@ -30,6 +35,17 @@ const anchorData = (v: any): Anchor | undefined => {
   }
   return s(v?.id) ? { id: v.id } : undefined;
 };
+function endData(v: any): EndInfo | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const e: EndInfo = { iface: s(v.iface)?.slice(0, 64), ip: s(v.ip)?.slice(0, 64), vlans: s(v.vlans)?.slice(0, 200) };
+  if (!e.iface && !e.ip && !e.vlans) return undefined;
+  const dx = typeof v.dx === "number" && Number.isFinite(v.dx) ? v.dx : 0;
+  const dy = typeof v.dy === "number" && Number.isFinite(v.dy) ? v.dy : 0;
+  const r = Math.hypot(dx, dy);
+  const k = r > LABEL_RADIUS ? LABEL_RADIUS / r : 1;
+  if (dx || dy) Object.assign(e, { dx: dx * k, dy: dy * k });
+  return e;
+}
 const normalizedCables = new WeakMap<object, CableData>();
 export const cableOf = (el: El | null | undefined): CableData | undefined => {
   const raw = cd(el).cable;
@@ -39,7 +55,9 @@ export const cableOf = (el: El | null | undefined): CableData | undefined => {
   const a = anchorData(raw.a);
   const b = anchorData(raw.b);
   if (!a || !b) return undefined;
-  const c: CableData = { a, b, ...(raw.orphaned === true ? { orphaned: true } : {}) };
+  const ea = endData(raw.ends?.a);
+  const eb = endData(raw.ends?.b);
+  const c: CableData = { a, b, ...(raw.orphaned === true ? { orphaned: true } : {}), ...(ea || eb ? { ends: { a: ea, b: eb } } : {}) };
   normalizedCables.set(raw, c);
   return c;
 };
@@ -301,3 +319,50 @@ export function finishCable(api: Api, id: string): string | null {
   if (!error) maintainCables(api);
   return error;
 }
+
+/** Each end of a cable: where it is and the direction the cable leaves it in (unit vector). */
+export function cableEnds(el: El): { end: End; p: Pt; dir: Pt }[] {
+  if (!("points" in el) || el.points.length < 2) return [];
+  const abs = el.points.map((q) => ({ x: el.x + q[0], y: el.y + q[1] }));
+  const unit = (from: Pt, to: Pt) => {
+    const l = Math.hypot(to.x - from.x, to.y - from.y) || 1;
+    return { x: (to.x - from.x) / l, y: (to.y - from.y) / l };
+  };
+  const n = abs.length;
+  return [
+    { end: "a", p: abs[0], dir: unit(abs[0], abs[1]) },
+    { end: "b", p: abs[n - 1], dir: unit(abs[n - 1], abs[n - 2]) },
+  ];
+}
+
+const clean = (v?: string) => v?.trim() || undefined;
+
+/** Sets (or clears, with an empty info) what is at one end of a cable. An undo step. */
+export function setCableEnd(api: Api, id: string, end: End, info: EndInfo) {
+  const els = api.getSceneElementsIncludingDeleted();
+  const el = els.find((e) => e.id === id);
+  const c = cableOf(el);
+  if (!el || !c) return;
+  const next: EndInfo = { iface: clean(info.iface), ip: clean(info.ip), vlans: clean(info.vlans) };
+  const filled = Object.values(next).some(Boolean);
+  if (filled && (info.dx || info.dy)) Object.assign(next, { dx: info.dx, dy: info.dy });
+  const ends = { ...c.ends, [end]: filled ? next : undefined };
+  api.updateScene({
+    elements: els.map((e) => (e.id === id ? newElementWith(e, { customData: { ...cd(e), cable: { ...c, ends } } }) : e)),
+    captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+  });
+}
+
+/** VLAN list as typed ("10, 20,30-35"): normalized, or null when a part is not a VLAN or range. */
+export function parseVlans(v: string): string | null {
+  const parts = v.split(",").map((s) => s.trim()).filter(Boolean);
+  const ok = (n: string) => /^\d{1,4}$/.test(n) && +n >= 1 && +n <= 4094;
+  for (const part of parts) {
+    const [lo, hi, extra] = part.split("-").map((s) => s.trim());
+    if (extra !== undefined || !ok(lo) || (hi !== undefined && (!ok(hi) || +hi < +lo))) return null;
+  }
+  return parts.map((p) => p.replace(/\s+/g, "")).join(", ");
+}
+
+/** An IPv4 or IPv6 address, with an optional prefix length. */
+export const IP_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?:\/(?:3[0-2]|[12]?\d))?|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(?:%[\w.]+)?(?:\/(?:12[0-8]|1[01]\d|[1-9]?\d))?)$/;
