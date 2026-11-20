@@ -20,6 +20,7 @@ import { WebEmbed } from "../board/WebEmbed.tsx";
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
+import { PointTrash } from "../board/PointTrash.tsx";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -784,6 +785,7 @@ function Editor({ node }: { node: Node }) {
             }}
           />
         )}
+        <PointTrash api={excalidraw} editable={editor} />
         <CableOverlay
           marks={cableMarks}
           zoom={cableZoom}
