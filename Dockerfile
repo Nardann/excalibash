@@ -48,5 +48,6 @@ ENV NODE_ENV=production \
 USER excalibash
 EXPOSE 6767 6768
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:6767/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Plain HTTP is redirected to HTTPS when TLS is on; the local check does not verify the certificate.
+HEALTHCHECK --interval=30s --timeout=3s CMD NODE_TLS_REJECT_UNAUTHORIZED=0 node --no-warnings -e "fetch('http://127.0.0.1:6767/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--", "node", "--disable-warning=ExperimentalWarning", "/app/server/src/index.ts"]

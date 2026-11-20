@@ -1,7 +1,9 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-const backend = process.env.BACKEND ?? "http://127.0.0.1:6767";
+const backend = process.env.BACKEND ?? "https://127.0.0.1:6767";
+// The development server usually runs with its self-signed certificate.
+const to = { target: backend, secure: false };
 
 /**
  * Small build-time patches to Excalidraw:
@@ -28,10 +30,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": backend,
-      "/install.sh": backend,
-      "/downloads": backend,
-      "/ws": { target: backend.replace(/^http/, "ws"), ws: true },
+      "/api": to,
+      "/install.sh": to,
+      "/downloads": to,
+      "/ws": { ...to, ws: true },
     },
   },
   build: { chunkSizeWarningLimit: 4000 },

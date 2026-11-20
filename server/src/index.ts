@@ -1,8 +1,9 @@
-import { createServer } from "node:http";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { WebSocketServer } from "ws";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import { config } from "./config.ts";
 import { pruneSessions, userFromRequest } from "./auth.ts";
 import { HttpError, publicUrl } from "./http.ts";
@@ -17,6 +18,9 @@ import { installScript } from "./install.ts";
 import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
 import { accountApi } from "./api/account.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
+import { certificatePem, initTls, pinFor, serve, tlsInfo } from "./tls.ts";
+
+initTls();
 
 const CSP = [
   "default-src 'self'",
@@ -60,6 +64,7 @@ app.get("/api/config", (req, res) => {
     emailVerification: !!(config.smtp.host || config.smtp.transport === "log"),
     contactEmail: config.contactEmail || null,
     legalName: config.legalName || null,
+    tls: tlsInfo(req),
   });
 });
 // Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
@@ -91,11 +96,20 @@ app.use("/api", (err: any, _req: Request, res: Response, _next: NextFunction) =>
 const AGENT_FILE = /^excalibash-agent-(linux|darwin)-(amd64|arm64)$/;
 
 app.get("/p/:code", (req, res) => {
-  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(pairScript(publicUrl(req), String(req.params.code)));
+  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(pairScript(publicUrl(req), String(req.params.code), pinFor(req)));
 });
 
 app.get("/install.sh", (req, res) => {
-  res.type("text/x-shellscript").send(installScript(publicUrl(req)));
+  res.type("text/x-shellscript").send(installScript(publicUrl(req), pinFor(req)));
+});
+
+app.get("/certificate.pem", (_req, res) => {
+  const pem = certificatePem();
+  if (!pem) {
+    res.status(404).send("not found\n");
+    return;
+  }
+  res.attachment("excalibash.pem").type("application/x-pem-file").send(Buffer.from(pem));
 });
 
 app.get("/downloads", (_req, res) => {
@@ -121,12 +135,11 @@ if (existsSync(config.webDir)) {
   console.warn(`[web] ${config.webDir} absent — lance le frontend avec \`npm run dev\` dans web/`);
 }
 
-const server = createServer(app);
 const boardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
 // Web tunnel responses (up to ~48 MB of body, base64) travel on the agent socket.
 const agentWss = new WebSocketServer({ noServer: true, maxPayload: 72 * 1024 * 1024 });
 
-server.on("upgrade", (req, socket, head) => {
+function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? "/", "http://x");
   const reject = (code: number, text: string) => {
     socket.end(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\n\r\n`);
@@ -159,7 +172,7 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   reject(404, "Not Found");
-});
+}
 
 let shuttingDown = false;
 function shutdown(): void {
@@ -168,6 +181,7 @@ function shutdown(): void {
   console.log("Arrêt…");
   flushAllRooms();
   server.close();
+  proxy.close();
   setTimeout(() => process.exit(0), 500).unref();
 }
 process.on("SIGINT", shutdown);
@@ -175,8 +189,6 @@ process.on("SIGTERM", shutdown);
 
 setInterval(pruneSessions, 3600_000).unref();
 
-server.listen(config.port, config.host, () => {
-  console.log(`Excalibash sur http://${config.host}:${config.port}`);
-  announceSetup();
-});
-startProxy();
+const server = serve(app, config.port, "Excalibash", upgrade);
+const proxy = startProxy();
+announceSetup();

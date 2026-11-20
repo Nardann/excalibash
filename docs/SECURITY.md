@@ -194,6 +194,41 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
     de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
     d'hôte distinct reste préférable.
 
+## HTTPS et certificat auto-signé
+
+- Par défaut (`TLS=auto`), les deux ports (application et tunnels) parlent HTTPS. Un certificat
+  fourni (`TLS_CERT`, `TLS_KEY`) est utilisé tel quel. Sinon, le serveur génère au premier démarrage
+  un certificat auto-signé dans `DATA_DIR/tls/` : `cert.pem`, `key.pem` (0600) et `sans.json`.
+  - ECDSA P-256, signature SHA-256, CN `Excalibash`, valable 10 ans, `CA:FALSE`,
+    `digitalSignature`, `serverAuth`. Générateur en TypeScript sur `node:crypto`, sans dépendance
+    ni appel à `openssl`.
+  - Noms (SAN) : `localhost`, `127.0.0.1`, `::1`, le nom de la machine, ses adresses IP non internes
+    (hors lien local IPv6), les hôtes de `PUBLIC_URL` et `PROXY_URL`, et `TLS_SANS`.
+  - Si cette liste change, ou à moins de 30 jours de l'expiration, le certificat est réémis **avec
+    la même clé** : l'épingle ne change pas et les agents déjà installés continuent de se connecter.
+    Supprimer `key.pem` force une nouvelle clé (et donc une nouvelle épingle).
+  - Au démarrage, les logs affichent l'empreinte SHA-256 du certificat (à comparer avec celle que
+    montre le navigateur avant d'accepter l'avertissement) et l'épingle.
+- **Épingle** : `sha256//<base64 du SHA-256 de la SubjectPublicKeyInfo>`, le format de
+  `curl --pinnedpubkey`. `/api/config` la publie (`tls.pin`), mais elle n'a de valeur que si la page
+  elle-même a été obtenue sur une connexion dont l'empreinte a été vérifiée.
+- **Scripts et agents** : avec le certificat auto-signé, les commandes affichées, `/install.sh` et
+  `/p/<code>` utilisent `curl -k --pinnedpubkey` (`-k` ne fait qu'ignorer l'autorité de
+  certification ; la clé publique reste vérifiée) et lancent l'agent avec `--pin`. L'agent remplace
+  alors la vérification habituelle par la comparaison de la clé publique du certificat présenté
+  (ni chaîne ni nom d'hôte), pour la websocket `/agent` comme pour l'appairage, et enregistre
+  l'épingle dans sa configuration. `wget` ne sait pas épingler : sans curl, le script s'arrête.
+- L'épingle n'est pas annoncée quand la requête porte `X-Forwarded-For` ou `Forwarded` : derrière
+  un reverse proxy, le client voit le certificat du proxy, pas celui de l'instance.
+- **HTTP clair** : sur le même port, une requête HTTP reçoit une redirection 308 vers HTTPS. Seule
+  exception : l'ouverture de la websocket `/agent`, servie normalement pour les agents appairés en
+  `http://`. Leurs échanges restent chiffrés de bout en bout ; seul le jeton de connexion passe en
+  clair, comme avant.
+- **Tunnels web** : un navigateur refuse d'enregistrer un Service Worker servi avec un certificat
+  qu'il ne reconnaît pas, même après avoir accepté l'avertissement. La page du tunnel l'explique et
+  propose `/certificate.pem` à installer dans le navigateur ou le système.
+- `TLS=off` rend le comportement antérieur (HTTP seul), pour un reverse proxy qui fait le TLS.
+
 ## Risques résiduels (assumés, documentés)
 
 - **Code servi** : le serveur fournit le JavaScript et le binaire de l'agent (`/install.sh`). Un

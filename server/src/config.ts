@@ -2,6 +2,9 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..", "..");
 
+const tlsMode = process.env.TLS || "auto";
+if (tlsMode !== "auto" && tlsMode !== "off") throw new Error(`TLS=${tlsMode} : valeurs possibles auto ou off`);
+
 export const config = {
   port: Number(process.env.PORT ?? 6767),
   host: process.env.HOST ?? "0.0.0.0",
@@ -16,6 +19,20 @@ export const config = {
   /** Public URL used in agent install commands (falls back to the request's host). */
   publicUrl: process.env.PUBLIC_URL ?? "",
   cookieSecure: process.env.COOKIE_SECURE === "true",
+  /**
+   * HTTPS on both ports. "auto": the certificate given by TLS_CERT/TLS_KEY, or a self-signed one
+   * kept in DATA_DIR/tls. "off": plain HTTP, for a reverse proxy that does TLS itself.
+   */
+  tls: {
+    mode: tlsMode,
+    cert: process.env.TLS_CERT ?? "",
+    key: process.env.TLS_KEY ?? "",
+    /** Extra names or IPs for the self-signed certificate. */
+    sans: (process.env.TLS_SANS ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  },
   /**
    * Which proxies may set X-Forwarded-*: by default only local/private networks (a reverse proxy
    * on the host or in Docker), so internet clients cannot spoof their IP or the protocol.

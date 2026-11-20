@@ -3,6 +3,7 @@
 "use strict";
 
 const MAIN_ORIGIN = "__MAIN_ORIGIN__";
+const CERT_URL = "__CERT_URL__"; // set when the instance uses its self-signed certificate
 const status = document.getElementById("status");
 const say = (t) => (status.textContent = t);
 const id = (location.pathname.match(/^\/t\/([A-Za-z0-9_-]{16,43})/) || [])[1];
@@ -10,7 +11,21 @@ const id = (location.pathname.match(/^\/t\/([A-Za-z0-9_-]{16,43})/) || [])[1];
 (async () => {
   if (!id) return say("Lien de tunnel invalide.");
   if (!("serviceWorker" in navigator)) return say("Ce navigateur ne permet pas les tunnels chiffrés (Service Worker indisponible).");
-  await navigator.serviceWorker.register("/eb-proxy/sw.js", { scope: "/" });
+  try {
+    await navigator.serviceWorker.register("/eb-proxy/sw.js", { scope: "/" });
+  } catch (e) {
+    // Browsers refuse service workers on a certificate they do not trust, even after an exception.
+    if (!CERT_URL || location.protocol !== "https:") throw e;
+    say("Le navigateur refuse d'ouvrir les tunnels sur un certificat non reconnu. Installer le certificat de cette instance dans le navigateur ou le système, puis recharger : ");
+    const a = document.createElement("a");
+    a.href = CERT_URL;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "télécharger le certificat";
+    a.style.color = "#93c5fd";
+    status.append(a);
+    return;
+  }
   await navigator.serviceWorker.ready;
   if (!navigator.serviceWorker.controller) {
     await new Promise((r) => navigator.serviceWorker.addEventListener("controllerchange", r, { once: true }));

@@ -4,6 +4,8 @@ import { db, isClientId } from "../db.ts";
 import { rateLimit, requireUser, sha256 } from "../auth.ts";
 import { getMachine } from "../access.ts";
 import { HttpError, blob, publicUrl } from "../http.ts";
+import { pinFor } from "../tls.ts";
+import { pinPreamble } from "../install.ts";
 
 // Pairing a machine with a short code typed on it (no copy-paste). The agent registers the
 // public key it generated on the machine; the owner's browser shows its fingerprint, the owner
@@ -59,7 +61,9 @@ pairingOwnerApi.post("/", (req, res) => {
   while (pairings.has(code));
   const p: Pairing = { code, ownerId: req.user!.id, expires: Date.now() + TTL };
   pairings.set(code, p);
-  res.json({ code: display(code), expiresAt: p.expires, command: `curl -fsSL ${publicUrl(req)}/p/${code} | sh` });
+  const pin = pinFor(req);
+  const curl = pin ? `curl -k --pinnedpubkey '${pin}' -fsSL` : "curl -fsSL";
+  res.json({ code: display(code), expiresAt: p.expires, command: `${curl} ${publicUrl(req)}/p/${code} | sh` });
 });
 
 pairingOwnerApi.get("/:code", (req, res) => {
@@ -122,22 +126,25 @@ pairingAgentApi.get("/:code", (req, res) => {
 });
 
 /** Installer for `curl …/p/<code> | sh`: download the agent, pair, then run it as a service. */
-export function pairScript(server: string, code: string): string {
+export function pairScript(server: string, code: string, pin: string | null): string {
   const safe = normalize(code).slice(0, 12);
+  const download = pin
+    ? `curl -k --pinnedpubkey "$PIN" -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"`
+    : `if command -v curl >/dev/null 2>&1; then curl -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"
+else wget -qO "$BIN.tmp" "$SERVER/downloads/excalibash-agent-$OS-$ARCH"; fi`;
   return `#!/bin/sh
 set -eu
 SERVER='${server.replace(/'/g, "")}'
 CODE='${safe}'
-case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=darwin ;; *) echo "OS non supporté : $(uname -s)" >&2; exit 1 ;; esac
+${pinPreamble(pin)}case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=darwin ;; *) echo "OS non supporté : $(uname -s)" >&2; exit 1 ;; esac
 case "$(uname -m)" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "architecture non supportée : $(uname -m)" >&2; exit 1 ;; esac
 BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/excalibash-agent"
 mkdir -p "$BIN_DIR"
 echo "→ téléchargement de l'agent $OS/$ARCH"
-if command -v curl >/dev/null 2>&1; then curl -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"
-else wget -qO "$BIN.tmp" "$SERVER/downloads/excalibash-agent-$OS-$ARCH"; fi
+${download}
 chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN"
-"$BIN" --server "$SERVER" --pair "$CODE" --pair-only --name "$(hostname)"
+"$BIN" --server "$SERVER"${pin ? ' --pin "$PIN"' : ""} --pair "$CODE" --pair-only --name "$(hostname)"
 CONFIG="$HOME/.config/excalibash/agent.json"
 
 # Start with the machine, whatever it runs: system service (root), user service with linger,

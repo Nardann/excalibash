@@ -14,8 +14,12 @@ import (
 // fakePairing approves the first registered key, sealing auth to sealFor(pub).
 func fakePairing(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte) *httptest.Server {
 	t.Helper()
+	return httptest.NewServer(pairingHandler(t, auth, sealFor))
+}
+
+func pairingHandler(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte) http.Handler {
 	var registered string
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/pair/7KQ4FD") {
 			http.NotFound(w, r)
 			return
@@ -37,7 +41,7 @@ func fakePairing(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte
 			t.Fatal(err)
 		}
 		json.NewEncoder(w).Encode(map[string]string{"token": "eba_test", "sealedAuth": b64.EncodeToString(sealed)})
-	}))
+	})
 }
 
 func mustPub(t *testing.T, raw []byte) *ecdh.PublicKey {
@@ -54,7 +58,7 @@ func TestPairing(t *testing.T) {
 	srv := fakePairing(t, auth, func(p []byte) []byte { return p })
 	defer srv.Close()
 
-	c, err := pair(srv.URL, "7kq-4fd", "vm1", false)
+	c, err := pair(srv.URL, "7kq-4fd", "vm1", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +83,7 @@ func TestPairingRejectsOtherKey(t *testing.T) {
 	rand.Read(auth)
 	srv := fakePairing(t, auth, func([]byte) []byte { return evil.PublicKey().Bytes() })
 	defer srv.Close()
-	if _, err := pair(srv.URL, "7KQ4FD", "vm1", false); err == nil {
+	if _, err := pair(srv.URL, "7KQ4FD", "vm1", false, ""); err == nil {
 		t.Fatal("pairing accepted an auth key not sealed to this agent")
 	}
 }

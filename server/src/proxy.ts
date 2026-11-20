@@ -1,10 +1,10 @@
-import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import express, { type Request } from "express";
 import { config } from "./config.ts";
 import { rateLimit } from "./auth.ts";
 import { relay, tunnelExists } from "./tunnels.ts";
+import { certificatePem, serve, type Listener } from "./tls.ts";
 
 // Second origin for web tunnels. Tunnelled sites run here, isolated from Excalibash's own origin
 // (its storage holds the account keys). This server only hands out the boot page and service
@@ -31,7 +31,7 @@ const BOOT = asset("boot.js");
 const bootHtml = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Excalibash · tunnel</title>
-<style>body{margin:0;height:100vh;display:grid;place-items:center;background:#0b1020;color:#e2e8f0;font:600 14px system-ui,sans-serif}</style>
+<style>body{margin:0;height:100vh;display:grid;place-items:center;background:#0b1020;color:#e2e8f0;font:600 14px system-ui,sans-serif}p{max-width:36em;padding:0 16px;text-align:center}</style>
 </head><body><p id="status">Chargement…</p><script src="/eb-proxy/boot.js"></script></body></html>`;
 
 const app = express();
@@ -46,7 +46,8 @@ app.get("/eb-proxy/sw.js", (req, res) => {
 });
 
 app.get("/eb-proxy/boot.js", (req, res) => {
-  res.type("application/javascript").set("Cache-Control", "no-cache").send(BOOT.replace("__MAIN_ORIGIN__", mainOrigin(req)));
+  const cert = certificatePem() ? `${mainOrigin(req)}/certificate.pem` : "";
+  res.type("application/javascript").set("Cache-Control", "no-cache").send(BOOT.replace("__MAIN_ORIGIN__", mainOrigin(req)).replace("__CERT_URL__", cert));
 });
 
 /** Rejects unknown tunnels and floods before reading the body: this origin has no authentication. */
@@ -90,8 +91,6 @@ app.get(/.*/, (req, res) => {
     .send(bootHtml);
 });
 
-export function startProxy(): void {
-  createServer(app).listen(config.proxyPort, config.host, () => {
-    console.log(`Tunnels web (origine séparée) sur http://${config.host}:${config.proxyPort}`);
-  });
+export function startProxy(): Listener {
+  return serve(app, config.proxyPort, "Tunnels web (origine séparée)");
 }

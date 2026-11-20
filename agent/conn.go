@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"log"
@@ -104,10 +103,8 @@ func connectOnce(ctx context.Context, cfg config, mgr *manager) error {
 	opts := &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + cfg.token}},
 	}
-	if cfg.insecure {
-		opts.HTTPClient = &http.Client{Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
+	if tr := httpTransport(cfg.insecure, cfg.pin); tr != nil {
+		opts.HTTPClient = &http.Client{Transport: tr}
 	}
 	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
 	c, resp, err := websocket.Dial(dialCtx, cfg.endpoint, opts)

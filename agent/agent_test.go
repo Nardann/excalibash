@@ -20,8 +20,15 @@ import (
 // fakeServer accepts agent connections and hands them to the test.
 func fakeServer(t *testing.T) (string, chan *websocket.Conn) {
 	t.Helper()
+	srv, conns := newFakeServer(false)
+	t.Cleanup(srv.Close)
+	return srv.URL, conns
+}
+
+// newFakeServer is fakeServer, optionally over TLS with a self-signed certificate.
+func newFakeServer(useTLS bool) (*httptest.Server, chan *websocket.Conn) {
 	conns := make(chan *websocket.Conn, 4)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/agent" || r.Header.Get("Authorization") != "Bearer secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -33,8 +40,12 @@ func fakeServer(t *testing.T) (string, chan *websocket.Conn) {
 		conns <- c
 		<-r.Context().Done()
 	}))
-	t.Cleanup(srv.Close)
-	return srv.URL, conns
+	if useTLS {
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
+	return srv, conns
 }
 
 func recv(t *testing.T, c *websocket.Conn) message {

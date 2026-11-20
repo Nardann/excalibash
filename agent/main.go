@@ -22,6 +22,7 @@ type config struct {
 	token    string
 	name     string
 	insecure bool
+	pin      string // sha256//… of the server public key, replaces certificate verification
 }
 
 func main() {
@@ -37,6 +38,7 @@ func main() {
 	pairOnly := flag.Bool("pair-only", false, "with --pair: save the configuration and exit (used by the installer)")
 	configPath := flag.String("config", defaultConfigPath(), "where a paired agent keeps its configuration")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
+	pinFlag := flag.String("pin", os.Getenv("EXCALIBASH_PIN"), "accept only the server certificate with this public key, sha256//<base64> as curl --pinnedpubkey (env EXCALIBASH_PIN)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	configDir = filepath.Dir(*configPath)
@@ -55,6 +57,11 @@ func main() {
 	if *name == "" {
 		*name, _ = os.Hostname()
 	}
+	pin, err := parsePin(*pinFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--pin : %v\n", err)
+		os.Exit(2)
+	}
 
 	// Three ways to get credentials: pair now, a key from the install command, or a saved pairing.
 	var auth, pub []byte
@@ -63,7 +70,7 @@ func main() {
 		if *server == "" {
 			log.Fatal("--pair needs --server")
 		}
-		c, err := pair(*server, *pairCode, *name, *insecure)
+		c, err := pair(*server, *pairCode, *name, *insecure, pin)
 		if err != nil {
 			log.Fatalf("appairage : %v", err)
 		}
@@ -97,6 +104,9 @@ func main() {
 		*token = c.Token
 		auth, _ = b64.DecodeString(c.Auth)
 		pub = pubFromB64(c.Pub)
+		if pin, err = savedPin(pin, c); err != nil {
+			log.Fatalf("%s : %v", *configPath, err)
+		}
 	}
 	if *server == "" || len(auth) != keyLen {
 		log.Fatal("missing --server or invalid machine credentials")
@@ -110,13 +120,24 @@ func main() {
 	defer stop()
 
 	mgr := newManagerWithAuth(auth)
-	cfg := config{endpoint: endpoint, token: *token, name: *name, insecure: *insecure}
+	cfg := config{endpoint: endpoint, token: *token, name: *name, insecure: *insecure, pin: pin}
 	log.Printf("excalibash-agent %s → %s", version, endpoint)
+	if pin != "" {
+		log.Printf("server key pinned: %s", pin)
+	}
 	if pub != nil {
 		log.Printf("machine key fingerprint: %s", fingerprint(pub))
 	}
 	run(ctx, cfg, mgr)
 	mgr.closeAll()
+}
+
+// savedPin returns the pin to use with a saved pairing: an explicit --pin overrides the saved one.
+func savedPin(explicit string, c savedConfig) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	return parsePin(c.Pin)
 }
 
 // agentEndpoint turns a base URL (http, https, ws or wss) into the /agent websocket URL.

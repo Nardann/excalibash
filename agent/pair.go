@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +29,7 @@ type savedConfig struct {
 	Auth   string `json:"auth"` // machine auth key, base64url
 	Pub    string `json:"pub"`  // public key, for the fingerprint in logs
 	Name   string `json:"name,omitempty"`
+	Pin    string `json:"pin,omitempty"` // server public key pin (self-signed certificate), see pin.go
 }
 
 func defaultConfigPath() string {
@@ -93,7 +93,7 @@ func httpBase(server string) (string, error) {
 	return u.Scheme + "://" + u.Host, nil
 }
 
-func pair(server, rawCode, name string, insecure bool) (savedConfig, error) {
+func pair(server, rawCode, name string, insecure bool, pin string) (savedConfig, error) {
 	code := normalizeCode(rawCode)
 	if len(code) < 6 {
 		return savedConfig{}, errors.New("code d'appairage invalide")
@@ -102,10 +102,7 @@ func pair(server, rawCode, name string, insecure bool) (savedConfig, error) {
 	if err != nil {
 		return savedConfig{}, err
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
-	if insecure {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	}
+	client := &http.Client{Timeout: 20 * time.Second, Transport: httpTransport(insecure, pin)}
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return savedConfig{}, err
@@ -164,7 +161,7 @@ func pair(server, rawCode, name string, insecure bool) (savedConfig, error) {
 		if err != nil || len(auth) != keyLen {
 			return savedConfig{}, errors.New("clé de la machine non authentique : appairage annulé")
 		}
-		return savedConfig{Server: base, Token: res.Token, Auth: b64.EncodeToString(auth), Pub: pub, Name: name}, nil
+		return savedConfig{Server: base, Token: res.Token, Auth: b64.EncodeToString(auth), Pub: pub, Name: name, Pin: pin}, nil
 	}
 	return savedConfig{}, errors.New("délai dépassé : personne n'a validé l'appairage")
 }

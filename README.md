@@ -49,7 +49,7 @@ cd excalibash
 docker compose up -d --build
 ```
 
-L'application répond sur <http://localhost:6767>. Le premier compte créé est administrateur ; il demande le code d'installation affiché dans les logs :
+L'application répond sur <https://localhost:6767>, avec un certificat auto-signé (voir [HTTPS](#https)). Le premier compte créé est administrateur ; il demande le code d'installation affiché dans les logs :
 
 ```bash
 docker compose logs excalibash | grep "Code d'installation"
@@ -67,17 +67,39 @@ Les variables se placent dans un fichier `.env` à côté de `docker-compose.yml
 |---|---|---|
 | `PUBLIC_URL` | URL de la requête | URL publique, utilisée dans les commandes d'installation de l'agent |
 | `PROXY_URL` | même hôte, port 6768 | URL publique de l'origine séparée des tunnels web |
-| `COOKIE_SECURE` | `false` | `true` derrière HTTPS (obligatoire en production) |
+| `TLS` | `auto` | `auto` : HTTPS sur les deux ports, avec le certificat fourni ou un certificat auto-signé. `off` : HTTP seul, derrière un reverse proxy qui fait le TLS |
+| `TLS_CERT` `TLS_KEY` | vide | chemins PEM d'un certificat fourni (Let's Encrypt, PKI interne), utilisé à la place du certificat auto-signé |
+| `TLS_SANS` | vide | noms ou adresses IP supplémentaires du certificat auto-signé, séparés par des virgules |
+| `COOKIE_SECURE` | `false` | `true` force l'attribut `Secure` des cookies. Inutile en HTTPS direct ou derrière un proxy qui transmet `X-Forwarded-Proto` |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_SECURE` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | vide, `587`, `false` | envoi des codes de vérification. Sans `SMTP_HOST`, les emails ne sont pas vérifiés. `SMTP_SECURE=true` pour le port 465 |
 | `CONTACT_EMAIL` `LEGAL_NAME` | vide | contact affiché sur la page Confidentialité |
 | `REGISTRATIONS_PER_HOUR` | `50` | plafond global d'inscriptions par heure |
-| `BIND_ADDR` | `127.0.0.1` | interface où les ports sont publiés. `0.0.0.0` pour un accès direct depuis le réseau, en HTTP |
+| `BIND_ADDR` | `127.0.0.1` | interface où les ports sont publiés. `0.0.0.0` pour un accès direct depuis le réseau |
 | `SETUP_CODE` | aléatoire | code exigé pour créer le premier compte (affiché dans les logs s'il n'est pas fixé) |
 | `TRUST_PROXY` | réseaux locaux | proxys dont l'en-tête `X-Forwarded-For` est cru (format Express `trust proxy`) |
 
+## HTTPS
+
+Excalibash exige HTTPS : hors de `localhost`, le navigateur refuse la cryptographie (WebCrypto) d'une page servie en HTTP. L'instance parle donc HTTPS dès le premier démarrage, sur les ports 6767 et 6768. Une requête en HTTP clair est redirigée vers HTTPS sur le même port.
+
+Sans certificat fourni (`TLS_CERT`, `TLS_KEY`), le serveur en génère un, auto-signé, dans `DATA_DIR/tls/`. Ses noms couvrent `localhost`, le nom et les adresses IP de la machine, les hôtes de `PUBLIC_URL` et `PROXY_URL`, et `TLS_SANS`. Dans un conteneur, le nom et les adresses vus par le serveur sont ceux du conteneur : ceux de l'hôte se déclarent dans `TLS_SANS` (par exemple `TLS_SANS=excalibash.lan,192.168.1.20`).
+
+Au premier accès, le navigateur affiche un avertissement. Avant de l'accepter, comparer l'empreinte SHA-256 du certificat (dans les détails de l'avertissement) avec celle des logs :
+
+```bash
+docker compose logs excalibash | grep "empreinte"
+```
+
+Les commandes d'installation de l'agent épinglent la clé publique de ce certificat (`curl --pinnedpubkey`, `excalibash-agent --pin`) : elles ne dépendent pas de l'avertissement du navigateur. La clé est conservée quand les noms changent, ce qui garde les agents installés valides.
+
+Les tunnels web reposent sur un Service Worker, que les navigateurs refusent sur un certificat non reconnu, même après l'avertissement. Il faut alors installer le certificat de l'instance (`https://<hôte>:6767/certificate.pem`, aussi proposé dans la fenêtre du site) dans le navigateur ou le système, puis recharger.
+
 ## Mise en production
 
-Excalibash se sert en HTTPS, sur deux noms d'hôte : un pour l'application, un pour les tunnels web. Cette origine séparée empêche les sites ouverts dans un tunnel d'accéder aux clés.
+En production, Excalibash se sert sur deux noms d'hôte : un pour l'application, un pour les tunnels web. Cette origine séparée empêche les sites ouverts dans un tunnel d'accéder aux clés. Deux possibilités :
+
+- un certificat reconnu passé à l'instance (`TLS_CERT`, `TLS_KEY`), valable pour les deux noms ;
+- un reverse proxy qui fait le TLS, avec `TLS=off` sur l'instance (ou un proxy qui joint l'instance en HTTPS).
 
 Exemple avec [Caddy](https://caddyserver.com) :
 
@@ -93,6 +115,7 @@ tunnel.example.com {
 ```dotenv
 PUBLIC_URL=https://excalibash.example.com
 PROXY_URL=https://tunnel.example.com
+TLS=off
 COOKIE_SECURE=true
 ```
 
@@ -133,7 +156,7 @@ make -C agent dist
 PORT=6767 DATA_DIR=./data-dev node server/src/index.ts
 ```
 
-`npm run dev` dans `web/` lance Vite avec rechargement à chaud (port 5173, proxifié vers 6767).
+`npm run dev` dans `web/` lance Vite avec rechargement à chaud (port 5173, proxifié vers `https://127.0.0.1:6767` ; `BACKEND` change la cible).
 
 ```
 agent/   agent Go : PTY, chiffrement des flux, tunnels web, reconnexion

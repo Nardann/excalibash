@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import { fr } from "date-fns/locale";
 import { Copy, Fingerprint, Loader2, Pencil, Plus, Server, Trash2 } from "lucide-react";
-import { api } from "../api.ts";
+import { api, serverConfig } from "../api.ts";
 import { useKeys } from "../auth.tsx";
 import { approvePairing, createMachine, listMachines, renameMachine, type Machine } from "../vault.ts";
 import { fingerprint, fromB64 } from "../crypto.ts";
@@ -238,9 +238,11 @@ function PairingModal({ onClose }: { onClose: () => void }) {
           {pairing ? (
             <>
               <div className="codebox pair-cmd">{pairing.command}</div>
-              <p className="sub" style={{ margin: "8px 0 0" }}>
-                Pas de curl ? <code>{pairing.command.replace(/^curl -fsSL (\S+) \| sh$/, "wget -qO- $1 | sh")}</code>
-              </p>
+              {/^curl -fsSL \S+ \| sh$/.test(pairing.command) && (
+                <p className="sub" style={{ margin: "8px 0 0" }}>
+                  Pas de curl ? <code>{pairing.command.replace(/^curl -fsSL (\S+) \| sh$/, "wget -qO- $1 | sh")}</code>
+                </p>
+              )}
               <p style={{ marginTop: 14 }}>
                 Code : <b className="pair-code mono">{pairing.code}</b> · valable encore {Math.floor(left / 60)} min {String(left % 60).padStart(2, "0")} s, une seule
                 fois.
@@ -301,9 +303,17 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
 }
 
 function EnrollmentModal({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
+  const [pin, setPin] = useState<string | null>(null);
+  useEffect(() => {
+    serverConfig()
+      .then((c) => setPin(c.tls?.pin ?? null))
+      .catch(() => {});
+  }, []);
+  // Self-signed instance: curl checks the pinned key instead of a CA (-k skips only the CA check).
+  const curl = pin ? `curl -k --pinnedpubkey '${pin}' -fsSL` : "curl -fsSL";
   // Leading space: shells with ignorespace (bash default on most distros, zsh HIST_IGNORE_SPACE) keep it out of history.
-  const base = ` curl -fsSL ${enrollment.server}/install.sh | sh -s -- --token ${enrollment.token} --key ${enrollment.privateKey}`;
-  const manual = ` EXCALIBASH_TOKEN=${enrollment.token} EXCALIBASH_KEY=${enrollment.privateKey} ./excalibash-agent --server ${enrollment.server}`;
+  const base = ` ${curl} ${enrollment.server}/install.sh | sh -s -- --token ${enrollment.token} --key ${enrollment.privateKey}`;
+  const manual = ` EXCALIBASH_TOKEN=${enrollment.token} EXCALIBASH_KEY=${enrollment.privateKey} ./excalibash-agent --server ${enrollment.server}${pin ? ` --pin '${pin}'` : ""}`;
   return (
     <Modal onClose={onClose} width={680}>
       <h2 className="display">Connecte « {enrollment.name} »</h2>

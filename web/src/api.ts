@@ -80,6 +80,25 @@ export const api = {
   del: <T>(path: string) => request<T>("DELETE", path),
 };
 
+/** Public settings of this instance (GET /api/config). */
+export type ServerConfig = {
+  proxyUrl: string;
+  emailVerification: boolean;
+  contactEmail: string | null;
+  legalName: string | null;
+  /** null: plain HTTP (TLS done by a reverse proxy). pin: set for the instance's own self-signed certificate. */
+  tls: { selfSigned: boolean; pin: string | null } | null;
+};
+
+let configPromise: Promise<ServerConfig> | null = null;
+export function serverConfig(): Promise<ServerConfig> {
+  configPromise ??= api.get<ServerConfig>("/config").catch((e) => {
+    configPromise = null;
+    throw e;
+  });
+  return configPromise;
+}
+
 export type WebInfo = {
   id: string;
   boardId: string;

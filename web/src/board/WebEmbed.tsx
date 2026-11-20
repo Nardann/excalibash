@@ -2,15 +2,10 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ExternalLink, Globe, Minimize2, Power, RotateCw } from "lucide-react";
 import type { BoardSession } from "./collab.ts";
 import { confirmDialog } from "../components/ui.tsx";
+import { serverConfig } from "../api.ts";
 
-let proxyConfig: Promise<string> | null = null;
 /** Origin serving tunnelled sites (separate from Excalibash's own, see server/src/proxy.ts). */
-export function proxyUrl(): Promise<string> {
-  proxyConfig ??= fetch("/api/config")
-    .then((r) => r.json())
-    .then((c) => String(c.proxyUrl).replace(/\/$/, ""));
-  return proxyConfig;
-}
+const proxyUrl = () => serverConfig().then((c) => c.proxyUrl.replace(/\/$/, ""));
 
 /**
  * A site reached through an end-to-end encrypted tunnel to one of the board's machines. The page

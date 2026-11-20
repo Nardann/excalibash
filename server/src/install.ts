@@ -2,11 +2,11 @@
  * Shell installer served at /install.sh:
  *   curl -fsSL https://host/install.sh | sh -s -- --token eba_xxx --key <clé machine> [--name NAME] [--service]
  */
-export function installScript(server: string): string {
+export function installScript(server: string, pin: string | null): string {
   return `#!/bin/sh
 set -eu
 SERVER='${server.replace(/'/g, "")}'
-TOKEN=""
+${pinPreamble(pin)}TOKEN=""
 KEY=""
 NAME=""
 SERVICE=0
@@ -36,11 +36,11 @@ BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/excalibash-agent"
 mkdir -p "$BIN_DIR"
 echo "→ téléchargement de l'agent $OS/$ARCH"
-curl -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"
+curl ${pin ? '-k --pinnedpubkey "$PIN" ' : ""}-fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"
 chmod +x "$BIN.tmp"
 mv "$BIN.tmp" "$BIN"
 
-set -- --server "$SERVER"
+set -- --server "$SERVER"${pin ? ' --pin "$PIN"' : ""}
 [ -n "$NAME" ] && set -- "$@" --name "$NAME"
 
 if [ "$SERVICE" = 1 ] && command -v systemctl >/dev/null 2>&1; then
@@ -76,5 +76,16 @@ else
   echo "✓ agent installé dans $BIN — connexion à $SERVER (Ctrl+C pour arrêter)"
   EXCALIBASH_TOKEN="$TOKEN" EXCALIBASH_KEY="$KEY" exec "$BIN" "$@"
 fi
+`;
+}
+
+/**
+ * Self-signed instance: the script embeds the certificate's pin. curl checks it (-k only skips
+ * the CA check, the pin is still enforced) and so does the agent; wget cannot pin.
+ */
+export function pinPreamble(pin: string | null): string {
+  if (!pin) return "";
+  return `PIN='${pin.replace(/[^A-Za-z0-9+/=]/g, "")}'
+command -v curl >/dev/null 2>&1 || { echo "curl est nécessaire : ce serveur a un certificat auto-signé, que seul curl sait épingler" >&2; exit 1; }
 `;
 }
