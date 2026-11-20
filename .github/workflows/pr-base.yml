@@ -1,0 +1,24 @@
+name: Branche cible
+
+# Les contributions passent par `experimental` ; seule `experimental` est fusionnée dans `master`.
+# pull_request_target donne le droit de modifier la pull request ; aucun code de celle-ci n'est exécuté.
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+    branches: [master]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  retarget:
+    if: github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.head.ref != 'experimental'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rediriger vers experimental
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -f base=experimental >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="Les pull requests visent la branche \`experimental\` : la branche cible a été changée automatiquement. \`master\` ne reçoit que des fusions depuis \`experimental\` après vérification." >/dev/null

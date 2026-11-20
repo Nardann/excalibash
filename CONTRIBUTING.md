@@ -23,6 +23,8 @@ Le code d'installation du premier compte s'affiche dans la console au démarrage
 
 ## Avant d'ouvrir une pull request
 
+Les pull requests visent la branche **`experimental`**, jamais `master` : une pull request ouverte vers `master` est redirigée automatiquement. Les changements y sont testés avant d'être fusionnés dans `master`, qui reste la version stable.
+
 Les mêmes vérifications tournent automatiquement sur chaque pull request :
 
 ```bash

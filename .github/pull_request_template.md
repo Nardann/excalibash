@@ -4,6 +4,7 @@
 
 ## Vérifications
 
+- [ ] La pull request vise la branche `experimental`
 - [ ] `./tests/run.sh` se termine par `TOUT EST OK`
 - [ ] `go test ./...` passe dans `agent/`
 - [ ] Le serveur ne voit aucune nouvelle donnée en clair
