@@ -20,6 +20,7 @@ import { WebEmbed } from "../board/WebEmbed.tsx";
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
+import { PointTrash } from "../board/PointTrash.tsx";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -393,11 +394,11 @@ function Editor({ node }: { node: Node }) {
     if (!x) return;
     const st = x.getAppState();
     if (!cableModeRef.current)
-      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType };
+      savedArrow.current = { currentItemStartArrowhead: st.currentItemStartArrowhead, currentItemEndArrowhead: st.currentItemEndArrowhead, currentItemArrowType: st.currentItemArrowType, currentItemRoughness: st.currentItemRoughness };
     cableModeRef.current = true;
     pendingCable.current = null;
     setCableMode(true);
-    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round" } as any, captureUpdate: CaptureUpdateAction.NEVER });
+    x.updateScene({ appState: { currentItemStartArrowhead: null, currentItemEndArrowhead: null, currentItemArrowType: "round", currentItemRoughness: 0 } as any, captureUpdate: CaptureUpdateAction.NEVER });
     x.setActiveTool({ type: "arrow" });
   }, []);
   const stopCable = useCallback(() => {
@@ -784,6 +785,7 @@ function Editor({ node }: { node: Node }) {
             }}
           />
         )}
+        <PointTrash api={excalidraw} editable={editor} />
         <CableOverlay
           marks={cableMarks}
           zoom={cableZoom}

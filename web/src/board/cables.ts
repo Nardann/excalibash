@@ -311,6 +311,8 @@ export function finishCable(api: Api, id: string): string | null {
               startArrowhead: null,
               endArrowhead: null,
               roundness: { type: 2 },
+              // "Architect" stroke (no sketchy wobble): a clean cable by default, restylable after.
+              roughness: 0,
               customData: { ...cd(e), cable: { a: a!, b: b! } satisfies CableData },
             } as any),
     ),
