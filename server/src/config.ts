@@ -45,6 +45,8 @@ export const config = {
   legalName: process.env.LEGAL_NAME ?? "",
   /** Instance-wide cap on new accounts per hour (on top of per-IP limits). */
   registrationsPerHour: Number(process.env.REGISTRATIONS_PER_HOUR ?? 50),
+  /** Code required to create the first (admin) account. Random and printed at startup when unset. */
+  setupCode: process.env.SETUP_CODE ?? "",
   proxyPort: Number(process.env.PROXY_PORT ?? 6768),
   proxyUrl: process.env.PROXY_URL ?? "",
   /** Encrypted scrollback kept per terminal, replayed to new viewers. */

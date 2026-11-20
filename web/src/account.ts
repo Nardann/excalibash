@@ -81,7 +81,13 @@ export type Registered = Session & { recoveryKey: string };
 /** Account created but the email is not verified yet: keys stay in memory until the code is accepted. */
 export type PendingRegistration = { needsVerification: true; email: string; keys: KeyPair; recoveryKey: string };
 
-export async function register(o: { email: string; name: string; password: string; invite?: string | null }): Promise<Registered | PendingRegistration> {
+export async function register(o: {
+  email: string;
+  name: string;
+  password: string;
+  invite?: string | null;
+  setupCode?: string;
+}): Promise<Registered | PendingRegistration> {
   const id = randomId();
   const salt = toB64(randomBytes(16));
   const { authKey, masterKey } = await deriveAccountKeys(o.password, salt);
@@ -96,6 +102,7 @@ export async function register(o: { email: string; name: string; password: strin
     email: o.email,
     name: o.name,
     invite: o.invite || undefined,
+    setupCode: o.setupCode || undefined,
     salt,
     authKey,
     publicKey: toB64(kp.pub),

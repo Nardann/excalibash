@@ -23,8 +23,7 @@ const (
 )
 
 // message is the union of every frame exchanged with the server (see
-// docs/PROTOCOL.md and docs/SECURITY.md). Binary fields (d, key) carry
-// unpadded base64url envelopes.
+// docs/SECURITY.md). Binary fields (d, key) carry unpadded base64url envelopes.
 type message struct {
 	T        string          `json:"t"`
 	ID       string          `json:"id,omitempty"`
@@ -36,7 +35,6 @@ type message struct {
 	K        uint64          `json:"k,omitempty"`
 	Cols     uint16          `json:"cols,omitempty"`
 	Rows     uint16          `json:"rows,omitempty"`
-	Cwd      string          `json:"cwd,omitempty"`
 	Shell    string          `json:"shell,omitempty"`
 	Pid      int             `json:"pid,omitempty"`
 	Code     *int            `json:"code,omitempty"`
@@ -151,7 +149,7 @@ func connectOnce(ctx context.Context, cfg config, mgr *manager) error {
 	hostname, _ := os.Hostname()
 	out.send(message{
 		T: "hello", Hostname: hostname, Name: cfg.name, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Version: version, Shell: pickShell(""), Sessions: mgr.ids(),
+		Version: version, Shell: pickShell(), Sessions: mgr.ids(),
 	})
 	mgr.attach(out)
 	defer mgr.detach(out)

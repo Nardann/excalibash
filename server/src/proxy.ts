@@ -49,19 +49,25 @@ app.get("/eb-proxy/boot.js", (req, res) => {
   res.type("application/javascript").set("Cache-Control", "no-cache").send(BOOT.replace("__MAIN_ORIGIN__", mainOrigin(req)));
 });
 
-app.post("/eb-proxy/req/:id", express.json({ limit: "80mb" }), async (req, res) => {
+/** Rejects unknown tunnels and floods before reading the body: this origin has no authentication. */
+function tunnelGuard(req: Request, res: express.Response, next: express.NextFunction) {
   const id = String(req.params.id);
   if (!rateLimit(`proxy:${req.ip}`, 2000)) {
     res.status(429).json({ error: "trop de requêtes" });
     return;
   }
-  const { rid, ts, d } = req.body ?? {};
-  if (!ID.test(id) || typeof rid !== "string" || rid.length > 64 || !Number.isSafeInteger(ts) || typeof d !== "string") {
-    res.status(400).json({ error: "requête invalide" });
+  if (!ID.test(id) || !tunnelExists(id)) {
+    res.status(404).json({ error: "tunnel inconnu" });
     return;
   }
-  if (!tunnelExists(id)) {
-    res.status(404).json({ error: "tunnel inconnu" });
+  next();
+}
+
+app.post("/eb-proxy/req/:id", tunnelGuard, express.json({ limit: "64mb" }), async (req, res) => {
+  const id = String(req.params.id);
+  const { rid, ts, d } = req.body ?? {};
+  if (typeof rid !== "string" || rid.length > 64 || !Number.isSafeInteger(ts) || typeof d !== "string") {
+    res.status(400).json({ error: "requête invalide" });
     return;
   }
   const reply = await relay(id, rid, ts, d);

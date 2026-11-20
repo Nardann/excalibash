@@ -6,7 +6,7 @@ import { WebSocketServer } from "ws";
 import { config } from "./config.ts";
 import { pruneSessions, userFromRequest } from "./auth.ts";
 import { HttpError, publicUrl } from "./http.ts";
-import { authApi } from "./api/auth.ts";
+import { announceSetup, authApi } from "./api/auth.ts";
 import { itemsApi } from "./api/items.ts";
 import { machinesApi } from "./api/machines.ts";
 import { adminApi } from "./api/admin.ts";
@@ -177,5 +177,6 @@ setInterval(pruneSessions, 3600_000).unref();
 
 server.listen(config.port, config.host, () => {
   console.log(`Excalibash sur http://${config.host}:${config.port}`);
+  announceSetup();
 });
 startProxy();

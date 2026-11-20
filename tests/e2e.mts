@@ -46,7 +46,12 @@ function mailCode(email: string): string {
   return lines.at(-1)?.match(/code=(\d{6})/)?.[1] ?? "";
 }
 
-async function register(email: string, name: string, password: string, invite?: string): Promise<U> {
+/** Setup code the server prints while it has no account. */
+function setupCode(): string {
+  return readFileSync(`${dirname(DB)}/server.log`, "utf8").match(/Code d'installation[^:]*: ([A-Z0-9-]+)/)?.[1] ?? "";
+}
+
+async function register(email: string, name: string, password: string, invite?: string, setup?: string): Promise<U> {
   jar.current = "";
   const id = c.randomId();
   const salt = c.toB64(c.randomBytes(16));
@@ -56,7 +61,7 @@ async function register(email: string, name: string, password: string, invite?: 
   const rec = await c.recoveryKeys(rraw);
   const r = await api("POST", "/auth/register", {
     pow: await pow(), website: "",
-    id, email, name, invite, salt, authKey,
+    id, email, name, invite, setupCode: setup, salt, authKey,
     publicKey: c.toB64(kp.pub),
     encPrivateKey: await c.box(masterKey, kp.pkcs8, c.AAD.priv(id)),
     recoveryEncPrivateKey: await c.box(rec.recoveryEnc, kp.pkcs8, c.AAD.priv(id)),
@@ -153,8 +158,12 @@ async function sendInput(sock: ReturnType<typeof boardSocket>, kt: c.SymKey, tid
 
 // ---------------------------------------------------------------------------------------
 
-const alice = await register("alice@test.local", "Alice", "alice-password-1");
-ok(alice.user.isAdmin, "le premier compte est admin");
+const badCode = await register("mallory@test.local", "Mallory", "mallory-password-1", undefined, "AAAA-AAAA").then(() => true, () => false);
+ok(!badCode, "sans le bon code d'installation, personne ne peut prendre le premier compte (admin)");
+const alice = await register("alice@test.local", "Alice", "alice-password-1", undefined, setupCode());
+ok(alice.user.isAdmin, "le premier compte, créé avec le code d'installation, est admin");
+const unknownTunnel = await realFetch(`${PROXY}/eb-proxy/req/${c.randomId()}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rid: "x", ts: Date.now(), d: "x".repeat(1_000_000) }) });
+ok(unknownTunnel.status === 404, "un tunnel inconnu est refusé avant la lecture du corps");
 
 // Alice: F / S / B (nested), with one encrypted element on B.
 let nA = await tree(alice);

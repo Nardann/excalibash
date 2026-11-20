@@ -190,9 +190,10 @@ func (m *manager) open(msg message, out *outbox) {
 		return
 	}
 
-	shell := pickShell(msg.Shell)
+	// The shell and directory are the machine's own defaults: the server has no say in what runs here.
+	shell := pickShell()
 	cmd := exec.Command(shell, "-l")
-	cmd.Dir = pickCwd(msg.Cwd)
+	cmd.Dir = pickCwd()
 	cmd.Env = shellEnv()
 
 	size := &pty.Winsize{Cols: orDefault(msg.Cols, 80), Rows: orDefault(msg.Rows, 24)}
@@ -366,8 +367,8 @@ func (m *manager) closeAll() {
 	}
 }
 
-func pickShell(requested string) string {
-	for _, sh := range []string{requested, os.Getenv("SHELL"), "/bin/bash", "/bin/sh"} {
+func pickShell() string {
+	for _, sh := range []string{os.Getenv("SHELL"), "/bin/bash", "/bin/sh"} {
 		if sh == "" {
 			continue
 		}
@@ -378,8 +379,8 @@ func pickShell(requested string) string {
 	return "/bin/sh"
 }
 
-func pickCwd(requested string) string {
-	for _, dir := range []string{requested, os.Getenv("HOME"), "/"} {
+func pickCwd() string {
+	for _, dir := range []string{os.Getenv("HOME"), "/"} {
 		if dir == "" {
 			continue
 		}

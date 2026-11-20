@@ -5,9 +5,11 @@ services:
     container_name: excalibash
     restart: unless-stopped
     ports:
-      - "6767:6767"
-      # Separate origin for web tunnels (sites of your machines), isolated from Excalibash itself.
-      - "6768:6768"
+      # Local only by default: put an HTTPS reverse proxy in front (see README).
+      # BIND_ADDR=0.0.0.0 exposes the ports on every interface (LAN tests, plain HTTP).
+      - "${BIND_ADDR:-127.0.0.1}:6767:6767"
+      # Separate origin for web tunnels (sites of the machines), isolated from Excalibash itself.
+      - "${BIND_ADDR:-127.0.0.1}:6768:6768"
     environment:
       # Public URL, used in the agent install commands (e.g. https://excalibash.example.com)
       PUBLIC_URL: ${PUBLIC_URL:-}
@@ -30,6 +32,8 @@ services:
       LEGAL_NAME: ${LEGAL_NAME:-}
       # Global cap on new accounts per hour (anti-abuse)
       REGISTRATIONS_PER_HOUR: ${REGISTRATIONS_PER_HOUR:-50}
+      # Code for the first (admin) account. Random and printed in the logs when empty.
+      SETUP_CODE: ${SETUP_CODE:-}
     volumes:
       - excalibash-data:/data
 

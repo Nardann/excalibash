@@ -148,6 +148,7 @@ adminApi.patch("/users/:id", (req, res) => {
 
 /** Removes a user and everything they own, closing live rooms, terminals and tunnels first. */
 export function purgeUser(id: string): void {
+  kickUser(id, 4403, "compte supprimé");
   const roots = db.prepare("SELECT * FROM items WHERE owner_id = ? AND parent_id IS NULL").all(id) as ItemRow[];
   for (const root of roots) {
     for (const i of subtree(root.id)) {

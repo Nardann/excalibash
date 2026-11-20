@@ -12,7 +12,7 @@ et versions des éléments, qui est connecté, les dimensions et le rythme d'act
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
-Limite propre à toute appli web E2E : le serveur fournit le JavaScript. Un hébergeur malveillant
+Limite propre à toute application web chiffrée de bout en bout : le serveur fournit le JavaScript. Un hébergeur malveillant
 qui modifie le code servi peut tout compromettre. On réduit la surface (CSP stricte, aucune
 dépendance chargée d'un CDN), mais seul un code auditable et un hébergeur de confiance
 règlent ce point.
@@ -49,11 +49,17 @@ un chiffré d'un objet à un autre.
   déconnexion. Sa clé publique est **recalculée localement** : celle que fournit le serveur doit
   correspondre, sinon on refuse la connexion. Une clé publique substituée amènerait sinon le client
   à sceller ses propres clés pour quelqu'un d'autre.
+- **Premier compte** : il devient administrateur. Pour qu'un inconnu ne le crée pas avant le
+  propriétaire d'une instance neuve, il exige un code d'installation affiché dans les logs du
+  serveur au démarrage (ou fixé par `SETUP_CODE`).
 - **Admin** : il peut inviter, ouvrir ou fermer les inscriptions, suspendre ou supprimer un compte,
-  nommer d'autres admins, et voir les métadonnées ci-dessus (stockage, machines, dernière activité). Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
+  nommer d'autres admins, et voir les métadonnées ci-dessus (stockage, machines, dernière
+  activité). Il **ne peut pas** changer le mot de passe d'un autre, se connecter à sa place,
   ni s'ajouter à un partage. L'API ne le permet pas, et même en trafiquant la base il n'obtiendrait
   que des chiffrés.
 - Mot de passe perdu : la clé de récupération permet d'en redéfinir un. Sans elle, les données sont perdues.
+- Déconnexion, changement de mot de passe, récupération ou suppression du compte : les sessions
+  concernées sont supprimées et les connexions temps réel ouvertes sont coupées.
 - **Inscription** : quand un serveur SMTP est configuré, l'email est vérifié par un code à 6 chiffres
   (stocké haché, 5 essais, 15 min). Une preuve de travail calculée par le navigateur, un champ piège
   et un plafond horaire limitent les inscriptions automatiques. Ces mesures protègent le serveur,
@@ -136,7 +142,9 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   aux nouveaux arrivants.
 - Les lecteurs (rôle viewer) reçoivent la sortie mais le serveur rejette leurs entrées.
   Ils ont la clé : c'est une restriction d'accès, pas une garantie cryptographique.
-- Il n'y a plus de machine intégrée : toute machine est un agent avec ses propres clés.
+- Toute machine est un agent avec ses propres clés : le serveur n'exécute aucun shell lui-même.
+- L'agent choisit seul le shell et le répertoire de départ (ceux de son compte) : le serveur ne
+  peut pas lui faire lancer un autre programme.
 
 ## Tunnels web
 
@@ -156,7 +164,10 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 - La révocation renouvelle aussi les clés des tunnels qui passent par les machines du propriétaire.
 - Limites actuelles :
   - pas de WebSocket ni de streaming dans le site tunnelisé (les réponses font au plus 48 Mo) ;
-  - les sites ouverts partagent l'origine proxy entre eux, mais pas avec Excalibash ;
+  - les sites ouverts partagent l'origine proxy entre eux, mais pas avec Excalibash (voir les
+    risques résiduels) ;
+  - l'origine proxy n'a pas de session : une requête vers un tunnel inconnu est refusée avant que
+    son corps soit lu ;
   - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port). Le cookie
     de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
     d'hôte distinct reste préférable.
@@ -176,3 +187,10 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   serveur, pas par la cryptographie.
 - **Suppression d'un compte par un admin** : elle ne déclenche pas de rotation sur les dossiers que
   ce compte partageait.
+- **Sites tunnelisés sur une même origine** : tous les tunnels d'un navigateur partagent l'origine
+  proxy, où le Service Worker garde leurs clés. Un site piégé, ouvert dans un tunnel (par exemple
+  depuis un tableau partagé par quelqu'un d'autre), peut lire les clés des autres tunnels ouverts
+  dans ce navigateur et joindre leurs cibles. Parade : n'ouvrir que des sites de confiance, ou un
+  profil de navigateur dédié. Une origine par tunnel (sous-domaines) supprimerait ce risque.
+- **Quotas** : il n'y a pas de quota de stockage par compte. Avec les inscriptions ouvertes, un
+  compte peut remplir le disque ; les inscriptions sur invitation évitent ce risque.

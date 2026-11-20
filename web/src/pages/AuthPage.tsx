@@ -20,7 +20,7 @@ export function AuthPage({ mode }: { mode: Mode }) {
   const [inviteValid, setInviteValid] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({ email: "", name: "", password: "", confirm: "", recoveryKey: "" });
+  const [form, setForm] = useState({ email: "", name: "", password: "", confirm: "", recoveryKey: "", setupCode: "" });
   const [pending, setPending] = useState<(Session & { recoveryKey: string }) | null>(null);
   const [website, setWebsite] = useState("");
   // Email step: after sign-up (keys + recovery key in memory) or after a login refused for an unverified email.
@@ -81,7 +81,7 @@ export function AuthPage({ mode }: { mode: Mode }) {
     try {
       if (mode === "register") {
         if (website) return;
-        const r = await register({ email: form.email, name: form.name, password: form.password, invite });
+        const r = await register({ email: form.email, name: form.name, password: form.password, invite, setupCode: setup ? form.setupCode : undefined });
         if ("needsVerification" in r) setVerifying({ email: r.email, keys: r.keys, recoveryKey: r.recoveryKey });
         else setPending(r);
       } else if (mode === "recover") {
@@ -133,6 +133,15 @@ export function AuthPage({ mode }: { mode: Mode }) {
           </p>
         ) : (
           <form onSubmit={submit}>
+            {setup && mode === "register" && (
+              <label className="field">
+                Code d'installation
+                <input className="input mono" required placeholder="XXXX-XXXX" autoComplete="off" spellCheck={false} {...field("setupCode")} />
+                <span className="field-help">
+                  Affiché dans les logs du serveur au démarrage : <code>docker compose logs excalibash</code>
+                </span>
+              </label>
+            )}
             {mode === "register" && (
               <label className="field">
                 Nom

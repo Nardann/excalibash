@@ -15,6 +15,7 @@ import {
   sha256,
   toUser,
   userCount,
+  userFromRequest,
   verifySecret,
   burnVerify,
 } from "../auth.ts";
@@ -22,10 +23,37 @@ import { HttpError, blob, str } from "../http.ts";
 import { config } from "../config.ts";
 import { emailEnabled, sendVerificationCode } from "../mailer.ts";
 import { createChallenge, verifyPow } from "../pow.ts";
+import { kickUser } from "../rooms.ts";
 
 export const authApi = Router();
 
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// First account: whoever registers first becomes admin, so a fresh instance asks for a code
+// printed in the server log. A stranger who finds the instance before its owner can't take it.
+const SETUP_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+let setupCode: string | null = null;
+
+const normalizeCode = (code: unknown) =>
+  String(code ?? "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+
+/** Prints the setup code while the instance has no account (called at startup). */
+export function announceSetup() {
+  if (userCount() > 0) return;
+  setupCode ??= normalizeCode(config.setupCode) || Array.from({ length: 8 }, () => SETUP_ALPHABET[randomInt(SETUP_ALPHABET.length)]).join("");
+  console.log(`Code d'installation (création du compte administrateur) : ${setupCode.slice(0, 4)}-${setupCode.slice(4)}`);
+}
+
+function checkSetupCode(code: unknown) {
+  if (!setupCode) announceSetup();
+  const given = Buffer.from(normalizeCode(code));
+  const want = Buffer.from(setupCode ?? "");
+  if (given.length !== want.length || !timingSafeEqual(given, want)) {
+    throw new HttpError(403, "Code d'installation invalide : il est affiché dans les logs du serveur");
+  }
+}
 
 function registrationOpen(): boolean {
   return userCount() === 0 || getSetting("registration_open", "false") === "true";
@@ -89,15 +117,19 @@ authApi.post("/register", async (req, res) => {
   const b = req.body;
   if (b.website) throw new HttpError(400, "Requête invalide");
   if (!verifyPow(b.pow)) throw new HttpError(400, "Vérification anti-robot échouée, réessaie");
-  limit(`reg:${req.ip}`, 5);
-  if (!rateLimit("reg:global", config.registrationsPerHour, 3600_000)) throw new HttpError(429, "Trop d'inscriptions en ce moment, réessaie plus tard");
   let invite: InviteRow | undefined;
-  if (b.invite) {
+  if (userCount() === 0) {
+    limit(`setup:${req.ip}`, 10, 600_000);
+    checkSetupCode(b.setupCode);
+  } else if (b.invite) {
     invite = db.prepare("SELECT * FROM invites WHERE token_hash = ?").get(sha256(String(b.invite))) as InviteRow | undefined;
     if (!invite || invite.used_by || invite.expires_at < Date.now()) throw new HttpError(403, "Invitation invalide ou expirée");
   } else if (!registrationOpen()) {
     throw new HttpError(403, "Les inscriptions sont fermées : il faut une invitation");
   }
+  // Counted only for sign-ups that are allowed: refused attempts can't use up these caps.
+  limit(`reg:${req.ip}`, 5);
+  if (!rateLimit("reg:global", config.registrationsPerHour, 3600_000)) throw new HttpError(429, "Trop d'inscriptions en ce moment, réessaie plus tard");
   const email = str(b.email);
   const name = str(b.name, 60);
   if (!EMAIL.test(email)) throw new HttpError(400, "Email invalide");
@@ -127,6 +159,7 @@ authApi.post("/register", async (req, res) => {
     pickColor(userCount()),
     Date.now(),
   );
+  if (first) setupCode = null;
   if (invite) db.prepare("UPDATE invites SET used_by = ? WHERE token_hash = ?").run(b.id, invite.token_hash);
   if (verify) {
     db.prepare("UPDATE users SET email_verified = 0 WHERE id = ?").run(b.id);
@@ -232,12 +265,16 @@ authApi.post("/recover/finish", (req, res) => {
     row.id,
   );
   db.prepare("DELETE FROM sessions WHERE user_id = ?").run(row.id);
+  // Live boards opened with the old sessions are cut too (the client reconnects if it still can).
+  kickUser(row.id, 4001, "session terminée");
   createSession(req, res, row.id);
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: blob(req.body.encPrivateKey, 400) } });
 });
 
 authApi.post("/logout", (req, res) => {
+  const user = userFromRequest(req);
   destroySession(req, res);
+  if (user) kickUser(user.id, 4001, "session terminée");
   res.json({ ok: true });
 });
 
@@ -277,6 +314,7 @@ authApi.post("/password", (req, res) => {
   );
   // Every other device must log in again with the new password.
   db.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").run(row.id, currentSessionHash(req) ?? "");
+  kickUser(row.id, 4001, "session terminée");
   res.json({ ok: true });
 });
 
