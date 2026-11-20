@@ -45,3 +45,4 @@ Polices d'Excalidraw servies par l'application (copiées depuis `@excalidraw/exc
 |---|---|---|
 | github.com/coder/websocket | ISC | <https://github.com/coder/websocket> |
 | github.com/creack/pty | MIT | <https://github.com/creack/pty> |
+| golang.org/x/crypto | BSD-3-Clause | <https://github.com/golang/crypto> |

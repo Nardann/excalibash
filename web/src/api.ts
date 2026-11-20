@@ -92,4 +92,17 @@ export type WebInfo = {
 };
 
 /** What a web tunnel points at (sealed for the agent, and in the board-encrypted label). */
-export type WebTarget = { url: string; insecure: boolean; machine: string };
+export type WebTarget = { url: string; insecure: boolean; machine: string; hostHeader?: string; legacyTls?: boolean };
+
+/** A device the agent connects to instead of starting a local shell (sealed for the agent only). */
+export type RemoteTarget = {
+  kind: "telnet" | "ssh" | "raw";
+  host: string;
+  port: number;
+  /** SSH only: empty means the agent asks "login as:" in the terminal. */
+  user?: string;
+  legacyKex?: boolean;
+  legacyHostKey?: boolean;
+  legacyCiphers?: boolean;
+  hostKeyCheck?: "tofu" | "off";
+};

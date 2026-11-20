@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -38,6 +39,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	configDir = filepath.Dir(*configPath)
 
 	if *showVersion {
 		fmt.Println(version)

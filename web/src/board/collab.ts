@@ -1,7 +1,7 @@
 import { CaptureUpdateAction, reconcileElements, restoreElements } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI, Collaborator, SocketId, BinaryFiles, AppState } from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import type { Entry, Role, TerminalInfo, WebInfo, WebTarget } from "../api.ts";
+import type { Entry, RemoteTarget, Role, TerminalInfo, WebInfo, WebTarget } from "../api.ts";
 import { AAD, box, boxJson, boxText, newSymKey, randomId, toB64, unbox, unboxJson, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
 import { decryptEntry, decryptFile, decryptPointer, encryptEntry, encryptFile, encryptPointer } from "./boardCrypto.ts";
 
@@ -28,6 +28,13 @@ type Events = {
 
 const SEND_INTERVAL = 50;
 const POINTER_INTERVAL = 50;
+
+/** Label of a remote session, e.g. "ssh admin@10.0.0.2:22 via web-01". */
+export function remoteLabel(t: RemoteTarget, machine: string): string {
+  const host = t.host.includes(":") ? `[${t.host}]` : t.host;
+  return `${t.kind} ${t.user ? `${t.user}@` : ""}${host}:${t.port} via ${machine}`;
+}
+export const isRemoteLabel = (label: string) => /^(telnet|ssh|raw) \S+ via /.test(label);
 
 export const terminalIdOf = (el: { customData?: Record<string, any> } | null | undefined): string | undefined =>
   el?.customData?.terminalId;
@@ -438,7 +445,8 @@ export class BoardSession {
     }
   }
 
-  async createTerminal(machine: { id: string; name: string; auth: SymKey }, cols: number, rows: number): Promise<TerminalInfo> {
+  /** A local shell on `machine`, or with `target` a Telnet / SSH / TCP session the agent opens from it. */
+  async createTerminal(machine: { id: string; name: string; auth: SymKey }, cols: number, rows: number, target?: RemoteTarget): Promise<TerminalInfo> {
     const id = randomId();
     const kt = await newSymKey();
     const frame = {
@@ -448,8 +456,10 @@ export class BoardSession {
       rows,
       keyForBoard: await wrapKey(this.key, kt, AAD.termKey(this.boardId, id)),
       // Boxed under the owner-only machine auth key: the agent refuses keys anyone else could forge.
-      keyForAgent: await box(machine.auth, kt.raw, AAD.termAgent(id)),
-      encLabel: await boxText(this.key, machine.name, AAD.termLabel(this.boardId, id)),
+      keyForAgent: target
+        ? await boxJson(machine.auth, { k: toB64(kt.raw), target }, AAD.termAgent(id))
+        : await box(machine.auth, kt.raw, AAD.termAgent(id)),
+      encLabel: await boxText(this.key, target ? remoteLabel(target, machine.name) : machine.name, AAD.termLabel(this.boardId, id)),
     };
     const reqId = randomId();
     return new Promise((resolve, reject) => {
@@ -496,7 +506,17 @@ export class BoardSession {
       id,
       machineId: machine.id,
       keyForBoard: await wrapKey(this.key, kw, AAD.webKey(this.boardId, id)),
-      keyForAgent: await boxJson(machine.auth, { k: toB64(kw.raw), url: target.url, insecure: target.insecure }, AAD.webAgent(id)),
+      keyForAgent: await boxJson(
+        machine.auth,
+        {
+          k: toB64(kw.raw),
+          url: target.url,
+          insecure: target.insecure,
+          ...(target.hostHeader ? { hostHeader: target.hostHeader } : {}),
+          ...(target.legacyTls ? { legacyTls: true } : {}),
+        },
+        AAD.webAgent(id),
+      ),
       encLabel: await boxJson(this.key, full, AAD.webLabel(this.boardId, id)),
     };
     const reqId = randomId();

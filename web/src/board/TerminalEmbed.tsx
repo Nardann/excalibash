@@ -3,8 +3,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
-import type { BoardSession } from "./collab.ts";
+import { Cable, Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
+import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog, useTheme } from "../components/ui.tsx";
 import { iconUrl, type TileIcon } from "./personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "./TileCustomizer.tsx";
@@ -233,7 +233,7 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
       )}
       <div className="term-head">
         <span className={dot} />
-        <TerminalSquare size={14} />
+        {isRemoteLabel(label) ? <Cable size={14} /> : <TerminalSquare size={14} />}
         <span className="name" title={label}>
           {name.split("\n")[0]}
           {title && <span className="status"> · {label}</span>}

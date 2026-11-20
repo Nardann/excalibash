@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import WebSocket from "../server/node_modules/ws/index.js";
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
@@ -289,6 +290,40 @@ ok(out.includes("CLEAR_42"), "Bob tape dans le terminal d'Alice, sortie chiffré
 sb.send(frame);
 const out2 = await termOutput(sb, ktBob, tid2, "CLEAR_42").catch(() => "");
 ok(!out2.includes("CLEAR_42"), "le rejeu d'une frappe par le serveur est ignoré par l'agent");
+
+// Telnet to a device reachable from the machine (a fake switch): the target is sealed with the key.
+const IAC = 255, DO = 253, WILL = 251, ECHO = 1, SGA = 3;
+let switchGotNaws = false;
+const fakeSwitch = createTcpServer((sock) => {
+  sock.write(Buffer.from([IAC, WILL, ECHO, IAC, WILL, SGA, IAC, DO, 31]));
+  sock.write("\r\nSwitch-TP>");
+  sock.on("data", (d) => {
+    if (d.includes(Buffer.from([IAC, 250, 31]))) switchGotNaws = true;
+    const text = d.toString("latin1").replace(/\xff[\xfb-\xfe]./g, "").replace(/\xff\xfa[\s\S]*?\xff\xf0/g, "");
+    if (text.includes("show version")) sock.write("\r\nIOS 12.2(55)SE TELNET_OK\r\nSwitch-TP>");
+  });
+});
+await new Promise<void>((r) => fakeSwitch.listen(0, "127.0.0.1", () => r()));
+const switchPort = (fakeSwitch.address() as any).port;
+const tid3 = c.randomId();
+const kt3 = await c.newSymKey();
+sa.send({
+  t: "term.create", reqId: "r3", id: tid3, machineId: machine.id, cols: 80, rows: 24,
+  keyForBoard: await c.wrapKey(keyB, kt3, c.AAD.termKey(B, tid3)),
+  keyForAgent: await c.boxJson(mAlice.auth, { k: c.toB64(kt3.raw), target: { kind: "telnet", host: "127.0.0.1", port: switchPort } }, c.AAD.termAgent(tid3)),
+  encLabel: await c.boxText(keyB, `telnet 127.0.0.1:${switchPort} via laptop-alice`, c.AAD.termLabel(B, tid3)),
+});
+await sa.next((m) => m.t === "term.created" && m.reqId === "r3");
+await subscribe(sa, tid3);
+await termOutput(sa, kt3, tid3, "Switch-TP>");
+await sendInput(sa, kt3, tid3, "alicetab", "show version\r");
+const telnetOut = await termOutput(sa, kt3, tid3, "TELNET_OK");
+ok(telnetOut.includes("TELNET_OK") && switchGotNaws, "telnet vers un équipement depuis la machine, négocié et chiffré jusqu'à l'agent");
+const dbTelnet = new DatabaseSync(DB, { readOnly: true });
+const tRow = JSON.stringify(dbTelnet.prepare("SELECT * FROM terminals WHERE id = ?").get(tid3) ?? {});
+dbTelnet.close();
+ok(!tRow.includes("127.0.0.1") && !tRow.includes("telnet"), "le serveur ne voit ni l'équipement ni le protocole");
+fakeSwitch.close();
 
 // Web tunnel: HTTP to a service on the machine, end-to-end encrypted through the agent.
 const site = createServer((req, res) => res.end(`site:${req.method}:${req.url}:${req.headers["x-t"]}`));

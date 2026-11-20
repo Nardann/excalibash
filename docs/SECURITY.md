@@ -146,6 +146,25 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 - L'agent choisit seul le shell et le répertoire de départ (ceux de son compte) : le serveur ne
   peut pas lui faire lancer un autre programme.
 
+## Sessions Telnet, SSH et TCP brut
+
+- Une session vers un équipement (switch, routeur, PC joignable depuis la machine) est un terminal
+  comme les autres : même clé de terminal, mêmes trames chiffrées, même anti-rejeu. Seule la source
+  change : une connexion réseau ouverte par l'agent au lieu d'un shell local.
+- La cible (`kind`, hôte, port, utilisateur, options) est scellée avec la clé du terminal sous
+  `machineAuth` (AAD `eb:term:<id>`) : seul le propriétaire de la machine peut la fixer, et le
+  serveur ne peut ni la lire ni la remplacer. Une nouvelle clé (rotation) ne change jamais la cible.
+- L'agent valide chaque champ (hôte, port, utilisateur) avant de se connecter ; tout champ invalide
+  ferme la session.
+- **Telnet et TCP brut** ne sont chiffrés que jusqu'à l'agent : entre la machine et l'équipement, le
+  trafic circule en clair sur le réseau local, comme avec n'importe quel client Telnet.
+- **SSH** : client intégré à l'agent. La clé d'hôte est épinglée à la première connexion dans
+  `known_hosts`, à côté de la configuration de l'agent ; une clé différente bloque la connexion.
+  La vérification peut être désactivée par session (option avancée, déconseillée). Les mots de passe
+  se tapent dans le terminal : ils voyagent chiffrés jusqu'à l'agent et ne sont jamais stockés.
+- L'option « Équipement ancien » n'ajoute des algorithmes faibles (`diffie-hellman-group1-sha1`,
+  `ssh-rsa`, `ssh-dss`, CBC, `hmac-sha1`) qu'à la session qui la demande.
+
 ## Tunnels web
 
 - Le navigateur du propriétaire de la machine génère `K_w`. Il dépose `box(machineAuth, {k: K_w, url, insecure}, "eb:web:<id>")`
@@ -158,6 +177,9 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 - Un Service Worker de cette origine chiffre chaque requête : `box(K_w, {m, p, h, b}, "eb:http-req:<id>:<rid>:<ts>")`.
   L'agent rejette les horodatages à plus de 5 min et les `rid` déjà vus, déchiffre, appelle la cible et renvoie
   `box(K_w, {s, h, b}, "eb:http-res:<id>:<rid>")`. Le serveur ne relaie que des chiffrés.
+- Options avancées, scellées avec la cible : `hostHeader` (en-tête Host et nom SNI envoyés à la cible, pour les
+  hôtes virtuels) et `legacyTls` (TLS 1.0/1.1 et suites anciennes, pour les interfaces web de vieux équipements).
+  L'en-tête Host envoyé par le navigateur est toujours ignoré.
 - Le Service Worker tient un jar de cookies par tunnel. Les en-têtes `Set-Cookie` ne deviennent jamais de vrais cookies du navigateur.
 - Seul Excalibash peut intégrer un site tunnelisé en iframe (`frame-ancestors`). L'iframe ne peut pas faire naviguer
   l'onglet Excalibash, et l'onglet plein écran perd `window.opener`.

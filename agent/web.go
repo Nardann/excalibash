@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +31,45 @@ type tunnel struct {
 	key      []byte
 	target   *url.URL
 	insecure bool
+	// hostHeader replaces the Host header and the TLS server name (virtual hosts).
+	hostHeader string
+	// legacyTLS accepts TLS 1.0/1.1 and weak cipher suites (old switches, UPS cards…).
+	legacyTLS bool
+}
+
+var validHostHeader = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$`)
+
+func hostHeaderOK(h string) bool {
+	if h == "" {
+		return true
+	}
+	if !validHostHeader.MatchString(h) {
+		return false
+	}
+	if _, port, err := net.SplitHostPort(h); err == nil {
+		n, err := strconv.Atoi(port)
+		return err == nil && n >= 1 && n <= 65535
+	}
+	return true
+}
+
+func (t *tunnel) tlsConfig() *tls.Config {
+	cfg := &tls.Config{InsecureSkipVerify: t.insecure}
+	if t.hostHeader != "" {
+		cfg.ServerName = t.hostHeader
+		if host, _, err := net.SplitHostPort(t.hostHeader); err == nil {
+			cfg.ServerName = host
+		}
+	}
+	if t.legacyTLS {
+		cfg.MinVersion = tls.VersionTLS10
+		for _, list := range [][]*tls.CipherSuite{tls.CipherSuites(), tls.InsecureCipherSuites()} {
+			for _, cs := range list {
+				cfg.CipherSuites = append(cfg.CipherSuites, cs.ID)
+			}
+		}
+	}
+	return cfg
 }
 
 type webHub struct {
@@ -42,7 +83,8 @@ func newWebHub(auth []byte) *webHub {
 	return &webHub{auth: auth, tunnels: map[string]*tunnel{}, nonces: map[string]time.Time{}}
 }
 
-// open installs a tunnel from its owner-issued blob: box(machineAuth, {k, url, insecure}, "eb:web:<id>").
+// open installs a tunnel from its owner-issued blob:
+// box(machineAuth, {k, url, insecure, hostHeader, legacyTls}, "eb:web:<id>").
 func (w *webHub) open(msg message) {
 	data, err := b64.DecodeString(msg.Key)
 	if err != nil {
@@ -54,21 +96,24 @@ func (w *webHub) open(msg message) {
 		return
 	}
 	var spec struct {
-		K        string `json:"k"`
-		URL      string `json:"url"`
-		Insecure bool   `json:"insecure"`
+		K          string `json:"k"`
+		URL        string `json:"url"`
+		Insecure   bool   `json:"insecure"`
+		HostHeader string `json:"hostHeader"`
+		LegacyTLS  bool   `json:"legacyTls"`
 	}
 	if json.Unmarshal(pt, &spec) != nil {
 		return
 	}
 	key, err := b64.DecodeString(spec.K)
 	target, err2 := url.Parse(spec.URL)
-	if err != nil || err2 != nil || len(key) != keyLen || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" {
+	if err != nil || err2 != nil || len(key) != keyLen || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||
+		!hostHeaderOK(spec.HostHeader) {
 		log.Printf("web %s: invalid tunnel spec", msg.ID)
 		return
 	}
 	w.mu.Lock()
-	w.tunnels[msg.ID] = &tunnel{key: key, target: target, insecure: spec.Insecure}
+	w.tunnels[msg.ID] = &tunnel{key: key, target: target, insecure: spec.Insecure, hostHeader: spec.HostHeader, legacyTLS: spec.LegacyTLS}
 	w.mu.Unlock()
 	log.Printf("web %s: tunnel to %s", msg.ID, target)
 }
@@ -173,6 +218,9 @@ func (w *webHub) forward(t *tunnel, r httpReq) httpRes {
 	if err != nil {
 		return fail(400, err.Error())
 	}
+	if t.hostHeader != "" {
+		req.Host = t.hostHeader
+	}
 	for k, vs := range r.H {
 		if hopHeaders[http.CanonicalHeaderKey(k)] {
 			continue
@@ -186,7 +234,7 @@ func (w *webHub) forward(t *tunnel, r httpReq) httpRes {
 		// Redirects are handed back to the browser, which rewrites them into the tunnel.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
-			TLSClientConfig:    &tls.Config{InsecureSkipVerify: t.insecure},
+			TLSClientConfig:    t.tlsConfig(),
 			DisableCompression: true,
 		},
 	}

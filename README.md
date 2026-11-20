@@ -27,7 +27,8 @@ Tout le TP tient sur un seul tableau, partagé avec le binôme ou le prof. Les d
 ## Fonctionnalités
 
 - **Terminaux sur le canvas.** Une icône de machine porte un ou plusieurs shells, chacun dans sa fenêtre. L'icône se personnalise avec la bibliothèque Excalidraw. <kbd>Alt</kbd>+<kbd>T</kbd> ouvre un shell, <kbd>Alt</kbd>+<kbd>R</kbd> ou un double-clic sur la barre de titre le masque sans l'arrêter.
-- **Sites web des machines.** `http://127.0.0.1:80`, l'interface d'un routeur ou un Proxmox du réseau de la machine s'ouvrent dans une fenêtre du tableau ou en plein onglet. Le serveur ne voit ni l'adresse ni les pages.
+- **Telnet et SSH vers les équipements.** Un switch, un routeur ou un PC joignable depuis une machine s'ouvre en Telnet, SSH ou TCP brut dans un terminal du tableau. Le client est intégré à l'agent. L'option « Équipement ancien » réactive les vieux algorithmes SSH (`diffie-hellman-group1-sha1`, `ssh-rsa`, CBC) qui provoquent les erreurs « no matching key exchange method found ».
+- **Sites web des machines.** `http://127.0.0.1:80`, l'interface d'un routeur ou un Proxmox du réseau de la machine s'ouvrent dans une fenêtre du tableau ou en plein onglet. La configuration avancée accepte un en-tête Host et le TLS 1.0/1.1 des vieux équipements. Le serveur ne voit ni l'adresse ni les pages.
 - **Collaboration en temps réel.** Dessin, curseurs, sélections et terminaux partagés.
 - **Dossiers partagés.** Partage en lecture ou en édition ; les sous-dossiers suivent. Retirer quelqu'un renouvelle toutes les clés du sous-arbre.
 - **Machines.** Agent Go statique (Linux, macOS, amd64, arm64) qui se connecte en sortie, sans port à ouvrir. Appairage par code court, démarrage avec la machine, reconnexion automatique.

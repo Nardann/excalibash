@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -17,6 +17,8 @@ import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, Modal, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
+import { HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
+import type { RemoteTarget } from "../api.ts";
 import {
   LINK_BASE,
   TERM_H,
@@ -191,14 +193,16 @@ function Editor({ node }: { node: Node }) {
   const [nodeMenu, setNodeMenu] = useState<{ anchor: MenuAnchor; nodeId: string } | null>(null);
   /** "New web view" form for a node. */
   const [webForm, setWebForm] = useState<string | null>(null);
+  /** "Telnet / SSH to a device" form, for a node or a brand-new one. */
+  const [remoteForm, setRemoteForm] = useState<{ nodeId?: string } | null>(null);
 
   const newShell = useCallback(
-    async (machine: Machine, nodeId?: string) => {
+    async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
       const x = excalidrawRef.current;
       if (!x) return;
       setPicker(null);
       try {
-        const info = await session.createTerminal(machine, 100, 30);
+        const info = await session.createTerminal(machine, 100, 30, target);
         localStorage.setItem(LAST_MACHINE, machine.id);
         if (nodeId && findEl(x, nodeId) && !findEl(x, nodeId)!.isDeleted) addShell(x, nodeId, info.id);
         else createNode(x, info.id);
@@ -570,6 +574,9 @@ function Editor({ node }: { node: Node }) {
                 <button title="Nouveau shell sur cette icône" onClick={() => setPicker({ anchor: anchorBelow(selTerm.id) ?? { x: 0, y: 0 }, nodeId: selTerm.id })}>
                   <Plus size={14} />
                 </button>
+                <button title="Telnet / SSH vers un équipement" onClick={() => setRemoteForm({ nodeId: selTerm.id })}>
+                  <Cable size={14} />
+                </button>
                 <button title="Ouvrir un site web de la machine (tunnel chiffré)" onClick={() => setWebForm(selTerm.id)}>
                   <Globe size={14} />
                 </button>
@@ -640,7 +647,17 @@ function Editor({ node }: { node: Node }) {
             />
           );
         })()}
-      {picker && <MachinePicker anchor={picker.anchor} onClose={() => setPicker(null)} onPick={(m) => newShell(m, picker.nodeId)} />}
+      {picker && (
+        <MachinePicker
+          anchor={picker.anchor}
+          onClose={() => setPicker(null)}
+          onPick={(m) => newShell(m, picker.nodeId)}
+          onRemote={() => {
+            setRemoteForm({ nodeId: picker.nodeId });
+            setPicker(null);
+          }}
+        />
+      )}
       {nodeMenu && (
         <NodeMenu
           session={session}
@@ -660,11 +677,25 @@ function Editor({ node }: { node: Node }) {
             setWebForm(nodeMenu.nodeId);
             setNodeMenu(null);
           }}
+          onNewRemote={() => {
+            setRemoteForm({ nodeId: nodeMenu.nodeId });
+            setNodeMenu(null);
+          }}
+        />
+      )}
+      {remoteForm && (
+        <RemoteForm
+          defaultMachineId={(remoteForm.nodeId && nodeMachineId(remoteForm.nodeId)) || localStorage.getItem(LAST_MACHINE)}
+          onClose={() => setRemoteForm(null)}
+          onCreate={(machine, target) => {
+            setRemoteForm(null);
+            void newShell(machine, remoteForm.nodeId, target);
+          }}
         />
       )}
       {webForm && (
         <WebForm
-          defaultMachineId={nodeMachineId(webForm)}
+          defaultMachineId={nodeMachineId(webForm) ?? localStorage.getItem(LAST_MACHINE)}
           onClose={() => setWebForm(null)}
           onCreate={async (machine, target) => {
             const x = excalidrawRef.current;
@@ -745,7 +776,7 @@ function ConnBadge({ state }: { state: ConnState }) {
   return null;
 }
 
-function MachinePicker({ anchor, onClose, onPick }: { anchor: MenuAnchor; onClose: () => void; onPick: (m: Machine) => void }) {
+function MachinePicker({ anchor, onClose, onPick, onRemote }: { anchor: MenuAnchor; onClose: () => void; onPick: (m: Machine) => void; onRemote: () => void }) {
   const keys = useKeys();
   const [machines, setMachines] = useState<Machine[] | null>(null);
   useEffect(() => {
@@ -776,6 +807,11 @@ function MachinePicker({ anchor, onClose, onPick }: { anchor: MenuAnchor; onClos
         </button>
       ))}
       <div className="menu-sep" />
+      {!!machines?.length && (
+        <button className="menu-item" onClick={onRemote}>
+          <Cable size={16} /> Telnet / SSH vers un équipement…
+        </button>
+      )}
       <Link to="/machines" className="menu-item">
         {machines?.length ? <Server size={16} /> : <Plus size={16} />} Gérer les machines
       </Link>
@@ -793,6 +829,7 @@ function NodeMenu(p: {
   onNewShell: () => void;
   onCustomize: () => void;
   onNewWeb: () => void;
+  onNewRemote: () => void;
 }) {
   const api = p.api;
   const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
@@ -852,6 +889,9 @@ function NodeMenu(p: {
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
+      <button className="menu-item" onClick={p.onNewRemote}>
+        <Cable size={16} /> Telnet / SSH vers un équipement…
+      </button>
       <button className="menu-item" onClick={p.onNewWeb}>
         <Globe size={16} /> Nouveau site web…
       </button>
@@ -870,29 +910,24 @@ function WebForm({
 }: {
   defaultMachineId: string | null;
   onClose: () => void;
-  onCreate: (m: Machine, target: { url: string; insecure: boolean }) => void;
+  onCreate: (m: Machine, target: { url: string; insecure: boolean; hostHeader?: string; legacyTls?: boolean }) => void;
 }) {
-  const keys = useKeys();
-  const [machines, setMachines] = useState<Machine[] | null>(null);
-  const [machineId, setMachineId] = useState(() => defaultMachineId ?? localStorage.getItem(LAST_MACHINE) ?? "");
+  const choice = useMachineChoice(defaultMachineId);
   const [scheme, setScheme] = useState("http");
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("80");
   const [path, setPath] = useState("/");
   const [insecure, setInsecure] = useState(true);
-  useEffect(() => {
-    listMachines(keys)
-      .then((ms) => {
-        setMachines(ms);
-        if (!ms.some((m) => m.id === machineId) && ms[0]) setMachineId(ms[0].id);
-      })
-      .catch(toast.error);
-  }, [keys]);
-  const machine = machines?.find((m) => m.id === machineId);
+  const [hostHeader, setHostHeader] = useState("");
+  const [legacyTls, setLegacyTls] = useState(false);
+  const machine = choice.machine;
   const cleanHost = host.trim().replace(/^\[|\]$/g, "");
+  const cleanHeader = hostHeader.trim();
+  const headerOk = !cleanHeader || /^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$/.test(cleanHeader);
   const portNum = Number(port);
-  const valid = !!machine && /^[A-Za-z0-9._:-]+$/.test(cleanHost) && Number.isInteger(portNum) && portNum > 0 && portNum < 65536;
+  const valid = !!machine && HOST_RE.test(cleanHost) && Number.isInteger(portNum) && portNum > 0 && portNum < 65536 && headerOk;
   const url = `${scheme}://${cleanHost.includes(":") ? `[${cleanHost}]` : cleanHost}:${port}${path.startsWith("/") ? path : `/${path}`}`;
+  const https = scheme === "https";
   return (
     <Modal onClose={onClose} width={560}>
       <h2 className="display">Ouvrir un site de la machine</h2>
@@ -904,20 +939,16 @@ function WebForm({
         style={{ display: "grid", gap: 12 }}
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onCreate(machine!, { url, insecure: scheme === "https" && insecure });
+          if (!valid) return;
+          onCreate(machine!, {
+            url,
+            insecure: https && insecure,
+            ...(cleanHeader ? { hostHeader: cleanHeader } : {}),
+            ...(https && legacyTls ? { legacyTls: true } : {}),
+          });
         }}
       >
-        <label className="field">
-          Machine (une des tiennes)
-          <select className="select" value={machineId} onChange={(e) => setMachineId(e.target.value)} style={{ width: "100%" }}>
-            {machines?.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.online ? "" : " (hors ligne)"}
-              </option>
-            ))}
-          </select>
-        </label>
+        <MachineField label="Machine (une des tiennes)" choice={choice} />
         <div className="web-form">
           <label className="field">
             Protocole
@@ -947,13 +978,37 @@ function WebForm({
           Chemin
           <input className="input" value={path} onChange={(e) => setPath(e.target.value)} />
         </label>
-        {scheme === "https" && (
+        {https && (
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600 }}>
             <input type="checkbox" checked={insecure} onChange={(e) => setInsecure(e.target.checked)} /> Accepter un certificat auto-signé (Proxmox, routeurs…)
           </label>
         )}
+        <details className="advanced">
+          <summary>Configuration avancée</summary>
+          <div className="advanced-body">
+            <label className="field">
+              En-tête Host
+              <input className="input" value={hostHeader} onChange={(e) => setHostHeader(e.target.value)} placeholder={cleanHost || "intranet.local"} spellCheck={false} />
+              <span className="field-help">
+                {headerOk
+                  ? `Pour un site servi par nom (hôte virtuel) : envoyé à la place de l'hôte${https ? ", et utilisé comme nom TLS (SNI)" : ""}. Vide : l'hôte ci-dessus.`
+                  : "En-tête invalide : un nom, avec un port facultatif (intranet.local:8080)."}
+              </span>
+            </label>
+            {https && (
+              <label className="check">
+                <input type="checkbox" checked={legacyTls} onChange={(e) => setLegacyTls(e.target.checked)} />
+                <span>
+                  TLS ancien (1.0/1.1)
+                  <small>Interfaces web de vieux switchs ou onduleurs qui échouent avec « protocol version » ou « handshake failure ». Chiffrement faible.</small>
+                </span>
+              </label>
+            )}
+          </div>
+        </details>
         <div className="codebox" style={{ paddingRight: 14 }}>
           {url}
+          {cleanHeader && headerOk && <div style={{ color: "#94a3b8" }}>Host: {cleanHeader}</div>}
         </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

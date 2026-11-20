@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/ecdh"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -24,7 +26,7 @@ const (
 	maxSenders = 1000
 )
 
-// manager owns every PTY session. Sessions outlive websocket connections:
+// manager owns every terminal session. Sessions outlive websocket connections:
 // while no connection is attached, output is kept in a per-session ring buffer
 // and exits are remembered until they can be reported.
 type manager struct {
@@ -37,18 +39,29 @@ type manager struct {
 	out      *outbox // nil while disconnected
 }
 
-// session state below cmd/ptmx is guarded by manager.mu.
+// source is what a session runs: a local shell in a PTY or a connection to a remote host.
+// Output is read until the source ends; wait then returns its exit code and close releases
+// the output side.
+type source interface {
+	io.ReadWriter
+	resize(cols, rows uint16)
+	kill()
+	wait() int
+	close()
+	pid() int
+	describe() string
+}
+
+// session state below src is guarded by manager.mu.
 type session struct {
 	id      string
-	cmd     *exec.Cmd
-	ptmx    *os.File
+	src     source
 	pending []byte // plaintext output produced while disconnected
 	exited  bool
 	code    int
-	done    chan struct{}
 
 	key     []byte // terminal key K_t
-	gen     string // changes on every PTY launch and rekey
+	gen     string // changes on every launch and rekey
 	seq     uint64 // last output sequence number used in gen
 	senders map[string]*sender
 	order   uint64
@@ -69,17 +82,37 @@ func newManagerWithAuth(auth []byte) *manager {
 	return &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth)}
 }
 
-// openKey decrypts a terminal key issued by the machine's owner.
-func (m *manager) openKey(id, boxed string) ([]byte, error) {
+// openKey decrypts a terminal key issued by the machine's owner: either the raw key (local
+// shell) or {k, target} for a remote session. The target is sealed with the key, so the
+// server can neither read nor change it.
+func (m *manager) openKey(id, boxed string) ([]byte, *target, error) {
 	data, err := b64.DecodeString(boxed)
 	if err != nil {
-		return nil, errCrypto
+		return nil, nil, errCrypto
 	}
-	key, err := unbox(m.auth, data, "eb:term:"+id)
+	pt, err := unbox(m.auth, data, "eb:term:"+id)
+	if err != nil {
+		return nil, nil, errCrypto
+	}
+	if len(pt) == keyLen {
+		return pt, nil, nil
+	}
+	var spec struct {
+		K      string          `json:"k"`
+		Target json.RawMessage `json:"target"`
+	}
+	if json.Unmarshal(pt, &spec) != nil {
+		return nil, nil, errCrypto
+	}
+	key, err := b64.DecodeString(spec.K)
 	if err != nil || len(key) != keyLen {
-		return nil, errCrypto
+		return nil, nil, errCrypto
 	}
-	return key, nil
+	t, err := parseTarget(spec.Target)
+	if err != nil {
+		return nil, nil, err
+	}
+	return key, t, nil
 }
 
 // outputFrame encrypts data as the next output chunk. Caller holds m.mu.
@@ -180,36 +213,33 @@ func (m *manager) get(id string) *session {
 
 func (m *manager) open(msg message, out *outbox) {
 	if s := m.get(msg.ID); s != nil {
-		out.send(message{T: "opened", ID: msg.ID, Pid: s.cmd.Process.Pid})
+		out.send(message{T: "opened", ID: msg.ID, Pid: s.src.pid()})
 		return
 	}
-	key, err := m.openKey(msg.ID, msg.Key)
+	key, t, err := m.openKey(msg.ID, msg.Key)
 	if err != nil {
-		log.Printf("open %s: invalid terminal key", msg.ID)
-		out.send(message{T: "exit", ID: msg.ID, Code: intPtr(-1), Error: "clé de terminal invalide"})
+		log.Printf("open %s: %v", msg.ID, err)
+		text := "clé de terminal invalide"
+		if errors.Is(err, errTarget) {
+			text = err.Error()
+		}
+		out.send(message{T: "exit", ID: msg.ID, Code: intPtr(-1), Error: text})
 		return
 	}
 
-	// The shell and directory are the machine's own defaults: the server has no say in what runs here.
-	shell := pickShell()
-	cmd := exec.Command(shell, "-l")
-	cmd.Dir = pickCwd()
-	cmd.Env = shellEnv()
-
-	size := &pty.Winsize{Cols: orDefault(msg.Cols, 80), Rows: orDefault(msg.Rows, 24)}
-	ptmx, err := pty.StartWithSize(cmd, size)
-	if err != nil {
+	cols, rows := orDefault(msg.Cols, 80), orDefault(msg.Rows, 24)
+	var src source
+	if t != nil {
+		src = startRemote(*t, cols, rows)
+	} else if src, err = startLocal(cols, rows); err != nil {
 		log.Printf("open %s: %v", msg.ID, err)
 		out.send(message{T: "exit", ID: msg.ID, Code: intPtr(-1), Error: err.Error()})
 		return
 	}
 
-	s := &session{
-		id: msg.ID, cmd: cmd, ptmx: ptmx, done: make(chan struct{}),
-		key: key, gen: randomID(6), senders: map[string]*sender{},
-	}
-	log.Printf("session %s started (%s, pid %d)", s.id, shell, cmd.Process.Pid)
-	out.send(message{T: "opened", ID: s.id, Pid: cmd.Process.Pid})
+	s := &session{id: msg.ID, src: src, key: key, gen: randomID(6), senders: map[string]*sender{}}
+	log.Printf("session %s started (%s)", s.id, src.describe())
+	out.send(message{T: "opened", ID: s.id, Pid: src.pid()})
 	m.mu.Lock()
 	m.sessions[s.id] = s
 	// Browsers bind their keystrokes to the gen: announce it even if the shell stays silent.
@@ -219,14 +249,14 @@ func (m *manager) open(msg message, out *outbox) {
 	go m.pump(s)
 }
 
-// pump forwards PTY output until the shell exits, then reports the exit code.
+// pump forwards output until the source ends, then reports the exit code.
 func (m *manager) pump(s *session) {
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		buf := make([]byte, readChunk)
 		for {
-			n, err := s.ptmx.Read(buf)
+			n, err := s.src.Read(buf)
 			if n > 0 {
 				m.emitOutput(s, append([]byte(nil), buf[:n]...))
 			}
@@ -236,24 +266,23 @@ func (m *manager) pump(s *session) {
 		}
 	}()
 
-	err := s.cmd.Wait()
+	code := s.src.wait()
 	// Background jobs may keep the PTY open; give the reader a moment to drain.
 	select {
 	case <-readDone:
 	case <-time.After(200 * time.Millisecond):
 	}
-	s.ptmx.Close()
+	s.src.close()
 	<-readDone
-	close(s.done)
 
-	code := exitCode(s.cmd, err)
 	log.Printf("session %s exited (%d)", s.id, code)
 	m.emitExit(s, code)
 }
 
 // rekey switches a session to a new terminal key; output restarts in a new gen.
 func (m *manager) rekey(msg message) {
-	key, err := m.openKey(msg.ID, msg.Key)
+	// A remote session keeps its target: only the key is taken from the new payload.
+	key, _, err := m.openKey(msg.ID, msg.Key)
 	if err != nil {
 		log.Printf("rekey %s: invalid terminal key", msg.ID)
 		return
@@ -267,7 +296,7 @@ func (m *manager) rekey(msg message) {
 	}
 }
 
-// input decrypts keystrokes and writes them to the PTY. Frames that are stale,
+// input decrypts keystrokes and writes them to the session's source. Frames that are stale,
 // replayed or fail authentication are dropped.
 func (m *manager) input(msg message) {
 	ts, err := strconv.ParseInt(string(msg.Ts), 10, 64)
@@ -304,10 +333,10 @@ func (m *manager) input(msg message) {
 		return
 	}
 	s.remember(msg.S, msg.K)
-	ptmx := s.ptmx
+	src := s.src
 	m.mu.Unlock()
 
-	if _, err := ptmx.Write(pt); err != nil && !errors.Is(err, os.ErrClosed) {
+	if _, err := src.Write(pt); err != nil && !errors.Is(err, os.ErrClosed) {
 		log.Printf("input %s: %v", msg.ID, err)
 	}
 }
@@ -334,25 +363,14 @@ func (s *session) remember(id string, k uint64) {
 
 func (m *manager) resize(id string, cols, rows uint16) {
 	if s := m.get(id); s != nil && cols > 0 && rows > 0 {
-		_ = pty.Setsize(s.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
+		s.src.resize(cols, rows)
 	}
 }
 
-// kill sends SIGHUP to the session's process group, then SIGKILL after 2s.
 func (m *manager) kill(id string) {
-	s := m.get(id)
-	if s == nil || s.cmd.Process == nil {
-		return
+	if s := m.get(id); s != nil {
+		s.src.kill()
 	}
-	pgid := s.cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGHUP)
-	go func() {
-		select {
-		case <-s.done:
-		case <-time.After(2 * time.Second):
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-	}()
 }
 
 func (m *manager) closeAll() {
@@ -365,6 +383,57 @@ func (m *manager) closeAll() {
 	for _, id := range ids {
 		m.kill(id)
 	}
+}
+
+// localPTY is the machine's own login shell.
+type localPTY struct {
+	cmd    *exec.Cmd
+	ptmx   *os.File
+	exited chan struct{}
+}
+
+func startLocal(cols, rows uint16) (*localPTY, error) {
+	// The shell and directory are the machine's own defaults: the server has no say in what runs here.
+	cmd := exec.Command(pickShell(), "-l")
+	cmd.Dir = pickCwd()
+	cmd.Env = shellEnv()
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
+	if err != nil {
+		return nil, err
+	}
+	return &localPTY{cmd: cmd, ptmx: ptmx, exited: make(chan struct{})}, nil
+}
+
+func (l *localPTY) Read(p []byte) (int, error)  { return l.ptmx.Read(p) }
+func (l *localPTY) Write(p []byte) (int, error) { return l.ptmx.Write(p) }
+func (l *localPTY) close()                      { l.ptmx.Close() }
+func (l *localPTY) pid() int                    { return l.cmd.Process.Pid }
+
+func (l *localPTY) describe() string {
+	return l.cmd.Path + ", pid " + strconv.Itoa(l.pid())
+}
+
+func (l *localPTY) resize(cols, rows uint16) {
+	_ = pty.Setsize(l.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
+}
+
+func (l *localPTY) wait() int {
+	err := l.cmd.Wait()
+	close(l.exited)
+	return exitCode(l.cmd, err)
+}
+
+// kill sends SIGHUP to the shell's process group, then SIGKILL after 2s.
+func (l *localPTY) kill() {
+	pgid := l.cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGHUP)
+	go func() {
+		select {
+		case <-l.exited:
+		case <-time.After(2 * time.Second):
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}()
 }
 
 func pickShell() string {
