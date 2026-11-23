@@ -20,6 +20,7 @@ import {
   Square,
   Trash2,
   Upload,
+  Users,
 } from "lucide-react";
 import { api } from "../api.ts";
 import { useUser } from "../auth.tsx";
@@ -33,7 +34,10 @@ import {
   createItem,
   duplicateBoard,
   isInTrash,
+  MY_ROOT,
+  isShared,
   pathOf,
+  placedShares,
   renameItem,
   sortNodes,
   useLibrary,
@@ -46,7 +50,7 @@ type View = "mine" | "folder" | "shared" | "trash";
 export function Dashboard({ view }: { view: View }) {
   const user = useUser();
   const ctx = useLibraryCtx();
-  const { nodes, loading, refresh } = useLibrary();
+  const { nodes, loading, refresh, placements, place } = useLibrary();
   const navigate = useNavigate();
   const { folderId } = useParams();
   const move = useMoveItems();
@@ -82,22 +86,36 @@ export function Dashboard({ view }: { view: View }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [selected.size]);
 
+  // Links to shared items I filed in my own files: item id -> folder id (null: top of "Mes fichiers").
+  const placed = useMemo(() => placedShares(nodes, placements, user.id), [nodes, placements, user.id]);
+  const linkHere = !trash && (view === "mine" || (view === "folder" && folder?.ownerId === user.id));
+
   const items = useMemo(() => {
     const all = [...nodes.values()];
     let list: Node[];
     if (trash) list = all.filter((n) => n.deletedAt && n.ownerId === user.id && !(n.parentId && isInTrash(nodes, nodes.get(n.parentId) ?? n)));
     else if (view === "shared") list = all.filter((n) => n.root && n.role !== "owner" && !n.deletedAt);
-    else list = childrenOf(nodes, targetParent, user.id);
+    else {
+      list = childrenOf(nodes, targetParent, user.id);
+      if (linkHere) list = [...list, ...[...placed].filter(([id, f]) => f === targetParent && !list.some((n) => n.id === id)).map(([id]) => nodes.get(id)!)];
+    }
     const needle = q.trim().toLowerCase();
     if (needle && !trash) {
       // Search the whole scope (sub-folders included), not just the current level.
-      const scope = view === "shared" ? all.filter((n) => n.ownerId !== user.id) : view === "folder" && folder ? all.filter((n) => pathOf(nodes, n.id).some((p) => p.id === folder.id) && n.id !== folder.id) : all.filter((n) => n.ownerId === user.id);
+      const inFolder = (n: Node) => pathOf(nodes, n.id).some((p) => p.id === folder!.id) && n.id !== folder!.id;
+      const placedHere = (n: Node) => {
+        const f = placed.get(n.id);
+        return placed.has(n.id) && (view !== "folder" || (!!folder && !!f && (f === folder.id || pathOf(nodes, f).some((p) => p.id === folder.id))));
+      };
+      const scope = view === "shared" ? all.filter((n) => n.ownerId !== user.id) : view === "folder" && folder ? all.filter((n) => inFolder(n) || placedHere(n)) : all.filter((n) => n.ownerId === user.id || placedHere(n));
       list = scope.filter((n) => !isInTrash(nodes, n) && n.name.toLowerCase().includes(needle));
     }
     return sortNodes(list, sort);
-  }, [nodes, trash, view, targetParent, user.id, q, sort, folder]);
+  }, [nodes, trash, view, targetParent, user.id, q, sort, folder, placed]);
 
-  const childCount = (id: string) => [...nodes.values()].filter((n) => n.parentId === id && !n.deletedAt).length;
+  const childCount = (id: string) => [...nodes.values()].filter((n) => n.parentId === id && !n.deletedAt).length + [...placed.values()].filter((f) => f === id).length;
+  // Only meaningful outside "Partagés avec moi": there a share is a plain top-level entry.
+  const isPlaced = (id: string) => linkHere && placed.get(id) === targetParent && placed.has(id);
   const ids = useMemo(() => [...selected], [selected]);
   const targets = (n?: Node) => (n && !selected.has(n.id) ? [n.id] : ids);
   const done = async () => {
@@ -141,7 +159,15 @@ export function Dashboard({ view }: { view: View }) {
     lastClicked.current = id;
   };
 
-  const trashItems = async (list: string[]) => {
+  const trashItems = async (all: string[]) => {
+    // A share filed in my folder is only unfiled: nothing is deleted for its owner.
+    const unfile = all.filter(isPlaced);
+    const list = all.filter((id) => !unfile.includes(id));
+    if (unfile.length) {
+      for (const id of unfile) await place(id, null).catch(toast.error);
+      toast("Lien retiré (l'élément reste dans « Partagés avec moi »)");
+      if (!list.length) return done();
+    }
     if (trash) {
       const ok = await confirmDialog({
         title: "Supprimer définitivement ?",
@@ -325,6 +351,7 @@ export function Dashboard({ view }: { view: View }) {
               key={n.id}
               node={n}
               meId={user.id}
+              placed={isPlaced(n.id)}
               childCount={n.kind === "folder" ? childCount(n.id) : undefined}
               selected={selected.has(n.id)}
               selecting={selected.size > 0}
@@ -356,7 +383,7 @@ export function Dashboard({ view }: { view: View }) {
               const list = targets(menu.node);
               setMenu(null);
               setSelected(new Set());
-              move(list, target);
+              if (target !== undefined) move(list, target);
             }}
           />
         </Menu>
@@ -378,6 +405,7 @@ export function Dashboard({ view }: { view: View }) {
             <CardMenu
               node={menu.node}
               meId={user.id}
+              placed={isPlaced(menu.node.id)}
               close={() => setMenu(null)}
               onOpen={() => navigate(menu.node!.kind === "folder" ? `/folder/${menu.node!.id}` : `/board/${menu.node!.id}`)}
               onShare={() => setSharing(menu.node!)}
@@ -398,9 +426,36 @@ export function Dashboard({ view }: { view: View }) {
   );
 }
 
-function MoveTargets({ items, onMove }: { items: Node[]; onMove: (target: string | null) => void }) {
+/** `onMove(undefined)` only closes the menu (the change was already made). */
+function MoveTargets({ items, onMove }: { items: Node[]; onMove: (target: string | null | undefined) => void }) {
   const user = useUser();
   const { nodes } = useLibrary();
+  const { placements, place } = useLibrary();
+  if (items.length && items.every((i) => isShared(i, user.id))) {
+    // Shared with me: I only choose where to file it among my own folders (private to me).
+    const mine = [...nodes.values()]
+      .filter((n) => n.kind === "folder" && n.ownerId === user.id && !isInTrash(nodes, n))
+      .map((n) => ({ n, label: pathOf(nodes, n.id).map((p) => p.name).join(" / ") }))
+      .sort((a, b) => a.label.localeCompare(b.label, "fr"));
+    return (
+      <div style={{ maxHeight: 360, overflowY: "auto" }}>
+        <div className="menu-label">Ajouter un lien dans… (visible par toi seul)</div>
+        {items.some((i) => placements[i.id]) && (
+          <button className="menu-item" onClick={() => Promise.all(items.map((i) => place(i.id, null))).then(() => onMove(undefined), toast.error)}>
+            <Users size={16} /> Retirer le lien
+          </button>
+        )}
+        <button className="menu-item" onClick={() => onMove(MY_ROOT)}>
+          <HardDrive size={16} /> Mes fichiers (racine)
+        </button>
+        {mine.map(({ n, label }) => (
+          <button key={n.id} className="menu-item" onClick={() => onMove(n.id)}>
+            <ArrowRight size={16} /> {label}
+          </button>
+        ))}
+      </div>
+    );
+  }
   const owners = new Set(items.map((i) => i.ownerId));
   const owner = owners.size === 1 ? [...owners][0] : null;
   const moving = new Set(items.map((i) => i.id));
@@ -430,6 +485,7 @@ function MoveTargets({ items, onMove }: { items: Node[]; onMove: (target: string
 function CardMenu(p: {
   node: Node;
   meId: string;
+  placed: boolean;
   close: () => void;
   onOpen: () => void;
   onShare: () => void;
@@ -444,6 +500,7 @@ function CardMenu(p: {
   };
   const board = p.node.kind === "board";
   const edit = p.node.role !== "viewer";
+  const share = isShared(p.node, p.meId);
   return (
     <>
       <button className="menu-item" onClick={act(p.onOpen)}>
@@ -470,9 +527,9 @@ function CardMenu(p: {
           <Copy size={16} /> Dupliquer
         </button>
       )}
-      {edit && (
+      {(edit || share) && (
         <button className="menu-item" onClick={(e) => p.onMove({ x: e.clientX, y: e.clientY })}>
-          <FolderInput size={16} /> Déplacer vers…
+          <FolderInput size={16} /> {share ? "Ajouter un lien dans…" : "Déplacer vers…"}
         </button>
       )}
       {board && p.node.key && (
@@ -480,11 +537,19 @@ function CardMenu(p: {
           <Download size={16} /> Exporter (.excalidraw, déchiffré)
         </button>
       )}
-      {edit && (
+      {(edit || p.placed) && (
         <>
           <div className="menu-sep" />
-          <button className="menu-item danger" onClick={act(p.onDelete)}>
-            <Trash2 size={16} /> Mettre à la corbeille
+          <button className={`menu-item ${p.placed ? "" : "danger"}`} onClick={act(p.onDelete)}>
+            {p.placed ? (
+              <>
+                <FolderInput size={16} /> Retirer le lien
+              </>
+            ) : (
+              <>
+                <Trash2 size={16} /> Mettre à la corbeille
+              </>
+            )}
           </button>
         </>
       )}

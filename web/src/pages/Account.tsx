@@ -18,7 +18,7 @@ export function Account() {
   const [name, setName] = useState(user.name);
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [busy, setBusy] = useState(false);
-  const [discoverable, setDiscoverable] = useState<boolean | null>(null);
+  const [vis, setVis] = useState<{ findableName: boolean; findableEmail: boolean } | null>(null);
 
   useEffect(() => {
     fingerprint(keys.pub).then(setFp);
@@ -26,18 +26,19 @@ export function Account() {
 
   useEffect(() => {
     api
-      .get<{ discoverable: boolean }>("/account")
-      .then((r) => setDiscoverable(r.discoverable))
+      .get<{ findableName: boolean; findableEmail: boolean }>("/account")
+      .then((r) => setVis({ findableName: r.findableName, findableEmail: r.findableEmail }))
       .catch(toast.error);
   }, []);
 
-  const toggleDiscoverable = async (value: boolean) => {
-    setDiscoverable(value);
+  const setVisibility = async (next: { findableName: boolean; findableEmail: boolean }) => {
+    const prev = vis;
+    setVis(next);
     try {
-      await api.put("/account/discoverable", { discoverable: value });
-      toast(value ? "Ton compte est trouvable par son email" : "Ton compte n'apparaît plus dans la recherche");
+      await api.put("/account/visibility", next);
+      toast("Visibilité enregistrée");
     } catch (err) {
-      setDiscoverable(!value);
+      setVis(prev);
       toast.error(err);
     }
   };
@@ -135,15 +136,34 @@ export function Account() {
         </div>
         <div style={{ padding: 20 }}>
           <label className="check">
-            <input type="checkbox" checked={!!discoverable} disabled={discoverable === null} onChange={(e) => toggleDiscoverable(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={!!vis?.findableName}
+              disabled={!vis}
+              onChange={(e) => vis && setVisibility({ ...vis, findableName: e.target.checked })}
+            />
             <span>
-              Trouvable par mon email au moment d'un partage
+              Trouvable par mon nom
+              <small>Quelqu'un qui cherche ton nom (début du nom compris) au moment d'un partage te voit dans les résultats, avec ton nom seulement.</small>
+            </span>
+          </label>
+          <label className="check" style={{ marginTop: 12 }}>
+            <input
+              type="checkbox"
+              checked={!!vis?.findableEmail}
+              disabled={!vis}
+              onChange={(e) => vis && setVisibility({ ...vis, findableEmail: e.target.checked })}
+            />
+            <span>
+              Trouvable par mon email
               <small>
-                Décoché, quelqu'un qui tape ton email pour te partager un tableau voit « Aucun compte avec cet email », comme si tu n'existais pas. Les
-                personnes avec qui tu partages déjà quelque chose te trouvent toujours.
+                Décoché, taper ton email donne « Aucun compte trouvé », comme si tu n'existais pas. Coché, ton email est aussi montré à qui te trouve.
               </small>
             </span>
           </label>
+          <p className="field-help" style={{ margin: "12px 0 0" }}>
+            Les personnes qui partagent déjà quelque chose avec toi te trouvent toujours, quels que soient ces réglages.
+          </p>
         </div>
       </div>
 

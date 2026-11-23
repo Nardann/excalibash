@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ChevronRight, Folder, FolderOpen, HardDrive, LogOut, Moon, Server, Shield, Sun, Trash2, UserCog, Users } from "lucide-react";
 import { useAuth, useUser } from "../auth.tsx";
-import { childrenOf, moveItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
+import { MY_ROOT, childrenOf, isShared, moveItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { Avatar, Logo, toast, useTheme } from "./ui.tsx";
 import { Onboarding } from "./Onboarding.tsx";
 
@@ -11,14 +11,27 @@ export const DRAG_TYPE = "application/x-excalibash-items";
 /** Moves dragged items into a folder (or the root), re-wrapping their keys. */
 export function useMoveItems() {
   const ctx = useLibraryCtx();
-  const { refresh } = useLibrary();
+  const { refresh, place } = useLibrary();
   return useCallback(
-    async (ids: string[], target: string | null) => {
+    async (ids: string[], to: string | null) => {
+      const target = to === MY_ROOT ? null : to;
       const t = target ? ctx.nodes.get(target) : null;
+      let linked = 0;
       let moved = 0;
       for (const id of ids) {
         const n = ctx.nodes.get(id);
-        if (!n || id === target || n.parentId === target) continue;
+        if (!n || id === target) continue;
+        if (isShared(n, ctx.user.id) && (!t || t.ownerId === ctx.user.id)) {
+          // Shared with me, dropped in my own files: a private link, nothing changes for its owner.
+          try {
+            await place(id, target ?? MY_ROOT);
+            linked++;
+          } catch (e) {
+            toast.error(e);
+          }
+          continue;
+        }
+        if (n.parentId === target) continue;
         if (t && t.ownerId !== n.ownerId) {
           toast.error("On ne peut déplacer qu'entre dossiers du même propriétaire");
           continue;
@@ -34,10 +47,12 @@ export function useMoveItems() {
           toast.error(e);
         }
       }
-      if (moved) toast(`${moved > 1 ? `${moved} éléments déplacés` : "Déplacé"} vers « ${t?.name ?? "Mes fichiers"} »`);
+      const where = `« ${t?.name ?? "Mes fichiers"} »`;
+      if (moved) toast(`${moved > 1 ? `${moved} éléments déplacés` : "Déplacé"} vers ${where}`);
+      if (linked) toast(`${linked > 1 ? `${linked} liens ajoutés` : "Lien ajouté"} dans ${where} (visible par toi seul)`);
       await refresh();
     },
-    [ctx, refresh],
+    [ctx, refresh, place],
   );
 }
 

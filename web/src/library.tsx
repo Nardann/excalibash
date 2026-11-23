@@ -21,7 +21,7 @@ import {
   type KeyPair,
   type SymKey,
 } from "./crypto.ts";
-import { checkContact, listMachines, pinContact } from "./vault.ts";
+import { checkContact, listMachines, loadPlacements, pinContact, setPlacement as savePlacement } from "./vault.ts";
 import { decryptEntry, decryptFile, encryptEntry, encryptPreview, reencryptFile } from "./board/boardCrypto.ts";
 
 export type Node = Omit<RawItem, "encName" | "keyWrap"> & {
@@ -80,21 +80,34 @@ type Library = {
   nodes: Map<string, Node>;
   loading: boolean;
   refresh: () => Promise<void>;
+  /** My private filing of shared items into my own folders (see vault.ts). */
+  placements: Record<string, string | null>;
+  place: (itemId: string, folderId: string | null) => Promise<void>;
 };
 
-const LibraryContext = createContext<Library>({ nodes: new Map(), loading: true, refresh: async () => {} });
+const LibraryContext = createContext<Library>({ nodes: new Map(), loading: true, refresh: async () => {}, placements: {}, place: async () => {} });
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const user = useUser();
   const keys = useKeys();
   const [nodes, setNodes] = useState<Map<string, Node>>(new Map());
+  const [placements, setPlacements] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     const r = await api.get<{ items: RawItem[]; grants: RawGrant[] }>("/tree");
     setNodes(await decryptTree(user, keys, r.items, r.grants));
+    setPlacements(await loadPlacements(user, keys).catch(() => ({})));
     setLoading(false);
   }, [user, keys]);
+
+  const place = useCallback(
+    async (itemId: string, folderId: string | null) => {
+      await savePlacement(user, keys, itemId, folderId);
+      setPlacements(await loadPlacements(user, keys));
+    },
+    [user, keys],
+  );
 
   useEffect(() => {
     refresh().catch((e) => {
@@ -103,7 +116,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     });
   }, [refresh]);
 
-  const value = useMemo(() => ({ nodes, loading, refresh }), [nodes, loading, refresh]);
+  const value = useMemo(() => ({ nodes, loading, refresh, placements, place }), [nodes, loading, refresh, placements, place]);
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
 }
 
@@ -114,6 +127,32 @@ export function childrenOf(nodes: Map<string, Node>, parentId: string | null, us
   return [...nodes.values()].filter((n) =>
     parentId === null ? n.root && n.ownerId === userId && n.role === "owner" && !n.deletedAt : n.parentId === parentId && !n.deletedAt,
   );
+}
+
+/** Something shared with me (a share or anything inside one): I can only link it into my own folders. */
+export const isShared = (n: Node, userId: string) => n.ownerId !== userId;
+
+/** Placement value for the top of "Mes fichiers". */
+export const MY_ROOT = "~";
+
+/**
+ * Links to shared items I filed in my own folders, by item id -> folder id (null: top of "Mes fichiers").
+ * A link whose folder is gone or trashed, or whose item is no longer reachable, is ignored.
+ */
+export function placedShares(nodes: Map<string, Node>, placements: Record<string, string | null>, userId: string): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const [id, folderId] of Object.entries(placements)) {
+    const n = nodes.get(id);
+    if (!n || !isShared(n, userId) || isInTrash(nodes, n)) continue;
+    if (folderId === MY_ROOT) {
+      out.set(id, null);
+      continue;
+    }
+    const f = folderId ? nodes.get(folderId) : undefined;
+    if (!f || f.kind !== "folder" || f.ownerId !== userId || isInTrash(nodes, f)) continue;
+    out.set(id, f.id);
+  }
+  return out;
 }
 
 export function isInTrash(nodes: Map<string, Node>, n: Node): boolean {

@@ -9,14 +9,19 @@ export const accountApi = Router();
 accountApi.use(requireUser);
 
 accountApi.get("/", (req, res) => {
-  const row = db.prepare("SELECT onboarded, discoverable FROM users WHERE id = ?").get(req.user!.id) as { onboarded: number; discoverable: number };
-  res.json({ onboarded: !!row.onboarded, discoverable: !!row.discoverable });
+  const row = db.prepare("SELECT onboarded, findable_name, findable_email FROM users WHERE id = ?").get(req.user!.id) as {
+    onboarded: number;
+    findable_name: number;
+    findable_email: number;
+  };
+  res.json({ onboarded: !!row.onboarded, findableName: !!row.findable_name, findableEmail: !!row.findable_email });
 });
 
-accountApi.put("/discoverable", (req, res) => {
-  if (typeof req.body?.discoverable !== "boolean") throw new HttpError(400, "Valeur invalide");
-  db.prepare("UPDATE users SET discoverable = ? WHERE id = ?").run(req.body.discoverable ? 1 : 0, req.user!.id);
-  res.json({ discoverable: req.body.discoverable });
+accountApi.put("/visibility", (req, res) => {
+  const { findableName, findableEmail } = req.body ?? {};
+  if (typeof findableName !== "boolean" || typeof findableEmail !== "boolean") throw new HttpError(400, "Valeur invalide");
+  db.prepare("UPDATE users SET findable_name = ?, findable_email = ? WHERE id = ?").run(findableName ? 1 : 0, findableEmail ? 1 : 0, req.user!.id);
+  res.json({ findableName, findableEmail });
 });
 
 accountApi.post("/onboarded", (req, res) => {

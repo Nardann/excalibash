@@ -10,6 +10,7 @@ import {
   getUserRow,
   hashSecret,
   pickColor,
+  type UserRow,
   rateLimit,
   requireUser,
   sha256,
@@ -323,13 +324,41 @@ function shareSomething(a: string, b: string): boolean {
   return !!db.prepare("SELECT 1 FROM grants g1 JOIN grants g2 ON g2.item_id = g1.item_id WHERE g1.user_id = ? AND g2.user_id = ? LIMIT 1").get(a, b);
 }
 
-/** Public key lookup for sharing. Exact email match only; a hidden account answers like a missing one. */
+/**
+ * Public key lookup for sharing. With an "@": exact email, found only if the owner allows it (or we already share
+ * something). Otherwise: name search (exact or prefix) among accounts findable by name. Misses all look alike, and an
+ * email is only returned to people allowed to know it.
+ */
 authApi.get("/lookup", (req, res) => {
-  limit(`lookup:${req.user!.id}`, 30);
-  const row = findUserByEmail(str(req.query.email));
-  const hidden = row && !row.discoverable && row.id !== req.user!.id && !shareSomething(req.user!.id, row.id);
-  if (!row || hidden) throw new HttpError(404, "Aucun compte avec cet email");
-  res.json({ user: { id: row.id, name: row.name, email: row.email, publicKey: row.public_key } });
+  const me = req.user!.id;
+  limit(`lookup:${me}`, 30);
+  const q = str(req.query.q ?? req.query.email, 100);
+  const out = (r: UserRow) => ({
+    id: r.id,
+    name: r.name,
+    publicKey: r.public_key,
+    color: r.color,
+    ...(r.id === me || r.findable_email || shareSomething(me, r.id) ? { email: r.email } : {}),
+  });
+  if (q.includes("@")) {
+    const row = findUserByEmail(q);
+    if (!row || (row.id !== me && !row.findable_email && !shareSomething(me, row.id))) throw new HttpError(404, "Aucun compte trouvé");
+    res.json({ users: [out(row)] });
+    return;
+  }
+  if (q.length < 2) {
+    res.json({ users: [] });
+    return;
+  }
+  const like = q.toLowerCase().replace(/[\\%_]/g, "\\$&") + "%";
+  const rows = db
+    .prepare(
+      `SELECT * FROM users u WHERE u.id != ? AND u.suspended = 0 AND u.email_verified = 1 AND lower(u.name) LIKE ? ESCAPE '\\'
+         AND (u.findable_name = 1 OR EXISTS (SELECT 1 FROM grants g1 JOIN grants g2 ON g2.item_id = g1.item_id WHERE g1.user_id = ? AND g2.user_id = u.id))
+       ORDER BY (lower(u.name) = ?) DESC, lower(u.name) LIMIT 8`,
+    )
+    .all(me, like, me, q.toLowerCase()) as UserRow[];
+  res.json({ users: rows.map(out) });
 });
 
 export function newInviteToken(): string {

@@ -234,27 +234,63 @@ const bob = await register("bob@test.local", "Bob", "bob-password-12");
   ok(after.status === 200, "connexion possible après vérification");
 }
 await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: false }));
-// A hidden account answers like a missing one, except to the people it already shares with.
-await as(bob, () => api("PUT", "/account/discoverable", { discoverable: false }));
+// Findable by name (default) and by email (off by default); a hidden account answers like a missing one.
 {
-  const hidden = await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"));
-  const missing = await as(alice, () => api("GET", "/auth/lookup?email=personne@test.local"));
-  ok(hidden.status === 404 && JSON.stringify(hidden.body) === JSON.stringify(missing.body), "compte masqué : même réponse qu'un compte inexistant");
-  ok((await as(bob, () => api("GET", "/account"))).body.discoverable === false, "le réglage de visibilité est enregistré");
+  const look = (q: string) => as(alice, () => api("GET", `/auth/lookup?q=${encodeURIComponent(q)}`));
+  const settings = (await as(bob, () => api("GET", "/account"))).body;
+  ok(settings.findableName === true && settings.findableEmail === false, "visibilité par défaut : trouvable par nom, pas par email");
+  const byName = await look("bob");
+  ok(byName.status === 200 && byName.body.users.length === 1 && byName.body.users[0].id === bob.user.id, "recherche par nom (insensible à la casse) : Bob trouvé");
+  ok(!("email" in byName.body.users[0]), "la recherche par nom ne renvoie pas l'email");
+  ok((await look("Bo")).body.users.some((u: any) => u.id === bob.user.id), "recherche par préfixe du nom");
+  ok((await look("b")).body.users.length === 0, "recherche par nom : 2 caractères minimum");
+  ok((await look("alice")).body.users.length === 0, "la recherche par nom exclut soi-même");
+  const hidden = await look("bob@test.local");
+  const missing = await look("personne@test.local");
+  ok(hidden.status === 404 && JSON.stringify(hidden.body) === JSON.stringify(missing.body), "email non trouvable : même réponse qu'un compte inexistant");
+  await as(bob, () => api("PUT", "/account/visibility", { findableName: false, findableEmail: false }));
+  ok((await look("bob")).body.users.length === 0, "compte non trouvable par nom : absent des résultats");
+  ok((await as(bob, () => api("GET", "/account"))).body.findableName === false, "le réglage de visibilité est enregistré");
+  await as(bob, () => api("PUT", "/account/visibility", { findableName: true, findableEmail: true }));
+  const byMail = await look("bob@test.local");
+  ok(byMail.status === 200 && byMail.body.users[0]?.email === "bob@test.local", "email trouvable une fois activé, et renvoyé");
+  ok((await as(bob, () => api("PUT", "/account/visibility", { findableName: true }))).status === 400, "réglages de visibilité invalides refusés");
 }
-await as(bob, () => api("PUT", "/account/discoverable", { discoverable: true }));
-const bobPub = (await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.user;
+const bobPub = (await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.users[0];
 nA = await tree(alice);
 await as(alice, () => lib.shareItem(ctxOf(alice, nA), F, bobPub, "editor"));
-await as(bob, () => api("PUT", "/account/discoverable", { discoverable: false }));
-ok((await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.user?.id === bob.user.id, "compte masqué : toujours trouvable par qui partage déjà avec lui");
-await as(bob, () => api("PUT", "/account/discoverable", { discoverable: true }));
+await as(bob, () => api("PUT", "/account/visibility", { findableName: false, findableEmail: false }));
+ok((await as(alice, () => api("GET", "/auth/lookup?q=bob@test.local"))).body.users?.[0]?.id === bob.user.id, "compte masqué : toujours trouvable (email compris) par qui partage déjà avec lui");
+ok((await as(alice, () => api("GET", "/auth/lookup?q=bob"))).body.users?.[0]?.email === "bob@test.local", "idem par nom, avec son email");
+await as(bob, () => api("PUT", "/account/visibility", { findableName: true, findableEmail: false }));
 let nB = await tree(bob);
 ok(nB.get(F)?.name === "Projet secret" && nB.get(F)?.root, "Bob voit le dossier partagé à la racine de ses partages");
 ok(nB.get(S)?.name === "Sous-dossier infra", "le sous-dossier est partagé par héritage");
 ok(nB.get(B)?.name === "Tableau confidentiel" && nB.get(B)?.role === "editor", "le tableau du sous-dossier est accessible en éditeur");
 const bobContent = await as(bob, () => lib.fetchBoardContent(nB.get(B)!.key!, B));
 ok(bobContent.elements[0]?.label === "TOP_SECRET_DIAGRAM", "Bob déchiffre le contenu du tableau");
+
+// Giving a root item away.
+{
+  const G = await as(alice, () => lib.createItem(ctxOf(alice, nA), "folder", null, "Cadeau"));
+  nA = await tree(alice);
+  await as(alice, () => lib.shareItem(ctxOf(alice, nA), G, bobPub, "viewer"));
+  const give = (u: U, id: string, userId: string) => as(u, () => api("POST", `/items/${id}/transfer`, { userId }));
+  ok((await give(bob, G, bob.user.id)).status === 403, "transfert : refusé à qui n'est pas propriétaire");
+  ok((await give(alice, G, "personne")).status === 400, "transfert : refusé vers quelqu'un sans accès");
+  ok((await give(alice, G, alice.user.id)).status === 400, "transfert : refusé vers soi-même");
+  ok((await give(alice, S, bob.user.id)).status === 400, "transfert : refusé pour un élément qui n'est pas à la racine");
+  const done = await give(alice, G, bob.user.id);
+  ok(done.status === 200, "transfert : propriété donnée à Bob");
+  nA = await tree(alice);
+  nB = await tree(bob);
+  ok(nB.get(G)?.role === "owner" && nB.get(G)?.ownerId === bob.user.id, "après le transfert, Bob est propriétaire");
+  ok(nA.get(G)?.role === "editor" && nA.get(G)?.ownerId === bob.user.id, "après le transfert, Alice est éditrice");
+  ok((await give(alice, G, bob.user.id)).status === 403, "transfert : l'ancien propriétaire ne peut plus rien donner");
+  const alicePub = { id: alice.user.id, email: "alice@test.local", publicKey: alice.user.publicKey };
+  await as(bob, () => lib.shareItem(ctxOf(bob, nB), G, alicePub, "viewer"));
+  ok((await tree(alice)).get(G)?.role === "viewer", "le nouveau propriétaire peut partager");
+}
 
 // Live collab + encrypted terminal.
 const sa = boardSocket(alice, B);

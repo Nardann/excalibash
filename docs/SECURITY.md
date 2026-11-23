@@ -91,6 +91,21 @@ Chaque dossier et chaque tableau a sa propre clé `K` et un `id` généré par l
   - Une clé qui ne correspond plus à l'épingle est refusée, sauf vérification explicite de l'empreinte.
   - Lors d'une rotation, les nouvelles clés ne vont **qu'aux membres épinglés** : un membre ou une
     clé glissés par le serveur font échouer la rotation au lieu de recevoir les clés.
+  - Une personne trouvée **par son nom** n'a pas d'email affiché : l'épingle se fait alors par id de
+    compte seul (l'email n'est ajouté que quand on le connaît).
+- **Recherche de personnes** : par défaut un compte est trouvable par son nom (exact ou début du nom,
+  2 caractères minimum, 8 résultats, limitée en débit) et pas par son email ; chacun peut changer
+  l'un et l'autre dans « Mon compte ». La recherche renvoie nom, couleur et clé publique, jamais
+  l'email d'une personne qui ne s'est pas rendue trouvable par email (sauf à ceux qui partagent déjà
+  avec elle). Les noms sont donc énumérables par un compte connecté ; le serveur les connaissait déjà.
+  Un email non trouvable répond comme un compte inexistant.
+- **Donner un élément** (`POST /items/:id/transfer`) : le propriétaire d'un élément à sa racine peut
+  le donner à quelqu'un qui y a déjà un accès direct. `owner_id` change pour tout le sous-arbre, le
+  destinataire devient `owner` (sa grant, scellée pour lui, reste valable) et l'ancien propriétaire
+  `editor`. Aucune clé ne change : l'ancien propriétaire garde donc ce qu'il a déjà pu lire, comme
+  un membre dont l'accès serait retiré sans rotation ; le nouveau propriétaire peut faire pivoter
+  les clés (en retirant l'ancien) s'il le veut. Les terminaux et tunnels restent liés aux machines
+  de leurs propriétaires.
 
 ## Contenu d'un tableau (clé `K_b`)
 
