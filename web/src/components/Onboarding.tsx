@@ -18,7 +18,7 @@ const STEPS = [
   },
   {
     title: "Travaille à deux",
-    text: "Le bouton Partager d'un tableau ou d'un dossier invite ton binôme ou ton prof. Un dossier partagé donne accès à tout son contenu.",
+    text: "Le bouton Partager d'un tableau ou d'un dossier invite ton binôme ou ton prof. Un dossier partagé donne accès à tout son contenu. Par défaut, on te trouve par ton nom : tu peux retirer ça, ou être aussi trouvable par email, dans Mon compte.",
     action: null,
   },
 ];

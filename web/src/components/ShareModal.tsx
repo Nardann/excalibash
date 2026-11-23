@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Copy, Fingerprint, Loader2, ShieldCheck, UserMinus, UserPlus } from "lucide-react";
+import { AlertTriangle, Copy, Fingerprint, Gift, Loader2, ShieldCheck, UserMinus, UserPlus } from "lucide-react";
 import { api, type Role } from "../api.ts";
 import { fingerprint, fromB64 } from "../crypto.ts";
 import { checkContact, revokeAccess, shareItem, useLibrary, useLibraryCtx, type Member, type Node } from "../library.tsx";
@@ -7,14 +7,16 @@ import { Avatar, Modal, confirmDialog, copyText, toast } from "./ui.tsx";
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Propriétaire", editor: "Peut modifier", viewer: "Lecture seule" };
 
-type Candidate = { id: string; name: string; email: string; publicKey: string; fingerprint: string; check: "new" | "match" | "changed" };
+type Found = { id: string; name: string; email?: string; publicKey: string; color: string };
+type Candidate = { id: string; name: string; email?: string; publicKey: string; fingerprint: string; check: "new" | "match" | "changed" };
 
 export function ShareModal({ node, onClose }: { node: Node; onClose: () => void }) {
   const ctx = useLibraryCtx();
   const { refresh } = useLibrary();
   const owner = node.ownerId === ctx.user.id;
   const [members, setMembers] = useState<(Member & { fingerprint: string })[] | null>(null);
-  const [email, setEmail] = useState("");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Found[] | null>(null);
   const [role, setRole] = useState<Role>("editor");
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [override, setOverride] = useState(false);
@@ -32,15 +34,25 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
   const lookup = async (e: React.FormEvent) => {
     e.preventDefault();
     setCandidate(null);
+    setResults(null);
     setOverride(false);
     try {
-      const { user } = await api.get<{ user: Omit<Candidate, "fingerprint" | "check"> }>(`/auth/lookup?email=${encodeURIComponent(email.trim())}`);
-      if (user.id === ctx.user.id) throw new Error("C'est toi !");
+      const { users } = await api.get<{ users: Found[] }>(`/auth/lookup?q=${encodeURIComponent(query.trim())}`);
+      setResults(users.filter((u) => u.id !== ctx.user.id));
+      if (users.length && users.every((u) => u.id === ctx.user.id)) throw new Error("C'est toi !");
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const pick = async (user: Found) => {
+    try {
       setCandidate({
         ...user,
         fingerprint: await fingerprint(fromB64(user.publicKey)),
         check: await checkContact(ctx.user, ctx.keys, user.id, user.email, user.publicKey),
       });
+      setResults(null);
     } catch (err) {
       toast.error(err);
     }
@@ -50,10 +62,10 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
     if (!candidate) return;
     setBusy("share");
     try {
-      await shareItem(ctx, node.id, candidate, role, candidate.check === "changed" && override);
+      await shareItem(ctx, node.id, { ...candidate, email: candidate.email ?? "" }, role, candidate.check === "changed" && override);
       toast(`Partagé avec ${candidate.name}`);
       setCandidate(null);
-      setEmail("");
+      setQuery("");
       await Promise.all([load(), refresh()]);
     } catch (e) {
       toast.error(e);
@@ -67,6 +79,27 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
     try {
       await shareItem(ctx, node.id, { id: m.userId, email: m.email, publicKey: m.publicKey }, next);
       await load();
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const give = async (m: Member) => {
+    const ok = await confirmDialog({
+      title: `Donner “${node.name}” à ${m.name} ?`,
+      text: "Tu deviendras éditeur et ne pourras plus le partager ni le supprimer.",
+      confirm: "Donner",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(m.userId);
+    try {
+      await api.post(`/items/${node.id}/transfer`, { userId: m.userId });
+      toast(`« ${node.name} » appartient maintenant à ${m.name}`);
+      await refresh();
+      onClose();
     } catch (e) {
       toast.error(e);
     } finally {
@@ -107,7 +140,18 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
 
       {owner && (
         <form onSubmit={lookup} style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <input className="input" type="email" required placeholder="email@exemple.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input
+            className="input"
+            required
+            minLength={2}
+            placeholder="Nom ou email"
+            aria-label="Nom ou email"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setResults(null);
+            }}
+          />
           <select className="select" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             <option value="editor">Peut modifier</option>
             <option value="viewer">Lecture seule</option>
@@ -116,13 +160,33 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
         </form>
       )}
 
+      {owner && results && !candidate && (
+        <div className="panel" style={{ marginBottom: 12 }}>
+          {results.length === 0 ? (
+            <div className="row sub">
+              Aucun compte trouvé. La personne n'est peut-être pas trouvable par son nom : demande-lui son email (ou qu'elle active « Trouvable par mon email »).
+            </div>
+          ) : (
+            results.map((u) => (
+              <button type="button" className="row" key={u.id} style={{ width: "100%", textAlign: "left" }} onClick={() => pick(u)}>
+                <Avatar name={u.name} color={u.color} />
+                <div className="grow">
+                  <div className="title">{u.name}</div>
+                  {u.email && <div className="sub">{u.email}</div>}
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+
       {candidate && (
         <div className={`verify ${candidate.check === "changed" ? "danger" : ""}`}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Avatar name={candidate.name} color="var(--brand)" />
             <div style={{ flex: 1 }}>
               <b>{candidate.name}</b>
-              <div className="sub">{candidate.email}</div>
+              {candidate.email && <div className="sub">{candidate.email}</div>}
             </div>
           </div>
           <div className="fp">
@@ -184,6 +248,11 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
                     <option value="editor">Peut modifier</option>
                     <option value="viewer">Lecture seule</option>
                   </select>
+                  {!node.parentId && (
+                    <button className="btn btn-sm" title="Donner la propriété" disabled={!!busy} onClick={() => give(m)}>
+                      <Gift size={16} /> Donner
+                    </button>
+                  )}
                   <button className="btn btn-sm btn-icon" title="Retirer l'accès" style={{ color: "var(--danger)" }} disabled={!!busy} onClick={() => revoke(m)}>
                     <UserMinus size={16} />
                   </button>

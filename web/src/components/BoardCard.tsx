@@ -51,9 +51,11 @@ type Props = {
   onRename: (name: string) => void;
   onDropItems?: (ids: string[]) => void;
   meId: string;
+  /** A share filed in one of my own folders. */
+  placed?: boolean;
 };
 
-export function ItemCard({ node, childCount, selected, selecting, draggableIds, onOpen, onToggleSelect, onContextMenu, onRename, onDropItems, meId }: Props) {
+export function ItemCard({ node, childCount, selected, selecting, draggableIds, onOpen, onToggleSelect, onContextMenu, onRename, onDropItems, meId, placed }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(node.name);
   const [dropping, setDropping] = useState(false);
@@ -76,7 +78,7 @@ export function ItemCard({ node, childCount, selected, selecting, draggableIds, 
     <div
       ref={ref}
       className={`card ${folder ? "folder-card" : ""} ${selected ? "selected" : ""} ${trashed ? "trashed" : ""} ${dropping ? "drop-target" : ""}`}
-      draggable={!trashed && !editing && canEdit}
+      draggable={!trashed && !editing && (canEdit || node.ownerId !== meId)}
       onDragStart={(e) => {
         e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(draggableIds()));
         e.dataTransfer.effectAllowed = "move";
@@ -121,6 +123,11 @@ export function ItemCard({ node, childCount, selected, selecting, draggableIds, 
           {node.shares > 0 && node.ownerId === meId && (
             <span className="badge" title="Partagé">
               <Users size={12} /> {node.shares}
+            </span>
+          )}
+          {placed && (
+            <span className="badge" title="Lien vers un élément partagé avec toi (visible par toi seul)">
+              <Users size={12} /> Lien
             </span>
           )}
           {node.role === "viewer" && (

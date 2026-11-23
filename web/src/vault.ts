@@ -4,7 +4,7 @@ import { api, type RawMachine, type User } from "./api.ts";
 import { AAD, box, boxText, fingerprint, fromB64, generateKeyPair, machineAuthKey, randomBytes, randomId, seal, symKey, toB64, unbox, unboxJson, unboxText, boxJson, vaultKey, type KeyPair, type SymKey } from "./crypto.ts";
 
 /** Pinned public keys of the people we shared with, by account id and by email. */
-type VaultData = { contacts: Record<string, string>; emails?: Record<string, string> };
+type VaultData = { contacts: Record<string, string>; emails?: Record<string, string>; placements?: Record<string, string | null> };
 
 let cache: { userId: string; data: VaultData } | null = null;
 
@@ -28,19 +28,20 @@ export type KeyCheck = "new" | "match" | "changed";
  * Compares a contact's public key with the one pinned the first time we shared with them.
  * Pinning by email too catches an account deleted and re-created under the same address.
  */
-export async function checkContact(user: User, keys: KeyPair, contactId: string, email: string, publicKey: string): Promise<KeyCheck> {
+export async function checkContact(user: User, keys: KeyPair, contactId: string, email: string | undefined, publicKey: string): Promise<KeyCheck> {
   const data = await load(user, keys);
   const byId = data.contacts[contactId];
-  const byEmail = data.emails?.[email.toLowerCase()];
+  // The email is optional (a person found by name may not show it): then only the account id is checked.
+  const byEmail = email ? data.emails?.[email.toLowerCase()] : undefined;
   if ((byId && byId !== publicKey) || (byEmail && byEmail !== publicKey)) return "changed";
   return byId || byEmail ? "match" : "new";
 }
 
-export async function pinContact(user: User, keys: KeyPair, contactId: string, email: string, publicKey: string) {
+export async function pinContact(user: User, keys: KeyPair, contactId: string, email: string | undefined, publicKey: string) {
   const data = await load(user, keys);
-  const e = email.toLowerCase();
-  if (data.contacts[contactId] === publicKey && data.emails?.[e] === publicKey) return;
-  await save(user, keys, { contacts: { ...data.contacts, [contactId]: publicKey }, emails: { ...data.emails, [e]: publicKey } });
+  const e = email?.toLowerCase();
+  if (data.contacts[contactId] === publicKey && (!e || data.emails?.[e] === publicKey)) return;
+  await save(user, keys, { ...data, contacts: { ...data.contacts, [contactId]: publicKey }, emails: e ? { ...data.emails, [e]: publicKey } : data.emails });
 }
 
 // ---- Machines ----------------------------------------------------------------------
@@ -103,4 +104,19 @@ export async function approvePairing(keys: KeyPair, code: string, agentPubB64: s
     sealedAuth: await seal(pub, auth, `eb:pair:${code.toUpperCase().replace(/[^A-Z0-9]/g, "")}`),
   });
   return id;
+}
+
+// ---- Personal placement of shared items -----------------------------------------------
+
+/** Shared item id -> id of one of my own folders where I filed it (private to me). */
+export async function loadPlacements(user: User, keys: KeyPair): Promise<Record<string, string | null>> {
+  return (await load(user, keys)).placements ?? {};
+}
+
+export async function setPlacement(user: User, keys: KeyPair, itemId: string, folderId: string | null) {
+  const data = await load(user, keys);
+  const placements = { ...data.placements };
+  if (folderId) placements[itemId] = folderId;
+  else delete placements[itemId];
+  await save(user, keys, { ...data, placements });
 }

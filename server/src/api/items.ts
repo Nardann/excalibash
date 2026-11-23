@@ -261,6 +261,27 @@ itemsApi.put("/items/:id/grants/:userId", (req, res) => {
   res.json({ ok: true });
 });
 
+/** Gives an item at the root of the owner's tree to someone who already has direct access to it. */
+itemsApi.post("/items/:id/transfer", (req, res) => {
+  const uid = req.user!.id;
+  const { item } = need(req, "owner");
+  if (item.owner_id !== uid) throw new HttpError(403, "Réservé au propriétaire");
+  if (item.parent_id) throw new HttpError(400, "Seul un élément à la racine peut être donné");
+  if (item.deleted_at) throw new HttpError(400, "Sors-le d'abord de la corbeille");
+  const to = String(req.body?.userId ?? "");
+  if (to === uid) throw new HttpError(400, "Tu en es déjà propriétaire");
+  const grant = db.prepare("SELECT role FROM grants WHERE item_id = ? AND user_id = ?").get(item.id, to) as { role: Role } | undefined;
+  if (!grant || grant.role === "owner") throw new HttpError(400, "Cette personne doit déjà avoir accès à cet élément");
+  const all = subtree(item.id);
+  tx(() => {
+    db.prepare(`UPDATE items SET owner_id = ? WHERE id IN (${all.map(() => "?").join(",")})`).run(to, ...all.map((i) => i.id));
+    db.prepare("UPDATE grants SET role = 'owner' WHERE item_id = ? AND user_id = ?").run(item.id, to);
+    db.prepare("UPDATE grants SET role = 'editor' WHERE item_id = ? AND user_id = ?").run(item.id, uid);
+  });
+  evictBoards(all, 4410, "droits modifiés");
+  res.json({ ok: true });
+});
+
 /** Everything the owner's browser needs to rotate the keys of a subtree. */
 itemsApi.get("/items/:id/rotation", (req, res) => {
   const uid = req.user!.id;
