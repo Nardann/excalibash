@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Copy, Fingerprint, Gift, Loader2, ShieldCheck, UserMinus, UserPlus } from "lucide-react";
 import { api, type Role } from "../api.ts";
 import { fingerprint, fromB64 } from "../crypto.ts";
-import { checkContact, revokeAccess, shareItem, useLibrary, useLibraryCtx, type Member, type Node } from "../library.tsx";
+import { checkContact, pathOf, revokeAccess, shareItem, useLibrary, useLibraryCtx, type Member, type Node } from "../library.tsx";
 import { Avatar, Modal, confirmDialog, copyText, toast } from "./ui.tsx";
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Propriétaire", editor: "Peut modifier", viewer: "Lecture seule" };
@@ -10,10 +10,13 @@ const ROLE_LABEL: Record<Role, string> = { owner: "Propriétaire", editor: "Peut
 type Found = { id: string; name: string; email?: string; publicKey: string; color: string };
 type Candidate = { id: string; name: string; email?: string; publicKey: string; fingerprint: string; check: "new" | "match" | "changed" };
 
-export function ShareModal({ node, onClose }: { node: Node; onClose: () => void }) {
+/** Sharing, and giving (transfer of ownership) when `giving` is set or from a member's row. */
+export function ShareModal({ node, onClose, giving = false }: { node: Node; onClose: () => void; giving?: boolean }) {
   const ctx = useLibraryCtx();
   const { refresh } = useLibrary();
   const owner = node.ownerId === ctx.user.id;
+  // Only an item at the top of the owner's files can change hands (its key is sealed to each member).
+  const canGive = owner && !node.parentId && !node.deletedAt;
   const [members, setMembers] = useState<(Member & { fingerprint: string })[] | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Found[] | null>(null);
@@ -22,10 +25,20 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
   const [override, setOverride] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
+  /** People with access through a parent folder (managed from that folder), nearest folder first. */
+  const [inherited, setInherited] = useState<(Member & { via: string })[]>([]);
+
   const load = useCallback(async () => {
     const r = await api.get<{ grants: Member[] }>(`/items/${node.id}/grants`);
     setMembers(await Promise.all(r.grants.map(async (g) => ({ ...g, fingerprint: await fingerprint(fromB64(g.publicKey)) }))));
-  }, [node.id]);
+    const seen = new Set(r.grants.map((g) => g.userId));
+    const out: (Member & { via: string })[] = [];
+    for (const parent of pathOf(ctx.nodes, node.id).slice(0, -1).reverse()) {
+      const p = await api.get<{ grants: Member[] }>(`/items/${parent.id}/grants`).catch(() => null);
+      for (const g of p?.grants ?? []) if (!seen.has(g.userId)) seen.add(g.userId), out.push({ ...g, via: parent.name });
+    }
+    setInherited(out);
+  }, [node.id, ctx.nodes]);
 
   useEffect(() => {
     load().catch(toast.error);
@@ -86,7 +99,7 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
     }
   };
 
-  const give = async (m: Member) => {
+  const give = async (m: { userId: string; name: string }, shareFirst?: Candidate) => {
     const ok = await confirmDialog({
       title: `Donner “${node.name}” à ${m.name} ?`,
       text: "Tu deviendras éditeur et ne pourras plus le partager ni le supprimer.",
@@ -96,6 +109,10 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
     if (!ok) return;
     setBusy(m.userId);
     try {
+      // Someone without access yet first gets it (their key is checked like for any share).
+      if (shareFirst && !members?.some((x) => x.userId === shareFirst.id)) {
+        await shareItem(ctx, node.id, { ...shareFirst, email: shareFirst.email ?? "" }, "editor", shareFirst.check === "changed" && override);
+      }
       await api.post(`/items/${node.id}/transfer`, { userId: m.userId });
       toast(`« ${node.name} » appartient maintenant à ${m.name}`);
       await refresh();
@@ -131,12 +148,21 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
 
   return (
     <Modal onClose={onClose} width={600}>
-      <h2 className="display">Partager « {node.name} »</h2>
-      <p>
-        {node.kind === "folder" ? "Tout ce que contient ce dossier, sous-dossiers compris, est partagé avec les mêmes droits. " : ""}
-        La clé est chiffrée pour la clé publique de chaque membre : le serveur ne peut pas la lire. Les éditeurs peuvent aussi
-        <b> taper dans les terminaux</b>.
-      </p>
+      <h2 className="display">
+        {giving ? "Donner" : "Partager"} « {node.name} »
+      </h2>
+      {giving ? (
+        <p>
+          Cherche la personne qui en deviendra propriétaire{node.kind === "folder" ? ", avec tout son contenu" : ""}. Tu resteras éditeur. Une personne qui y a
+          déjà accès peut aussi recevoir l'élément avec le bouton « Donner » de sa ligne.
+        </p>
+      ) : (
+        <p>
+          {node.kind === "folder" ? "Tout ce que contient ce dossier, sous-dossiers compris, est partagé avec les mêmes droits. " : ""}
+          La clé est chiffrée pour la clé publique de chaque membre : le serveur ne peut pas la lire. Les éditeurs peuvent aussi
+          <b> taper dans les terminaux</b>.
+        </p>
+      )}
 
       {owner && (
         <form onSubmit={lookup} style={{ display: "flex", gap: 8, marginBottom: 12 }}>
@@ -152,10 +178,12 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
               setResults(null);
             }}
           />
-          <select className="select" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            <option value="editor">Peut modifier</option>
-            <option value="viewer">Lecture seule</option>
-          </select>
+          {!giving && (
+            <select className="select" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+              <option value="editor">Peut modifier</option>
+              <option value="viewer">Lecture seule</option>
+            </select>
+          )}
           <button className="btn">Chercher</button>
         </form>
       )}
@@ -215,56 +243,95 @@ export function ShareModal({ node, onClose }: { node: Node; onClose: () => void 
             <button className="btn" onClick={() => setCandidate(null)}>
               Annuler
             </button>
-            <button className="btn btn-primary" disabled={busy === "share" || (candidate.check === "changed" && !override)} onClick={share}>
-              {busy === "share" ? <Loader2 size={16} className="spin" /> : <UserPlus size={16} />} Partager ({ROLE_LABEL[role].toLowerCase()})
-            </button>
+            {canGive && (
+              <button
+                className={`btn ${giving ? "btn-primary" : ""}`}
+                disabled={!!busy || (candidate.check === "changed" && !override)}
+                onClick={() => give({ userId: candidate.id, name: candidate.name }, candidate)}
+              >
+                <Gift size={16} /> Donner
+              </button>
+            )}
+            {!giving && (
+              <button className="btn btn-primary" disabled={busy === "share" || (candidate.check === "changed" && !override)} onClick={share}>
+                {busy === "share" ? <Loader2 size={16} className="spin" /> : <UserPlus size={16} />} Partager ({ROLE_LABEL[role].toLowerCase()})
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      <div className="panel" style={{ marginTop: 8 }}>
-        {members === null ? (
-          <div className="row">Chargement…</div>
-        ) : (
-          members.map((m) => (
-            <div className="row" key={m.userId}>
-              <Avatar name={m.name} color={m.color} />
-              <div className="grow">
-                <div className="title">
-                  {m.name} {m.userId === ctx.user.id && <span className="badge">toi</span>}
-                </div>
-                <div className="sub mono" title="Empreinte de sa clé publique">
-                  {m.email} · {m.fingerprint.slice(0, 19)}…
-                </div>
-                {busy?.startsWith(`${m.userId}:`) && (
-                  <div className="sub" style={{ color: "var(--brand)" }}>
-                    <Loader2 size={11} className="spin" /> {progress}
+      {members?.length !== 0 && (
+        <div className="panel" style={{ marginTop: 8 }}>
+          {members === null ? (
+            <div className="row">Chargement…</div>
+          ) : (
+            members.map((m) => (
+              <div className="row" key={m.userId}>
+                <Avatar name={m.name} color={m.color} />
+                <div className="grow">
+                  <div className="title">
+                    {m.name} {m.userId === ctx.user.id && <span className="badge">toi</span>}
                   </div>
+                  <div className="sub mono" title="Empreinte de sa clé publique">
+                    {m.email} · {m.fingerprint.slice(0, 19)}…
+                  </div>
+                  {busy?.startsWith(`${m.userId}:`) && (
+                    <div className="sub" style={{ color: "var(--brand)" }}>
+                      <Loader2 size={11} className="spin" /> {progress}
+                    </div>
+                  )}
+                </div>
+                {owner && m.role !== "owner" ? (
+                  <>
+                    <select className="select" style={{ height: 32 }} value={m.role} disabled={!!busy} onChange={(e) => changeRole(m, e.target.value as Role)}>
+                      <option value="editor">Peut modifier</option>
+                      <option value="viewer">Lecture seule</option>
+                    </select>
+                    {canGive && (
+                      <button className="btn btn-sm" title="Donner la propriété" disabled={!!busy} onClick={() => give(m)}>
+                        <Gift size={16} /> Donner
+                      </button>
+                    )}
+                    <button className="btn btn-sm btn-icon" title="Retirer l'accès" style={{ color: "var(--danger)" }} disabled={!!busy} onClick={() => revoke(m)}>
+                      <UserMinus size={16} />
+                    </button>
+                  </>
+                ) : (
+                  <span className="badge">{ROLE_LABEL[m.role]}</span>
                 )}
               </div>
-              {owner && m.role !== "owner" ? (
-                <>
-                  <select className="select" style={{ height: 32 }} value={m.role} disabled={!!busy} onChange={(e) => changeRole(m, e.target.value as Role)}>
-                    <option value="editor">Peut modifier</option>
-                    <option value="viewer">Lecture seule</option>
-                  </select>
-                  {!node.parentId && (
-                    <button className="btn btn-sm" title="Donner la propriété" disabled={!!busy} onClick={() => give(m)}>
-                      <Gift size={16} /> Donner
-                    </button>
-                  )}
-                  <button className="btn btn-sm btn-icon" title="Retirer l'accès" style={{ color: "var(--danger)" }} disabled={!!busy} onClick={() => revoke(m)}>
-                    <UserMinus size={16} />
-                  </button>
-                </>
-              ) : (
+            ))
+          )}
+        </div>
+      )}
+      {inherited.length > 0 && (
+        <>
+          <p className="field-help" style={{ margin: "12px 0 6px" }}>
+            Ont aussi accès par un dossier parent (à gérer depuis ce dossier) :
+          </p>
+          <div className="panel">
+            {inherited.map((m) => (
+              <div className="row" key={m.userId}>
+                <Avatar name={m.name} color={m.color} />
+                <div className="grow">
+                  <div className="title">
+                    {m.name} {m.userId === ctx.user.id && <span className="badge">toi</span>}
+                  </div>
+                  <div className="sub">via « {m.via} »</div>
+                </div>
                 <span className="badge">{ROLE_LABEL[m.role]}</span>
-              )}
-            </div>
-          ))
-        )}
-      </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       {!node.direct && node.role !== "owner" && <p style={{ marginTop: 12 }}>Tu as accès via un dossier parent partagé.</p>}
+      {owner && !canGive && (
+        <p className="field-help" style={{ marginTop: 12 }}>
+          Pour donner cet élément à quelqu'un, sors-le d'abord à la racine de « Mes fichiers » (seul un élément à la racine peut changer de propriétaire).
+        </p>
+      )}
 
       <div className="modal-actions">
         <button className="btn" onClick={() => copyText(`${location.origin}/${node.kind === "board" ? "board" : "folder"}/${node.id}`)}>

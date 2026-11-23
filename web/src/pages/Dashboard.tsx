@@ -8,6 +8,7 @@ import {
   Download,
   ExternalLink,
   FolderInput,
+  Gift,
   FolderPlus,
   HardDrive,
   Loader2,
@@ -59,6 +60,7 @@ export function Dashboard({ view }: { view: View }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ anchor: MenuAnchor; node?: Node; kind: "card" | "move" } | null>(null);
   const [sharing, setSharing] = useState<Node | null>(null);
+  const [giving, setGiving] = useState(false);
   const [dragging, setDragging] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -308,11 +310,16 @@ export function Dashboard({ view }: { view: View }) {
               )
             : canCreate && (
                 <>
-                  {folder && folder.ownerId === user.id && (
-                    <button className="btn" onClick={() => setSharing(folder)}>
-                      <Share2 size={16} /> Partager
-                    </button>
-                  )}
+                  {/* The selected item if there is exactly one, else the folder being viewed. */}
+                  {(() => {
+                    const target = selected.size === 1 ? nodes.get(ids[0]) : selected.size ? undefined : folder;
+                    if (!target || target.ownerId !== user.id) return null;
+                    return (
+                      <button className="btn" title={`Partager « ${target.name} »`} onClick={() => (setGiving(false), setSharing(target))}>
+                        <Share2 size={16} /> {target === folder ? "Partager le dossier" : "Partager"}
+                      </button>
+                    );
+                  })()}
                   <button className="btn btn-icon" title="Importer des .excalidraw" onClick={() => fileRef.current?.click()}>
                     <Upload size={18} />
                   </button>
@@ -408,7 +415,8 @@ export function Dashboard({ view }: { view: View }) {
               placed={isPlaced(menu.node.id)}
               close={() => setMenu(null)}
               onOpen={() => navigate(menu.node!.kind === "folder" ? `/folder/${menu.node!.id}` : `/board/${menu.node!.id}`)}
-              onShare={() => setSharing(menu.node!)}
+              onShare={() => (setGiving(false), setSharing(menu.node!))}
+              onGive={() => (setGiving(true), setSharing(menu.node!))}
               onDuplicate={() => duplicate(targets(menu.node))}
               onMove={(anchor) => setMenu({ anchor, node: menu.node, kind: "move" })}
               onDelete={() => trashItems(targets(menu.node))}
@@ -421,7 +429,7 @@ export function Dashboard({ view }: { view: View }) {
         </Menu>
       )}
 
-      {sharing && <ShareModal node={sharing} onClose={() => setSharing(null)} />}
+      {sharing && <ShareModal node={sharing} giving={giving} onClose={() => setSharing(null)} />}
     </div>
   );
 }
@@ -489,6 +497,7 @@ function CardMenu(p: {
   close: () => void;
   onOpen: () => void;
   onShare: () => void;
+  onGive: () => void;
   onDuplicate: () => void;
   onMove: (anchor: MenuAnchor) => void;
   onDelete: () => void;
@@ -515,6 +524,11 @@ function CardMenu(p: {
       {p.node.ownerId === p.meId && (
         <button className="menu-item" onClick={act(p.onShare)}>
           <Share2 size={16} /> Partager…
+        </button>
+      )}
+      {p.node.ownerId === p.meId && !p.node.parentId && (
+        <button className="menu-item" onClick={act(p.onGive)}>
+          <Gift size={16} /> Donner…
         </button>
       )}
       {edit && (
