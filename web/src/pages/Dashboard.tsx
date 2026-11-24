@@ -62,6 +62,10 @@ export function Dashboard({ view }: { view: View }) {
   const [sharing, setSharing] = useState<Node | null>(null);
   const [giving, setGiving] = useState(false);
   const [dragging, setDragging] = useState(false);
+  /** A board or folder being created: the buttons show it (creation waits for the server). */
+  const [creating, setCreating] = useState<"folder" | "board" | null>(null);
+  /** Items just deleted, hidden right away while the server and the refresh catch up. */
+  const [gone, setGone] = useState<Set<string>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const lastClicked = useRef<string | null>(null);
@@ -112,8 +116,8 @@ export function Dashboard({ view }: { view: View }) {
       const scope = view === "shared" ? all.filter((n) => n.ownerId !== user.id) : view === "folder" && folder ? all.filter((n) => inFolder(n) || placedHere(n)) : all.filter((n) => n.ownerId === user.id || placedHere(n));
       list = scope.filter((n) => !isInTrash(nodes, n) && n.name.toLowerCase().includes(needle));
     }
-    return sortNodes(list, sort);
-  }, [nodes, trash, view, targetParent, user.id, q, sort, folder, placed]);
+    return sortNodes(gone.size ? list.filter((n) => !gone.has(n.id)) : list, sort);
+  }, [nodes, trash, view, targetParent, user.id, q, sort, folder, placed, gone]);
 
   const childCount = (id: string) => [...nodes.values()].filter((n) => n.parentId === id && !n.deletedAt).length + [...placed.values()].filter((f) => f === id).length;
   // Only meaningful outside "Partagés avec moi": there a share is a plain top-level entry.
@@ -126,6 +130,8 @@ export function Dashboard({ view }: { view: View }) {
   };
 
   const create = async (kind: "folder" | "board") => {
+    if (creating) return;
+    setCreating(kind);
     try {
       const id = await createItem(ctx, kind, targetParent, kind === "folder" ? "Nouveau dossier" : "Sans titre");
       await refresh();
@@ -133,6 +139,8 @@ export function Dashboard({ view }: { view: View }) {
       else toast("Dossier créé — double-clique sur son nom pour le renommer");
     } catch (e) {
       toast.error(e);
+    } finally {
+      setCreating(null);
     }
   };
 
@@ -179,9 +187,13 @@ export function Dashboard({ view }: { view: View }) {
       });
       if (!ok) return;
     }
-    await Promise.all(list.map((id) => api.del(`/items/${id}${trash ? "?permanent=1" : ""}`))).catch(toast.error);
-    toast(trash ? "Supprimé définitivement" : "Déplacé dans la corbeille");
-    await done();
+    // Hidden at once; shown again if the server refuses.
+    setGone((g) => new Set([...g, ...list]));
+    const ok = await Promise.all(list.map((id) => api.del(`/items/${id}${trash ? "?permanent=1" : ""}`)))
+      .then(() => true)
+      .catch((e) => (toast.error(e), false));
+    if (ok) toast(trash ? "Supprimé définitivement" : "Déplacé dans la corbeille");
+    await done().finally(() => setGone((g) => new Set([...g].filter((id) => !list.includes(id)))));
   };
 
   const restore = async (list: string[]) => {
@@ -323,11 +335,11 @@ export function Dashboard({ view }: { view: View }) {
                   <button className="btn btn-icon" title="Importer des .excalidraw" onClick={() => fileRef.current?.click()}>
                     <Upload size={18} />
                   </button>
-                  <button className="btn" onClick={() => create("folder")}>
-                    <FolderPlus size={16} /> Dossier
+                  <button className="btn" onClick={() => create("folder")} disabled={!!creating}>
+                    {creating === "folder" ? <Loader2 size={16} className="spin" /> : <FolderPlus size={16} />} {creating === "folder" ? "Création…" : "Dossier"}
                   </button>
-                  <button className="btn btn-primary" onClick={() => create("board")}>
-                    <Plus size={18} strokeWidth={2.5} /> Tableau
+                  <button className="btn btn-primary" onClick={() => create("board")} disabled={!!creating}>
+                    {creating === "board" ? <Loader2 size={18} className="spin" /> : <Plus size={18} strokeWidth={2.5} />} {creating === "board" ? "Création…" : "Tableau"}
                   </button>
                 </>
               )}
@@ -350,7 +362,7 @@ export function Dashboard({ view }: { view: View }) {
           <Loader2 size={18} className="spin" /> Déchiffrement…
         </div>
       ) : items.length === 0 ? (
-        <EmptyState view={view} searching={!!q} canCreate={!!canCreate} onCreate={() => create("board")} />
+        <EmptyState view={view} searching={!!q} canCreate={!!canCreate} creating={creating === "board"} onCreate={() => create("board")} />
       ) : (
         <div className={`grid ${selected.size ? "selecting" : ""}`}>
           {items.map((n) => (
@@ -571,7 +583,7 @@ function CardMenu(p: {
   );
 }
 
-function EmptyState({ view, searching, canCreate, onCreate }: { view: View; searching: boolean; canCreate: boolean; onCreate: () => void }) {
+function EmptyState({ view, searching, canCreate, creating, onCreate }: { view: View; searching: boolean; canCreate: boolean; creating: boolean; onCreate: () => void }) {
   const [title, text] = searching
     ? ["Rien trouvé", "Aucun élément ne correspond à ta recherche."]
     : view === "trash"
@@ -586,8 +598,8 @@ function EmptyState({ view, searching, canCreate, onCreate }: { view: View; sear
       <h3 className="display">{title}</h3>
       <p>{text}</p>
       {canCreate && !searching && view !== "trash" && (
-        <button className="btn btn-primary" onClick={onCreate}>
-          <Plus size={18} strokeWidth={2.5} /> Nouveau tableau
+        <button className="btn btn-primary" onClick={onCreate} disabled={creating}>
+          {creating ? <Loader2 size={18} className="spin" /> : <Plus size={18} strokeWidth={2.5} />} {creating ? "Création…" : "Nouveau tableau"}
         </button>
       )}
     </div>
