@@ -25,7 +25,10 @@ if (existsSync(config.dbPath)) {
 }
 
 export const db = new DatabaseSync(config.dbPath);
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+// synchronous = NORMAL is SQLite's recommended setting with WAL: commits no longer wait for a disk
+// sync (fsync), which can take seconds on hosted disks. The database stays consistent; a power
+// loss or OS crash (not an app crash) can only drop the last few commits.
+db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
