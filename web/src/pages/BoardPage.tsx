@@ -563,6 +563,33 @@ function Editor({ node }: { node: Node }) {
     if (toggle && !collapse) activate(x, elementId);
   }, []);
 
+  // A click in a terminal's shell area (below its title bar) opens it for typing right away:
+  // without this, Excalidraw only selects the window and wants a second click to activate it.
+  // The title bar keeps selecting and moving the window.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const x = excalidrawRef.current;
+      if (!x || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!(e.target instanceof HTMLCanvasElement) || !e.target.closest(".board-canvas")) return;
+      const st = x.getAppState();
+      if (st.activeTool.type !== "selection") return;
+      const { x: sx, y: sy } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, st);
+      // The topmost window under the pointer, as drawn.
+      const hit = [...x.getSceneElements()]
+        .reverse()
+        .find((el) => el.type === "embeddable" && sx >= el.x && sx <= el.x + el.width && sy >= el.y && sy <= el.y + el.height);
+      if (!hit || !terminalIdOf(hit) || nodeDataOf(hit) || (hit.customData as TileData | undefined)?.collapsed) return;
+      if (sy <= hit.y + TERM_HEAD) return;
+      if (st.activeEmbeddable?.element.id === hit.id && st.activeEmbeddable.state === "active") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (editor) bringToFront(x, hit.id);
+      activate(x, hit.id);
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [editor]);
+
   /** Double-click on a terminal's title bar hides / reduces it, whether active or just selected. */
   const onCanvasDoubleClick = useCallback(
     (e: React.MouseEvent) => {
