@@ -15,6 +15,7 @@
     "dev": "vite",
     "prebuild": "node scripts/copy-fonts.mjs",
     "build": "vite build",
+    "build:mcp": "vite build -c vite.mcp.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

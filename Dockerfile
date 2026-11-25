@@ -16,7 +16,8 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
-RUN npm run build
+COPY mcp/ /src/mcp/
+RUN npm run build && npm run build:mcp
 
 # ---- Server dependencies ------------------------------------------------------
 FROM node:24-alpine AS server-deps
@@ -38,6 +39,7 @@ COPY server/package.json server/
 COPY server/src server/src
 COPY --from=web /src/web/dist web/dist
 COPY --from=agent /src/dist agent/dist
+COPY --from=web /src/mcp/dist mcp/dist
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY licenses licenses
 

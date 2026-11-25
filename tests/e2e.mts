@@ -591,7 +591,156 @@ site.close();
   sp.ws.close();
 }
 
-// Unauthenticated hardening.
+// Active sessions: list, revoke one (cuts its websocket), isolation between users, coarse metadata only.
+{
+  const UA = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0 RAWUA-MARKER";
+  const pre = await realFetch(BASE + "/api/auth/prelogin", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "alice@test.local" }) });
+  const { salt } = (await pre.json()) as any;
+  const { authKey } = await c.deriveAccountKeys("alice-password-1", salt);
+  const lr = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json", "user-agent": UA }, body: JSON.stringify({ email: "alice@test.local", authKey }) });
+  const second = lr.headers.get("set-cookie")!.split(";")[0];
+  ok(lr.status === 200 && !!second, "sessions : seconde connexion d'Alice (autre jeu de cookies)");
+  const asJar = async (cookie: string, method: string, path: string) => {
+    const r = await realFetch(BASE + "/api" + path, { method, headers: { cookie } });
+    return { status: r.status, body: (await r.json().catch(() => ({}))) as any };
+  };
+  const list = await asJar(alice.cookie, "GET", "/account/sessions");
+  ok(list.status === 200 && list.body.length === 2 && list.body.filter((x: any) => x.current).length === 1, "sessions : deux sessions listées, une seule « cet appareil »");
+  const other = list.body.find((x: any) => !x.current);
+  ok(other.label === "Firefox · Linux" && other.ipPrefix === "127.0.0.x" && other.lastUsedAt > 0, "sessions : libellé et préfixe IP grossiers, dernière utilisation renseignée");
+  const raw = new DatabaseSync(DB, { readOnly: true });
+  ok(!JSON.stringify(raw.prepare("SELECT * FROM sessions").all()).includes("RAWUA-MARKER"), "sessions : le User-Agent brut n'est pas stocké");
+  ok(!list.body.some((x: any) => /^[0-9a-f]{64}$/.test(x.id)), "sessions : l'id public n'est pas le hachage du jeton");
+  const bobSessions = await asJar(bob.cookie, "GET", "/account/sessions");
+  ok(bobSessions.body.length >= 1 && !bobSessions.body.some((x: any) => x.id === other.id), "sessions : Bob ne voit pas les sessions d'Alice");
+  ok((await asJar(bob.cookie, "DELETE", `/account/sessions/${other.id}`)).status === 404, "sessions : révoquer la session d'un autre renvoie 404");
+  ok((await asJar(second, "GET", "/auth/me")).status === 200, "sessions : la seconde session fonctionne avant révocation");
+  const sx = boardSocket({ ...alice, cookie: second }, B);
+  await sx.open;
+  await sx.next((m) => m.t === "init");
+  const closed = new Promise<number>((resolve) => sx.ws.on("close", (code: number) => resolve(code)));
+  const del = await asJar(alice.cookie, "DELETE", `/account/sessions/${other.id}`);
+  ok(del.status === 200, "sessions : Alice révoque sa seconde session");
+  ok((await Promise.race([closed, new Promise<number>((r) => setTimeout(() => r(-1), 4000))])) === 4001, "sessions : la websocket de la session révoquée est coupée (4001)");
+  ok((await asJar(second, "GET", "/auth/me")).status === 401, "sessions : le cookie révoqué reçoit 401");
+  ok((await asJar(alice.cookie, "GET", "/auth/me")).status === 200, "sessions : la session courante reste valable");
+  const l3 = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "alice@test.local", authKey }) });
+  const third = l3.headers.get("set-cookie")!.split(";")[0];
+  const ro = await asJar(alice.cookie, "POST", "/account/sessions/revoke-others");
+  ok(ro.status === 200 && ro.body.revoked === 1 && (await asJar(third, "GET", "/auth/me")).status === 401, "sessions : « déconnecter les autres » révoque tout sauf la session courante");
+  ok((await asJar(alice.cookie, "GET", "/account/sessions")).body.length === 1, "sessions : il ne reste que la session courante");
+  raw.close();
+}
+
+// MCP client: local login, stdio JSON-RPC, decrypted reads, opt-in typing, audit log, board scoping.
+{
+  const { mkdtempSync, statSync, readFileSync: rf, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const bundle = new URL("../mcp/dist/excalibash-mcp.mjs", import.meta.url).pathname;
+  const dir = mkdtempSync(join(tmpdir(), "eb-mcp-"));
+  const cfgFile = join(dir, "mcp.json");
+  const run = (args: string[], env: Record<string, string> = {}) =>
+    new Promise<{ code: number; err: string }>((resolve) => {
+      const p = spawn(process.execPath, [bundle, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+      let err = "";
+      p.stderr.on("data", (d) => (err += d));
+      p.on("exit", (code) => resolve({ code: code ?? -1, err }));
+    });
+  const loginRun = await run(["login", "--config", cfgFile], { EXCALIBASH_URL: BASE, EXCALIBASH_EMAIL: "alice@test.local", EXCALIBASH_PASSWORD: "alice-password-1" });
+  ok(loginRun.code === 0 && existsSync(cfgFile), "MCP : connexion non interactive, configuration enregistrée");
+  ok((statSync(cfgFile).mode & 0o777) === 0o600 && (statSync(dir).mode & 0o777) === 0o700, "MCP : fichier de configuration en 0600 dans un dossier 0700");
+  const badPw = await run(["login", "--config", join(dir, "x.json")], { EXCALIBASH_URL: BASE, EXCALIBASH_EMAIL: "alice@test.local", EXCALIBASH_PASSWORD: "mauvais" });
+  ok(badPw.code !== 0, "MCP : mauvais mot de passe refusé");
+
+  const startMcp = (args: string[], cfg = cfgFile) => {
+    const p = spawn(process.execPath, [bundle, "serve", "--config", cfg, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let buf = "";
+    let stderr = "";
+    const waiting = new Map<number, (m: any) => void>();
+    p.stdout.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        const m = JSON.parse(line); // stdout must carry protocol only
+        waiting.get(m.id)?.(m);
+      }
+    });
+    p.stderr.on("data", (d) => (stderr += d));
+    let n = 0;
+    const rpc = (method: string, params?: object, ms = 20000) =>
+      new Promise<any>((resolve, reject) => {
+        const id = ++n;
+        const t = setTimeout(() => reject(new Error(`MCP timeout ${method}`)), ms);
+        waiting.set(id, (m) => { clearTimeout(t); resolve(m); });
+        p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      });
+    const call = async (name: string, args: object = {}) => {
+      const r = await rpc("tools/call", { name, arguments: args });
+      return { text: r.result?.content?.[0]?.text ?? "", isError: !!r.result?.isError, error: r.error };
+    };
+    return { p, rpc, call, stderr: () => stderr, stop: () => p.kill() };
+  };
+
+  const m1 = startMcp([]);
+  const init = await m1.rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+  ok(init.result?.protocolVersion === "2025-03-26" && init.result?.serverInfo?.name === "excalibash", "MCP : initialize renvoie la version du client");
+  const tl = await m1.rpc("tools/list");
+  const names: string[] = tl.result.tools.map((t: any) => t.name);
+  ok(names.includes("lire_terminal") && !names.includes("ecrire_terminal") && !names.includes("ajouter_note"), "MCP : sans option, ni saisie ni édition");
+  ok((await m1.rpc("nope")).error?.code === -32601, "MCP : méthode inconnue = -32601");
+  ok((await m1.call("lire_tableau", { tableau: B, bidon: 1 })).isError, "MCP : argument inconnu = erreur d'outil, sans plantage");
+  const lb = await m1.call("lister_tableaux");
+  ok(lb.text.includes("Tableau confidentiel") && lb.text.includes(B), "MCP : lister_tableaux déchiffre les noms localement");
+  const board = await m1.call("lire_tableau", { tableau: "Tableau confidentiel" });
+  ok(!board.isError && board.text.includes("Tableau confidentiel"), "MCP : lire_tableau accepte le nom exact");
+  const lt = await m1.call("lister_terminaux", { tableau: B });
+  ok(lt.text.includes(tid2) && lt.text.includes("shell"), "MCP : lister_terminaux");
+  const rd = await m1.call("lire_terminal", { tableau: B, terminal: tid2, lignes: 50 });
+  ok(!rd.isError && rd.text.includes("non fiable") && !rd.text.includes("\x1b"), "MCP : lire_terminal renvoie du texte sans séquences d'échappement, avec avertissement");
+  ok((await m1.call("lister_machines")).text.includes("laptop-alice"), "MCP : lister_machines");
+  m1.stop();
+
+  const m2 = startMcp(["--autoriser-saisie"]);
+  await m2.rpc("initialize", { protocolVersion: "2025-06-18" });
+  ok((await m2.rpc("tools/list")).result.tools.some((t: any) => t.name === "ecrire_terminal"), "MCP : --autoriser-saisie enregistre ecrire_terminal");
+  const w = await m2.call("ecrire_terminal", { tableau: B, terminal: tid2, texte: "echo MCPSECRET_$((7*6))", attendre_ms: 2500 });
+  ok(!w.isError && w.text.includes("MCPSECRET_42"), "MCP : ecrire_terminal tape dans le terminal et renvoie la sortie");
+  const auditFile = join(dir, "mcp-audit.log");
+  const auditText = existsSync(auditFile) ? rf(auditFile, "utf8") : "";
+  ok(auditText.includes(tid2) && !auditText.includes("MCPSECRET") && !m2.stderr().includes("MCPSECRET") && (statSync(auditFile).mode & 0o777) === 0o600, "MCP : journal d'audit en 0600, sans le texte tapé");
+  m2.stop();
+
+  const m3 = startMcp(["--tableaux", "inconnu-1,inconnu-2"]);
+  await m3.rpc("initialize", { protocolVersion: "2025-06-18" });
+  const restricted = await m3.call("lire_tableau", { tableau: B });
+  ok(restricted.isError && !(await m3.call("lister_tableaux")).text.includes(B), "MCP : --tableaux refuse un autre tableau");
+  m3.stop();
+
+  const m4 = startMcp(["--autoriser-edition"]);
+  await m4.rpc("initialize", { protocolVersion: "2025-06-18" });
+  const note = await m4.call("ajouter_note", { tableau: B, texte: "NOTE_MCP_TEST" });
+  m4.stop();
+  const sn = boardSocket(alice, B);
+  await sn.open;
+  const initN = await sn.next((m) => m.t === "init");
+  const keyNow = (await tree(alice)).get(B)!.key!;
+  const decoded = await Promise.all(initN.elements.map((e: any) => decryptEntry(keyNow, B, e)));
+  ok(!note.isError && decoded.some((e: any) => e.type === "text" && e.text === "NOTE_MCP_TEST" && e.customData?.source === "mcp"), "MCP : ajouter_note dépose un texte chiffré sur le tableau");
+  ok(!JSON.stringify(initN.elements).includes("NOTE_MCP_TEST"), "MCP : la note n'est jamais en clair côté serveur");
+  sn.ws.close();
+
+  const { chmodSync } = await import("node:fs");
+  chmodSync(cfgFile, 0o644);
+  ok((await run(["serve", "--config", cfgFile])).code !== 0, "MCP : refuse de démarrer si la configuration est lisible par d'autres");
+  chmodSync(cfgFile, 0o600);
+  const out = await run(["logout", "--config", cfgFile]);
+  ok(out.code === 0 && !existsSync(cfgFile), "MCP : logout supprime la configuration");
+}
+
+// Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).
 const nullOrigin = await new Promise<number>((resolve) => {
   const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });
   w.on("unexpected-response", (_q: any, r: any) => resolve(r.statusCode));

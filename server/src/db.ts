@@ -166,6 +166,16 @@ addColumn("users", "findable_name", "INTEGER NOT NULL DEFAULT 1");
 addColumn("users", "findable_email", "INTEGER NOT NULL DEFAULT 0");
 addColumn("users", "notify", "TEXT NOT NULL DEFAULT '{}'"); // email notifications, all off by default
 
+// Active sessions: coarse connection metadata only (never the raw User-Agent or full IP).
+addColumn("sessions", "public_id", "TEXT"); // opaque id shown to the owner, distinct from the token hash
+db.exec("UPDATE sessions SET public_id = lower(hex(randomblob(8))) WHERE public_id IS NULL");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS sessions_public_id ON sessions(public_id)");
+addColumn("sessions", "created_at", "INTEGER");
+addColumn("sessions", "last_used_at", "INTEGER");
+addColumn("sessions", "user_agent_label", "TEXT");
+addColumn("sessions", "ip_prefix", "TEXT");
+db.exec("CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id)");
+
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");
 }
