@@ -23,7 +23,7 @@ Polices d'Excalidraw servies par l'application (copiées depuis `@excalidraw/exc
 | Composant | Licence | Projet |
 |---|---|---|
 | @excalidraw/excalidraw | MIT | <https://github.com/excalidraw/excalidraw> |
-| @xterm/xterm, @xterm/addon-fit, @xterm/addon-web-links | MIT | <https://github.com/xtermjs/xterm.js> |
+| @xterm/xterm, @xterm/addon-fit, @xterm/addon-search, @xterm/addon-web-links | MIT | <https://github.com/xtermjs/xterm.js> |
 | React, React DOM | MIT | <https://github.com/facebook/react> |
 | React Router | MIT | <https://github.com/remix-run/react-router> |
 | Rough.js | MIT | <https://github.com/rough-stuff/rough> |
