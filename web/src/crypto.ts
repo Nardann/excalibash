@@ -238,6 +238,9 @@ export const AAD = {
   webKey: (boardId: string, webId: string) => `eb:webkey:${boardId}:${webId}`,
   webLabel: (boardId: string, webId: string) => `eb:weblabel:${boardId}:${webId}`,
   webAgent: (webId: string) => `eb:web:${webId}`,
+  /** Reachability probe asked of an agent by its owner, and its answer (agent/probe.go). */
+  probe: (rid: string, ts: number) => `eb:probe:${rid}:${ts}`,
+  probeRes: (rid: string) => `eb:probe-res:${rid}`,
   machine: (machineId: string) => `eb:machine:${machineId}`,
   machineName: (machineId: string) => `eb:machine:${machineId}:name`,
   machineAuth: (machineId: string) => `eb:machine-auth:${machineId}`,

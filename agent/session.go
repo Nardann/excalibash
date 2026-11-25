@@ -36,6 +36,7 @@ type manager struct {
 	auth     []byte
 	sessions map[string]*session
 	web      *webHub
+	probe    *probeHub
 	out      *outbox // nil while disconnected
 }
 
@@ -79,7 +80,7 @@ func newManager(priv *ecdh.PrivateKey) *manager {
 
 // newManagerWithAuth runs with a machine auth key received at pairing time.
 func newManagerWithAuth(auth []byte) *manager {
-	return &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth)}
+	return &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth), probe: newProbeHub(auth)}
 }
 
 // openKey decrypts a terminal key issued by the machine's owner: either the raw key (local

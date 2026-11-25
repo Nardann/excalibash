@@ -200,5 +200,7 @@ func handle(msg message, mgr *manager, out *outbox) {
 		mgr.web.close(msg.ID)
 	case "http":
 		go mgr.web.request(msg, out)
+	case "probe":
+		go mgr.probe.handle(msg, out)
 	}
 }
