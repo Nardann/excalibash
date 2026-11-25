@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import WebSocket from "../server/node_modules/ws/index.js";
+const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
@@ -419,6 +420,12 @@ fakeSwitch.close();
 
 // Web tunnel: HTTP to a service on the machine, end-to-end encrypted through the agent.
 const site = createServer((req, res) => res.end(`site:${req.method}:${req.url}:${req.headers["x-t"]}`));
+// The same site also speaks WebSocket (echo; "bye" closes with 4001).
+let wsSeen = { url: "", origin: "", cookie: "", protocol: "" };
+new WebSocketServer({ server: site, handleProtocols: (p: Set<string>) => (p.has("chat") ? "chat" : false) }).on("connection", (sock: any, req: any) => {
+  wsSeen = { url: req.url, origin: req.headers.origin ?? "", cookie: req.headers.cookie ?? "", protocol: sock.protocol };
+  sock.on("message", (data: Buffer, isBinary: boolean) => (data.toString() === "bye" && !isBinary ? sock.close(4001, "fini") : sock.send(data, { binary: isBinary })));
+});
 await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
 const sitePort = (site.address() as any).port;
 const wid = c.randomId();
@@ -462,6 +469,80 @@ const misbound = pr.status === 200 ? await c.unboxJson(mAlice.auth, pr.body.d, c
 ok(!misbound, "la réponse de la sonde est liée à sa requête");
 ok((await probe(alice, ["127.0.0.1"])).status === 429, "sondes trop rapprochées refusées par le serveur");
 ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder depuis la machine d'Alice");
+// WebSocket through the tunnel: sealed messages, sealed close, counters in the AAD.
+async function tunnelSocket(kw: c.SymKey, path: string, opts: { cookie?: string; protos?: string[]; badKey?: boolean } = {}) {
+  const sid = c.randomId();
+  const ws = new WebSocket(`${PROXY.replace("http", "ws")}/eb-proxy/ws/${wid}`);
+  const frames: any[] = [];
+  const waiters: ((f: any) => void)[] = [];
+  ws.on("message", (raw: Buffer) => {
+    const f = JSON.parse(raw.toString());
+    const w = waiters.shift();
+    if (w) w(f);
+    else frames.push(f);
+  });
+  const closed = new Promise<number>((r) => ws.on("close", (code: number) => r(code)));
+  const frame = (ms = 4000) =>
+    new Promise<any>((resolve, reject) => {
+      const f = frames.shift();
+      if (f) return resolve(f);
+      const t = setTimeout(() => reject(new Error("pas de trame")), ms);
+      waiters.push((x) => (clearTimeout(t), resolve(x)));
+    });
+  await new Promise((r, j) => (ws.on("open", r), ws.on("error", j)));
+  const ts = Date.now();
+  const useKey = opts.badKey ? await c.newSymKey() : kw;
+  const d = await c.box(useKey, c.utf8(JSON.stringify({ p: path, protos: opts.protos ?? [], cookie: opts.cookie ?? "" })), `eb:ws-open:${wid}:${sid}:${ts}`);
+  ws.send(JSON.stringify({ t: "open", sid, ts, d }));
+  let sendN = 0;
+  let recvN = 0;
+  return {
+    ws, closed, frame,
+    ack: async () => JSON.parse(c.fromUtf8(await c.unbox(kw, (await frame()).d, `eb:ws-ack:${wid}:${sid}`))),
+    send: async (text: string) => {
+      const d = await c.box(kw, new Uint8Array([0, ...c.utf8(text)]), `eb:ws-msg:${wid}:${sid}:c2a:${sendN++}`);
+      ws.send(JSON.stringify({ t: "data", d }));
+    },
+    recv: async () => {
+      const f = await frame();
+      if (f.t === "close") return { close: JSON.parse(c.fromUtf8(await c.unbox(kw, f.d, `eb:ws-close:${wid}:${sid}:a2c:${recvN}`))) };
+      const pt = await c.unbox(kw, f.d, `eb:ws-msg:${wid}:${sid}:a2c:${recvN++}`);
+      return { text: c.fromUtf8(pt.subarray(1)) };
+    },
+    sid,
+  };
+}
+const sock = await tunnelSocket(kwB, "/live?x=1", { cookie: "s=1", protos: ["chat"] });
+const sockAck = await sock.ack();
+ok(sockAck.ok && sockAck.proto === "chat", "WebSocket : le site accepte l'ouverture et le sous-protocole");
+ok(wsSeen.url === "/live?x=1" && wsSeen.cookie === "s=1" && wsSeen.origin === siteUrl, "WebSocket : chemin, cookies et Origin sont ceux du site cible");
+await sock.send("bonjour");
+ok((await sock.recv()).text === "bonjour", "WebSocket : les messages font l'aller-retour chiffrés");
+await sock.send("bye");
+const bye: any = await sock.recv();
+ok(bye.close?.code === 4001 && bye.close?.reason === "fini", "WebSocket : la fermeture du site est authentifiée et garde son code");
+// The server cannot slip a message in, replay one or reorder: frames are bound to a counter.
+const sock2 = await tunnelSocket(kwB, "/live");
+await sock2.ack();
+await sock2.send("un");
+await sock2.recv();
+const forged = await c.box(kwB, new Uint8Array([0, ...c.utf8("forgé")]), `eb:ws-msg:${wid}:${sock2.sid}:c2a:7`);
+sock2.ws.send(JSON.stringify({ t: "data", d: forged }));
+await sock2.send("après");
+const afterForge = await sock2.frame().catch(() => null);
+ok(afterForge?.t === "close" && !afterForge.d, "WebSocket : un message hors compteur coupe la socket (fermeture non authentifiée)");
+sock2.ws.close();
+// Wrong key: the agent never opens anything, the page just gets no ack.
+const sock3 = await tunnelSocket(kwB, "/live", { badKey: true });
+const noAck = await Promise.race([sock3.frame().then(() => "ack"), new Promise((r) => setTimeout(() => r("rien"), 800))]);
+ok(noAck === "rien", "WebSocket : une ouverture scellée avec une autre clé est ignorée");
+sock3.ws.close();
+const unknown = new WebSocket(`${PROXY.replace("http", "ws")}/eb-proxy/ws/${c.randomId()}`);
+const unknownCode = await new Promise((r) => (unknown.on("error", () => r("refusé")), unknown.on("open", () => r("ouvert"))));
+ok(unknownCode === "refusé", "WebSocket : un tunnel inconnu est refusé");
+const foreign = new WebSocket(`${PROXY.replace("http", "ws")}/eb-proxy/ws/${wid}`, { headers: { origin: "https://evil.example" } });
+const foreignCode = await new Promise((r) => (foreign.on("error", () => r("refusé")), foreign.on("open", () => r("ouvert"))));
+ok(foreignCode === "refusé", "WebSocket : une page d'une autre origine ne peut pas ouvrir de socket");
 
 // Third user / admin cannot read.
 const inv = await as(alice, () => api("POST", "/admin/invites", { note: "carol" }));

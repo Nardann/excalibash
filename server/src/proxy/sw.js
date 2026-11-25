@@ -188,7 +188,27 @@ async function handle(e, url) {
   if (e.request.mode === "navigate") out.append("Content-Security-Policy", `frame-ancestors 'self' ${MAIN_ORIGIN}`);
   const status = res.s >= 200 && res.s <= 599 ? res.s : 502;
   const noBody = e.request.method === "HEAD" || [204, 205, 304].includes(status);
-  return new Response(noBody ? null : unb64(res.b), { status, headers: out });
+  let payload = noBody ? null : unb64(res.b);
+  if (payload && ["document", "iframe", "frame"].includes(e.request.destination) && /^text\/html/i.test(out.get("content-type") || "")) {
+    payload = withWebSocketShim(payload, route.id, t.target.origin);
+  }
+  return new Response(payload, { status, headers: out });
+}
+
+// The service worker cannot see WebSocket connections, so pages get a script that carries them
+// through the tunnel (see ws-shim.js). Bytes are handled as Latin-1 so any ASCII-compatible
+// encoding survives untouched; the tag goes after <head> (or the doctype), never before it.
+function withWebSocketShim(bytes, id, origin) {
+  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
+  if (/^\s*(\xff\xfe|\xfe\xff|\x00)/.test(head)) return bytes; // UTF-16 page
+  const m = /<head(\s[^>]*)?>/i.exec(head) || /<html(\s[^>]*)?>/i.exec(head) || /^\s*<!doctype[^>]*>/i.exec(head);
+  const at = m ? m.index + m[0].length : 0;
+  const tag = enc.encode(`<script src="/eb-proxy/ws-shim.js" data-eb-tunnel="${id}" data-eb-target="${origin}"></script>`);
+  const out = new Uint8Array(bytes.length + tag.length);
+  out.set(bytes.subarray(0, at));
+  out.set(tag, at);
+  out.set(bytes.subarray(at), at + tag.length);
+  return out;
 }
 
 function rewriteLocation(loc, id, target) {

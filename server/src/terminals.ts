@@ -122,8 +122,12 @@ function announce(t: Term): void {
 }
 
 /** Extra agent message handlers (web tunnels). */
-type AgentHooks = { hello: ((machineId: string) => void)[]; message: ((machineId: string, msg: any) => void)[] };
-export const agentHooks: AgentHooks = { hello: [], message: [] };
+type AgentHooks = {
+  hello: ((machineId: string) => void)[];
+  message: ((machineId: string, msg: any) => void)[];
+  disconnect: ((machineId: string) => void)[];
+};
+export const agentHooks: AgentHooks = { hello: [], message: [], disconnect: [] };
 
 export function sendAgent(machineId: string, msg: object): boolean {
   const a = agents.get(machineId);
@@ -339,6 +343,9 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
         break;
       case "http.res":
       case "probe.res":
+      case "ws.ack":
+      case "ws.data":
+      case "ws.close":
         for (const fn of agentHooks.message) fn(machineId, msg);
         break;
       case "opened":
@@ -371,6 +378,7 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
     agents.delete(machineId);
     db.prepare("UPDATE machines SET last_seen = ? WHERE id = ?").run(Date.now(), machineId);
     console.log(`[agent] ${machineId} déconnecté`);
+    for (const fn of agentHooks.disconnect) fn(machineId);
     for (const t of terms.values()) if (t.machineId === machineId) announce(t);
   });
 }
