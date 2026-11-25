@@ -13,6 +13,7 @@ import {
   terminalResize,
   terminalRestart,
 } from "./terminals.ts";
+import { fileRequest } from "./files.ts";
 import { closeTunnel, createTunnel, listBoardTunnels, tunnelExists } from "./tunnels.ts";
 
 /** Encrypted element: only the merge metadata is readable by the server. */
@@ -214,6 +215,9 @@ class Room implements BoardRoom {
         if (str(msg.s, 64) && Number.isSafeInteger(msg.k) && Number.isSafeInteger(msg.ts) && str(msg.d, 256 * 1024)) {
           terminalInput(this.boardId, String(msg.id), { s: msg.s, k: msg.k, ts: msg.ts, d: msg.d });
         }
+        break;
+      case "file.req":
+        fileRequest(ws, this.boardId, editor, msg);
         break;
       case "term.resize":
         if (editor) terminalResize(this.boardId, String(msg.id), Number(msg.cols), Number(msg.rows));

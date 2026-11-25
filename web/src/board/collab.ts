@@ -15,6 +15,9 @@ type TermListener = {
 
 type Chunk = { gen: string; seq: number; d: string };
 
+/** One decrypted answer frame of a file request; `end` is the last one. */
+export type FileFrameHandler = (n: number, body: any, end: boolean) => void;
+
 type Events = {
   init: (msg: { you: Peer }) => void;
   peers: (peers: Peer[]) => void;
@@ -84,6 +87,9 @@ export class BoardSession {
   /** Files being encrypted/sent, so concurrent changes don't send them twice. */
   private pendingFiles = new Set<string>();
   private genWaiters = new Map<string, (() => void)[]>();
+  /** File requests waiting for answers (rid → handlers), see fileTransfer.ts. */
+  private fileWaiters = new Map<string, { term: string; last: number; on: FileFrameHandler; fail: (message: string) => void }>();
+  private fileOutbox: Promise<void> = Promise.resolve();
   private pendingCreates = new Map<string, { resolve: (t: TerminalInfo) => void; reject: (e: Error) => void }>();
   /** Input frames: sender id + strictly increasing counter, checked by the agent. */
   private readonly sender = randomId().slice(0, 12);
@@ -154,6 +160,9 @@ export class BoardSession {
     };
     ws.onclose = (ev) => {
       if (this.ws !== ws || this.disposed) return;
+      const waiting = [...this.fileWaiters.values()];
+      this.fileWaiters.clear();
+      for (const w of waiting) w.fail("Connexion perdue");
       this.ws = null;
       this.peers.clear();
       this.collaborators.clear();
@@ -281,6 +290,29 @@ export class BoardSession {
       case "term.error":
         this.emit("error", `Terminal : ${msg.message}`);
         break;
+      case "file.res": {
+        const w = this.fileWaiters.get(msg.rid);
+        const kp = this.termKeys.get(msg.id);
+        // Only answers to our own requests, for the terminal we asked, strictly in order.
+        if (!w || !kp || w.term !== msg.id || !Number.isSafeInteger(msg.n) || msg.n <= w.last || typeof msg.d !== "string") return;
+        let body: any;
+        try {
+          body = await unboxJson(await kp, msg.d, AAD.fileRes(msg.id, msg.rid, msg.n));
+        } catch {
+          return;
+        }
+        w.last = msg.n;
+        if (msg.end) this.fileWaiters.delete(msg.rid);
+        w.on(msg.n, body, msg.end === true);
+        break;
+      }
+      case "file.err": {
+        const w = this.fileWaiters.get(msg.rid);
+        if (!w) return;
+        this.fileWaiters.delete(msg.rid);
+        w.fail(typeof msg.message === "string" ? msg.message : "Transfert refusé");
+        break;
+      }
       case "error":
         if (msg.reqId && this.pendingCreates.has(msg.reqId)) {
           this.pendingCreates.get(msg.reqId)!.reject(new Error(msg.message));
@@ -574,6 +606,34 @@ export class BoardSession {
         this.send({ t: "term.input", id, s: this.sender, k, ts, d });
       })
       .catch((e) => console.error("[excalibash]", e));
+  }
+
+  /**
+   * Sends one sealed file request for a local shell (agent/files.go). Frames are boxed and sent in
+   * call order. With `on`, the agent's answer frames are decrypted and handed to it; without,
+   * the request expects no answer (acknowledgement, cancellation).
+   */
+  fileRequest(term: string, op: object, on?: FileFrameHandler, fail?: (message: string) => void): Promise<string> {
+    const rid = randomId();
+    if (on) this.fileWaiters.set(rid, { term, last: -1, on, fail: fail ?? (() => {}) });
+    const p = this.fileOutbox.then(async () => {
+      const kp = this.termKeys.get(term);
+      if (!kp || !this.canEdit) throw new Error("Terminal introuvable");
+      const ts = Date.now();
+      const d = await box(await kp, utf8(JSON.stringify(op)), AAD.fileReq(term, rid, ts));
+      if (!this.send({ t: "file.req", term, rid, ts, d, ...(on ? {} : { nr: true }) })) throw new Error("Connexion perdue");
+      return rid;
+    });
+    this.fileOutbox = p.then(() => {}, () => {});
+    return p.catch((e) => {
+      this.fileWaiters.delete(rid);
+      throw e;
+    });
+  }
+
+  /** Forgets the handler of a request that was given up (the agent went silent). */
+  fileDrop(rid: string) {
+    this.fileWaiters.delete(rid);
   }
 
   /** The agent announces each new gen (shell start, rekey, reconnect); wait briefly for it. */

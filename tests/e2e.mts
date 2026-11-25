@@ -9,8 +9,10 @@ const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
-import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 
@@ -383,6 +385,118 @@ ok(out.includes("CLEAR_42"), "Bob tape dans le terminal d'Alice, sortie chiffré
 sb.send(frame);
 const out2 = await termOutput(sb, ktBob, tid2, "CLEAR_42").catch(() => "");
 ok(!out2.includes("CLEAR_42"), "le rejeu d'une frappe par le serveur est ignoré par l'agent");
+
+// File transfer rides on the local shell of tid2 and is sealed with its key: the server relays blind.
+{
+  const fdir = mkdtempSync(join(tmpdir(), "eb-files-"));
+  await sendInput(sb, ktBob, tid2, "bobtab", `cd ${fdir} && echo CWD_$((6*7))\n`);
+  await termOutput(sb, ktBob, tid2, "CWD_42");
+  const seen: string[] = []; // everything the server relayed to the requester
+  const fileReq = async (sock: ReturnType<typeof boardSocket>, key: c.SymKey, op: object) => {
+    const rid = c.randomId();
+    const ts = Date.now();
+    const f = { t: "file.req", term: tid2, rid, ts, d: await c.box(key, c.utf8(JSON.stringify(op)), c.AAD.fileReq(tid2, rid, ts)) };
+    sock.send(f);
+    return { rid, f };
+  };
+  const open = async (key: c.SymKey, m: any) => {
+    seen.push(JSON.stringify(m));
+    return JSON.parse(c.fromUtf8(await c.unbox(key, m.d, c.AAD.fileRes(tid2, m.rid, m.n))));
+  };
+  const fileOne = async (sock: ReturnType<typeof boardSocket>, key: c.SymKey, op: object) => {
+    const { rid } = await fileReq(sock, key, op);
+    const m = await sock.next((x) => (x.t === "file.res" || x.t === "file.err") && x.rid === rid, 10000);
+    return m.t === "file.err" ? { error: m.message } : open(key, m);
+  };
+
+  const name = "SECRET_NOM_FICHIER_42.txt";
+  const content = Buffer.from("CONTENU_SECRET_FICHIER_42\n".repeat(50));
+  const xfer = c.randomId();
+  const begun = await fileOne(sb, ktBob, { op: "put", xfer, name, size: content.length });
+  const chunked = await fileOne(sb, ktBob, { op: "chunk", xfer, n: 0, data: c.toB64(content) });
+  const ended = await fileOne(sb, ktBob, { op: "end", xfer, sha256: createHash("sha256").update(content).digest("hex") });
+  ok(begun.ok && chunked.ok && ended.ok && ended.path === join(fdir, name), "envoi d'un fichier dans le dossier du shell, par un éditeur");
+  ok(readFileSync(join(fdir, name)).equals(content), "le fichier arrive sur le disque de la machine avec le bon contenu");
+  const dup = await fileOne(sb, ktBob, { op: "put", xfer: c.randomId(), name, size: 1 });
+  ok(dup.code === "exists", "écraser un fichier existant est refusé sans confirmation");
+  const evil = await fileOne(sb, ktBob, { op: "put", xfer: c.randomId(), name: "../evil", size: 1 });
+  ok(!!evil.error, "un nom avec un chemin est refusé");
+
+  const listing = await fileOne(sb, ktBob, { op: "ls" });
+  ok(listing.cwd === fdir && listing.entries.some((e: any) => e.name === name && e.size === content.length), "ls liste le fichier envoyé");
+
+  const gx = c.randomId();
+  const { rid: grid } = await fileReq(sb, ktBob, { op: "get", xfer: gx, path: name });
+  const parts: Buffer[] = [];
+  for (let n = 0; ; n++) {
+    const m = await sb.next((x) => x.t === "file.res" && x.rid === grid, 10000);
+    const body = await open(ktBob, m);
+    if (body.data) parts.push(Buffer.from(c.fromB64(body.data)));
+    if (m.end) {
+      ok(body.sha256 === createHash("sha256").update(content).digest("hex"), "get : l'empreinte finale correspond");
+      break;
+    }
+    await fileReq(sb, ktBob, { op: "ack", xfer: gx, n: n + 1 }); // answered by nothing
+  }
+  ok(Buffer.concat(parts).equals(content), "get renvoie exactement les mêmes octets");
+
+  // Replay of a captured request: the agent answers once.
+  const { rid: rrid, f: rframe } = await fileReq(sb, ktBob, { op: "ls" });
+  await sb.next((x) => x.t === "file.res" && x.rid === rrid, 10000);
+  sb.send(rframe);
+  const echo = await sb.next((x) => (x.t === "file.res" || x.t === "file.err") && x.rid === rrid, 1500).then(() => true, () => false);
+  ok(!echo, "le rejeu d'une requête de fichier est ignoré par l'agent");
+  // An answer is never sent to someone else than the requester.
+  const aliceHeard = await sa.next((x) => x.t === "file.res", 800).then(() => true, () => false);
+  ok(!aliceHeard, "les réponses de fichier ne sont envoyées qu'à celui qui les a demandées");
+
+  // A viewer is refused by the server.
+  await as(alice, async () => {
+    nA = await tree(alice);
+    const X = await lib.createItem(ctxOf(alice, nA), "board", null, "Tableau lecture seule", { elements: [], files: {} });
+    nA = await tree(alice);
+    await lib.shareItem(ctxOf(alice, nA), X, bobPub, "viewer");
+    const keyX = nA.get(X)!.key!;
+    const tx = c.randomId();
+    const ktx = await c.newSymKey();
+    const sx = boardSocket(alice, X);
+    await sx.open;
+    await sx.next((m) => m.t === "init");
+    sx.send({
+      t: "term.create", reqId: "rx", id: tx, machineId: machine.id, cols: 80, rows: 24,
+      keyForBoard: await c.wrapKey(keyX, ktx, c.AAD.termKey(X, tx)),
+      keyForAgent: await c.box(mAlice.auth, ktx.raw, c.AAD.termAgent(tx)),
+      encLabel: await c.boxText(keyX, "laptop-alice", c.AAD.termLabel(X, tx)),
+    });
+    await sx.next((m) => m.t === "term.created" && m.reqId === "rx");
+    await sx.next((m) => m.t === "term" && m.terminal.id === tx && m.terminal.status === "running", 8000);
+    const viewer = boardSocket(bob, X);
+    await viewer.open;
+    const vinit = await viewer.next((m) => m.t === "init");
+    ok(vinit.you.role === "viewer", "Bob est lecteur sur ce tableau");
+    const rid = c.randomId();
+    const ts = Date.now();
+    viewer.send({ t: "file.req", term: tx, rid, ts, d: await c.box(ktx, c.utf8(JSON.stringify({ op: "ls" })), c.AAD.fileReq(tx, rid, ts)) });
+    const refused = await viewer.next((m) => m.t === "file.err" && m.rid === rid, 4000);
+    ok(/lecture seule/i.test(refused.message), "un lecteur ne peut pas transférer de fichiers");
+    // The owner's own request on the same terminal works, so the refusal was about the role.
+    const rid2 = c.randomId();
+    const ts2 = Date.now();
+    sx.send({ t: "file.req", term: tx, rid: rid2, ts: ts2, d: await c.box(ktx, c.utf8(JSON.stringify({ op: "ls" })), c.AAD.fileReq(tx, rid2, ts2)) });
+    const okAnswer = await sx.next((m) => m.t === "file.res" && m.rid === rid2, 8000);
+    ok(!!okAnswer, "l'éditeur obtient sa réponse sur le même terminal");
+    viewer.ws.close();
+    sx.ws.close();
+  });
+
+  // Nothing about the file ever appears in clear: not in the database, the server log, nor the frames relayed.
+  await new Promise((r) => setTimeout(r, 500));
+  const fs = await import("node:fs");
+  const haystacks = [DB, `${DB}-wal`, `${dirname(DB)}/server.log`].filter((p) => fs.existsSync(p)).map((p) => fs.readFileSync(p).toString("latin1"));
+  haystacks.push(seen.join("\n"));
+  const needles = [name, "SECRET_NOM_FICHIER", "CONTENU_SECRET_FICHIER", fdir, c.toB64(content).slice(0, 40)];
+  ok(haystacks.every((h) => needles.every((n) => !h.includes(n))), "ni le nom, ni le contenu, ni le dossier du fichier n'apparaissent en clair côté serveur");
+}
 
 // Telnet to a device reachable from the machine (a fake switch): the target is sealed with the key.
 const IAC = 255, DO = 253, WILL = 251, ECHO = 1, SGA = 3;

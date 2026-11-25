@@ -47,6 +47,8 @@ type message struct {
 	Sessions []string        `json:"sessions,omitempty"`
 	Rid      string          `json:"rid,omitempty"`
 	Sid      string          `json:"sid,omitempty"`
+	N        *int            `json:"n,omitempty"`
+	End      bool            `json:"end,omitempty"`
 }
 
 // outbox serialises writes to one connection through a single writer goroutine.
@@ -209,5 +211,7 @@ func handle(msg message, mgr *manager, out *outbox) {
 		mgr.web.wsData(msg)
 	case "ws.close":
 		mgr.web.wsClose(msg)
+	case "file":
+		mgr.files.handle(msg, out)
 	}
 }

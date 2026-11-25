@@ -291,6 +291,37 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
   malveillant pourrait présenter à quelqu'un une « machine partagée par Alice » qui est en fait la sienne, et lire ce
   qui y serait tapé. Un lien de tableau, lui, est chiffré sous la clé du tableau, que le serveur n'a pas.
 
+## Fichiers et captures
+
+Envoyer un fichier dans le dossier d'un shell, en télécharger un, ou capturer le trafic d'une interface (pcap)
+passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`.
+
+- **Autorité = la clé du terminal.** Qui détient `K_t` peut déjà taper dans ce shell : le transfert ne donne aucun pouvoir
+  de plus. Les sessions Telnet, SSH et TCP brut sont refusées par l'agent (« transfert disponible seulement sur un shell
+  local »). Les lecteurs (viewer) sont refusés par le serveur, comme pour la saisie. Les captures sont lancées par
+  l'agent, donc avec les droits du compte de l'agent, comme le shell.
+- Trames : `file.req {term, rid, ts, d}` avec `d = box(K_t, opération, "eb:file-req:<term>:<rid>:<ts>")` ; réponses
+  `file.res {id, rid, n, d, end}` avec `d = box(K_t, corps, "eb:file-res:<term>:<rid>:<n>")`. `rid` est un identifiant
+  aléatoire de 128 bits. L'agent applique la clé **courante** du terminal (elle change au `rekey`), rejette
+  `|now − ts| > 5 min` et tout `(terminal, rid)` déjà vu : l'identifiant n'est enregistré qu'**après** authentification,
+  en une seule section critique (comme pour les tunnels web), dans une table bornée.
+- **Ce que voit le serveur** : la taille et le rythme des trames, la machine et le terminal concernés, le fait qu'un
+  transfert a lieu. **Il ne voit jamais** : noms de fichiers, chemins, contenus, noms d'interfaces, filtres. Il ne
+  renvoie une réponse qu'au socket qui a fait la requête (jamais en diffusion), ignore les `rid` inconnus, oublie une
+  requête sans réponse après 90 s, plafonne les requêtes en attente (32 par tableau) et la taille d'une trame
+  (400 Kio en base64), et annule un transfert si le socket du demandeur accumule plus de 8 Mio non lus.
+- **Limites** : 200 Mio par fichier, 192 Kio par morceau, 4 transferts simultanés par machine, 500 entrées par
+  listage, 60 s sans activité = abandon. Le flux est à fenêtre : l'agent n'envoie qu'une petite avance (8 morceaux)
+  avant les accusés du navigateur, ce qui borne la mémoire et arrête un téléchargement dont le demandeur a disparu.
+  Chaque fichier est vérifié par SHA-256 de bout en bout.
+- **Envoi** : le nom doit être un simple nom de fichier (ni `/`, `\`, NUL, ni `.` ou `..`, 255 octets au plus).
+  Le fichier est écrit dans `.<nom>.excalibash-part-<aléa>` (0600, `O_EXCL`) puis `fsync` et renommé ; un fichier existant
+  n'est jamais écrasé sans confirmation explicite (`overwrite`), et sans écrasement le renommage se fait par lien dur
+  pour qu'un fichier créé entre-temps ne soit pas remplacé. Un envoi abandonné ou expiré supprime son fichier temporaire.
+  Le fichier final est en 0600 (ou garde les droits du fichier remplacé). Le dossier de destination est celui du
+  shell (lu dans `/proc/<pid>/cwd` sous Linux ; sous macOS, faute de mieux, le dossier personnel du compte).
+- **Téléchargement** : fichiers ordinaires seulement (ni dossier, ni périphérique, ni tube).
+
 ## Client MCP
 
 Le client MCP (`excalibash-mcp.mjs`, voir [MCP.md](MCP.md)) est un programme local qui ouvre une session
