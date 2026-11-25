@@ -40,7 +40,7 @@ type Stats = {
   signupsLast7Days: number;
 };
 type Invite = { id: string; note: string | null; expiresAt: number; createdAt: number; usedBy: string | null };
-type Data = { users: AdminUser[]; invites: Invite[]; stats: Stats; registrationOpen: boolean };
+type Data = { users: AdminUser[]; invites: Invite[]; stats: Stats; registrationOpen: boolean; emailVerification: boolean };
 type Sort = "storage" | "seen" | "created";
 type MailOutcome = { at: number; ok: boolean; error?: string };
 type Smtp = {
@@ -97,6 +97,11 @@ export function Admin() {
 
   const setRegistration = async (open: boolean) => {
     await api.patch("/admin/settings", { registrationOpen: open }).catch(toast.error);
+    load();
+  };
+
+  const setVerification = async (on: boolean) => {
+    await api.patch("/admin/settings", { emailVerification: on }).catch(toast.error);
     load();
   };
 
@@ -263,6 +268,15 @@ export function Admin() {
                 )}
               </div>
             </div>
+            {smtp.mode !== "off" && data && (
+              <div className="row">
+                <div className="grow">
+                  <div className="title">Vérifier l'email à l'inscription</div>
+                  <div className="sub">Un code à 6 chiffres est envoyé à chaque nouveau compte, qui ne peut se connecter qu'après l'avoir saisi.</div>
+                </div>
+                <Switch on={data.emailVerification} onChange={setVerification} label="Vérifier l'email à l'inscription" />
+              </div>
+            )}
             {smtp.mode === "smtp" && (smtp.lastOk || smtp.lastError) && (
               <p className="admin-note">
                 {smtp.lastOk && <>Dernier envoi réussi {ago(smtp.lastOk.at)}. </>}

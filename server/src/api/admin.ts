@@ -100,11 +100,18 @@ adminApi.get("/", async (_req, res) => {
        FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY i.created_at DESC LIMIT 50`,
     )
     .all();
-  res.json({ users, invites, stats, registrationOpen: getSetting("registration_open", "false") === "true" });
+  res.json({
+    users,
+    invites,
+    stats,
+    registrationOpen: getSetting("registration_open", "false") === "true",
+    emailVerification: getSetting("email_verification", "true") === "true",
+  });
 });
 
 adminApi.patch("/settings", (req, res) => {
   if (typeof req.body.registrationOpen === "boolean") setSetting("registration_open", String(req.body.registrationOpen));
+  if (typeof req.body.emailVerification === "boolean") setSetting("email_verification", String(req.body.emailVerification));
   res.json({ ok: true });
 });
 
