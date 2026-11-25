@@ -4,8 +4,11 @@
 import { CaptureUpdateAction, convertToExcalidrawElements, newElementWith } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import { cd, nodeDataOf } from "./nodeData.ts";
+import type { NodeData, ShellRef, WebRef, RemoteRef, Geometry } from "./nodeData.ts";
 import type { TileIcon } from "./personalLibrary.ts";
-import type { RemoteTarget } from "../api.ts";
+export { nodeDataOf };
+export type { NodeData, ShellRef, WebRef, RemoteRef };
 
 export const LINK_BASE = "https://excalibash.local/";
 export const TERMINAL_LINK = `${LINK_BASE}terminal/`;
@@ -15,28 +18,6 @@ export const TERM_W = 760;
 export const TERM_H = 440;
 export const NODE_SIZE = 110;
 const GAP = 40;
-
-/** Last place and size of a window, so it reopens where it was. */
-type Geometry = { x?: number; y?: number; w?: number; h?: number };
-export type ShellRef = Geometry & { terminalId: string };
-export type WebRef = Geometry & { webId: string };
-/** A device reached over Telnet / SSH through an agent: new shells of its icon reopen this target. */
-export type RemoteRef = { machineId: string; target: RemoteTarget };
-/**
- * `machineId`: the agent machine of the icon, remembered so a new shell can open on it even once
- * all its shells are closed. A device (`remote`) keeps its machine in `remote` instead.
- */
-export type NodeData = {
-  node: true;
-  title?: string | null;
-  icon?: TileIcon | null;
-  shells: ShellRef[];
-  webs?: WebRef[];
-  remote?: RemoteRef;
-  machineId?: string;
-  /** Name of that machine, so the icon keeps its label once its last shell is closed. */
-  machineName?: string;
-};
 
 type El = ExcalidrawElement;
 type Api = ExcalidrawImperativeAPI;
@@ -48,48 +29,6 @@ const KINDS = {
 } as const;
 type Kind = keyof typeof KINDS;
 
-const cd = (el: El | null | undefined) => (el?.customData ?? {}) as Record<string, any>;
-
-// Node data comes from the board, which any editor (or an older client) can write: read it through
-// one normalizer, so a malformed value can't crash rendering for everyone (strings stay strings,
-// lists stay lists of well-formed entries).
-const str = (v: unknown) => (typeof v === "string" ? v : undefined);
-const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-const geometry = (r: Record<string, unknown>): Geometry => {
-  const g: Geometry = {};
-  for (const k of ["x", "y", "w", "h"] as const) if (num(r[k]) !== undefined) g[k] = num(r[k]);
-  return g;
-};
-function refs<T extends string>(v: unknown, field: T): (Geometry & Record<T, string>)[] {
-  if (!Array.isArray(v)) return [];
-  return v.filter((r) => r && typeof r === "object" && str(r[field])).map((r) => ({ ...geometry(r), [field]: r[field] }) as Geometry & Record<T, string>);
-}
-const KINDS_OK = ["telnet", "ssh", "raw"];
-function remoteRef(v: any): RemoteRef | undefined {
-  const t = v?.target;
-  if (!str(v?.machineId) || !t || !KINDS_OK.includes(t.kind) || !str(t.host) || !Number.isInteger(t.port)) return undefined;
-  return { machineId: v.machineId, target: { kind: t.kind, host: t.host, port: t.port, ...(str(t.user) !== undefined ? { user: t.user } : {}) } };
-}
-const normalized = new WeakMap<object, NodeData>();
-export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => {
-  const raw = cd(el);
-  if (!raw.node) return undefined;
-  const hit = normalized.get(raw);
-  if (hit) return hit;
-  const icon = raw.icon && Array.isArray(raw.icon.elements) ? (raw.icon as TileIcon) : null;
-  const data: NodeData = {
-    node: true,
-    title: str(raw.title) ?? null,
-    icon,
-    shells: refs(raw.shells, "terminalId"),
-    webs: refs(raw.webs, "webId"),
-    ...(remoteRef(raw.remote) ? { remote: remoteRef(raw.remote) } : {}),
-    ...(str(raw.machineId) ? { machineId: raw.machineId } : {}),
-    ...(str(raw.machineName) ? { machineName: raw.machineName } : {}),
-  };
-  normalized.set(raw, data);
-  return data;
-};
 
 /** The node a window belongs to (undefined for standalone, older terminals). */
 export const windowNodeId = (el: El | null | undefined): string | undefined =>

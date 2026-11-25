@@ -1,0 +1,72 @@
+// Pure cable data (no Excalidraw runtime import): shared by cables.ts, the exports and their tests.
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+
+type El = ExcalidrawElement;
+
+/** One end of a cable: an element, or a whole group (library items are groups). */
+export type Anchor = { id?: string; group?: string; /** A group's members when it was attached: still there if it is ungrouped. */ ids?: string[] };
+/** What sits at one end of a cable: the item's interface, its address and its VLANs (all optional). */
+export type EndInfo = { iface?: string; ip?: string; vlans?: string; /** Label moved by hand (scene units). */ dx?: number; dy?: number };
+/** `a` is the start of the cable (its first point), `b` its end. */
+export type CableData = { a: Anchor; b: Anchor; orphaned?: boolean; ends?: { a?: EndInfo; b?: EndInfo } };
+export type End = "a" | "b";
+
+export const cd = (el: El | null | undefined) => (el?.customData ?? {}) as Record<string, any>;
+// Cable data comes from the board (any editor, older clients): normalized in one place so a
+// malformed value can't crash rendering, and a label offset stays within its radius.
+/** How far a label can be moved from its spot (scene units): it stays by its cable end. */
+export const LABEL_RADIUS = 90;
+const s = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+const anchorData = (v: any): Anchor | undefined => {
+  if (s(v?.group)) {
+    const ids = Array.isArray(v.ids) ? v.ids.filter((i: unknown) => s(i)).slice(0, 500) : [];
+    return ids.length ? { group: v.group, ids } : { group: v.group };
+  }
+  return s(v?.id) ? { id: v.id } : undefined;
+};
+function endData(v: any): EndInfo | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const e: EndInfo = { iface: s(v.iface)?.slice(0, 64), ip: s(v.ip)?.slice(0, 64), vlans: s(v.vlans)?.slice(0, 200) };
+  if (!e.iface && !e.ip && !e.vlans) return undefined;
+  const dx = typeof v.dx === "number" && Number.isFinite(v.dx) ? v.dx : 0;
+  const dy = typeof v.dy === "number" && Number.isFinite(v.dy) ? v.dy : 0;
+  const r = Math.hypot(dx, dy);
+  const k = r > LABEL_RADIUS ? LABEL_RADIUS / r : 1;
+  if (dx || dy) Object.assign(e, { dx: dx * k, dy: dy * k });
+  return e;
+}
+const normalizedCables = new WeakMap<object, CableData>();
+export const cableOf = (el: El | null | undefined): CableData | undefined => {
+  const raw = cd(el).cable;
+  if (!raw || typeof raw !== "object") return undefined;
+  const hit = normalizedCables.get(raw);
+  if (hit) return hit;
+  const a = anchorData(raw.a);
+  const b = anchorData(raw.b);
+  if (!a || !b) return undefined;
+  const ea = endData(raw.ends?.a);
+  const eb = endData(raw.ends?.b);
+  const c: CableData = { a, b, ...(raw.orphaned === true ? { orphaned: true } : {}), ...(ea || eb ? { ends: { a: ea, b: eb } } : {}) };
+  normalizedCables.set(raw, c);
+  return c;
+};
+/** The anchor an element stands for: its outermost group, else itself (a text in a shape: the shape). */
+export function anchorOf(el: El, byId: Map<string, El>): Anchor {
+  const target = el.type === "text" && el.containerId ? (byId.get(el.containerId) ?? el) : el;
+  const group = target.groupIds.at(-1);
+  return group ? { group } : { id: target.id };
+}
+
+/** VLAN list as typed ("10, 20,30-35"): normalized, or null when a part is not a VLAN or range. */
+export function parseVlans(v: string): string | null {
+  const parts = v.split(",").map((s) => s.trim()).filter(Boolean);
+  const ok = (n: string) => /^\d{1,4}$/.test(n) && +n >= 1 && +n <= 4094;
+  for (const part of parts) {
+    const [lo, hi, extra] = part.split("-").map((s) => s.trim());
+    if (extra !== undefined || !ok(lo) || (hi !== undefined && (!ok(hi) || +hi < +lo))) return null;
+  }
+  return parts.map((p) => p.replace(/\s+/g, "")).join(", ");
+}
+
+/** An IPv4 or IPv6 address, with an optional prefix length. */
+export const IP_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?:\/(?:3[0-2]|[12]?\d))?|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(?:%[\w.]+)?(?:\/(?:12[0-8]|1[01]\d|[1-9]?\d))?)$/;

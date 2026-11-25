@@ -14,4 +14,7 @@ trap 'kill $SERVER 2>/dev/null || true; rm -rf "$DATA"' EXIT
 sleep 1.5
 BASE="http://127.0.0.1:$PORT" PROXY="http://127.0.0.1:$PROXY_PORT" DB="$DATA/excalibash.db" npx --yes tsx@4 tests/e2e.mts
 kill $SERVER 2>/dev/null || true
+
+# Export de topologie (fonctions pures, sans serveur).
+node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/topology.test.ts
 TLS_PORT=${TLS_PORT:-6791} TLS_PROXY_PORT=${TLS_PROXY_PORT:-6792} node --disable-warning=ExperimentalWarning tests/tls.mts
