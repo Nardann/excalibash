@@ -91,6 +91,9 @@ export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => {
   return data;
 };
 
+/** A shell or site window (as opposed to a drawing or a node tile). */
+export const isWindow = (el: El | null | undefined): boolean => !!(cd(el).terminalId || cd(el).webId);
+
 /** The node a window belongs to (undefined for standalone, older terminals). */
 export const windowNodeId = (el: El | null | undefined): string | undefined =>
   cd(el).terminalId || cd(el).webId ? cd(el).nodeId : undefined;

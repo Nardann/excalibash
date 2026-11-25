@@ -7,7 +7,7 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { cableEnds, cableOf } from "./cables.ts";
 import { labelRect } from "./CableOverlay.tsx";
-import { nodeDataOf } from "./nodes.ts";
+import { isWindow, nodeDataOf } from "./nodes.ts";
 
 type El = ExcalidrawElement;
 const INK = "#1e293b";
@@ -18,7 +18,6 @@ const MONO = 3;
 const PAD = 24;
 
 const cd = (el: El) => (el.customData ?? {}) as Record<string, any>;
-const isWindow = (el: El) => !!(cd(el).terminalId || cd(el).webId);
 const newId = () => crypto.getRandomValues(new Uint32Array(3)).reduce((s, n) => s + n.toString(36), "x");
 
 /** A library icon scaled into a box: elements cloned, moved and resized, under one group. */

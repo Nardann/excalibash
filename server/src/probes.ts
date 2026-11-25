@@ -22,7 +22,10 @@ export function probeRefusal(machineId: string): string | null {
 /** Forwards one boxed probe; resolves with the boxed answer, or null (offline / timeout). */
 export function relayProbe(machineId: string, rid: string, ts: number, d: string): Promise<string | null> {
   if (pending.has(rid)) return Promise.resolve(null);
-  lastProbe.set(machineId, Date.now());
+  const now = Date.now();
+  // Entries older than the rate window no longer limit anything: prune them opportunistically.
+  for (const [id, at] of lastProbe) if (now - at >= PROBE_INTERVAL) lastProbe.delete(id);
+  lastProbe.set(machineId, now);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(rid);
