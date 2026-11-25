@@ -94,6 +94,14 @@ app.use("/api", (err: any, _req: Request, res: Response, _next: NextFunction) =>
 });
 
 const AGENT_FILE = /^excalibash-agent-(linux|darwin)-(amd64|arm64)$/;
+const MCP_FILE = /^excalibash-mcp\.mjs$/;
+
+/** Directory a downloadable file lives in, by strict filename match (no path traversal possible). */
+function downloadDir(file: string): string | null {
+  if (AGENT_FILE.test(file)) return config.agentDistDir;
+  if (MCP_FILE.test(file)) return config.mcpDistDir;
+  return null;
+}
 
 app.get("/p/:code", (req, res) => {
   res.type("text/x-shellscript").set("Cache-Control", "no-store").send(pairScript(publicUrl(req), String(req.params.code), pinFor(req)));
@@ -113,17 +121,18 @@ app.get("/certificate.pem", (_req, res) => {
 });
 
 app.get("/downloads", (_req, res) => {
-  const files = existsSync(config.agentDistDir) ? readdirSync(config.agentDistDir).filter((f) => AGENT_FILE.test(f)) : [];
-  res.json({ files });
+  const list = (dir: string, re: RegExp) => (existsSync(dir) ? readdirSync(dir).filter((f) => re.test(f)) : []);
+  res.json({ files: [...list(config.agentDistDir, AGENT_FILE), ...list(config.mcpDistDir, MCP_FILE)] });
 });
 
 app.get("/downloads/:file", (req, res) => {
   const file = req.params.file;
-  if (!AGENT_FILE.test(file) || !existsSync(join(config.agentDistDir, file))) {
+  const dir = downloadDir(file);
+  if (!dir || !existsSync(join(dir, file))) {
     res.status(404).send("not found\n");
     return;
   }
-  res.download(join(config.agentDistDir, file));
+  res.download(join(dir, file));
 });
 
 if (existsSync(config.webDir)) {

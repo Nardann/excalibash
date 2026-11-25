@@ -1,9 +1,10 @@
 #!/bin/sh
 # Bout en bout : serveur jetable + agent réel + deux utilisateurs (voir tests/e2e.mts),
 # puis HTTPS par défaut : certificat auto-signé, redirection, épinglage (voir tests/tls.mts).
-# Prérequis : `make -C agent dist`, `npm install` dans server/ et web/.
+# Prérequis : `make -C agent dist` (le client MCP est construit ici), `npm install` dans server/ et web/.
 set -eu
 cd "$(dirname "$0")/.."
+(cd web && npm run build:mcp >/dev/null)
 DATA=$(mktemp -d)
 PORT=${PORT:-6797}
 PROXY_PORT=${PROXY_PORT:-6799}

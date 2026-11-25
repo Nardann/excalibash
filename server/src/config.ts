@@ -16,6 +16,8 @@ export const config = {
   webDir: resolve(process.env.WEB_DIR ?? resolve(root, "web", "dist")),
   /** Cross-compiled agent binaries offered for download. */
   agentDistDir: resolve(process.env.AGENT_DIST_DIR ?? resolve(root, "agent", "dist")),
+  /** Bundled MCP client (excalibash-mcp.mjs) offered for download. */
+  mcpDistDir: resolve(process.env.MCP_DIST_DIR ?? resolve(root, "mcp", "dist")),
   /** Public URL used in agent install commands (falls back to the request's host). */
   publicUrl: process.env.PUBLIC_URL ?? "",
   cookieSecure: process.env.COOKIE_SECURE === "true",
