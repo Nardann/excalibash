@@ -3,6 +3,8 @@ import { db } from "../db.ts";
 import { destroySession, rateLimit, requireUser, verifySecret, getUserRow } from "../auth.ts";
 import { HttpError, blob } from "../http.ts";
 import { purgeUser } from "./admin.ts";
+import { emailEnabled } from "../mailer.ts";
+import { NOTIFY_EVENTS, getPrefs, setPrefs, type NotifyPrefs } from "../notify.ts";
 
 /** The signed-in user's own account: onboarding state, self-service deletion. */
 export const accountApi = Router();
@@ -14,7 +16,21 @@ accountApi.get("/", (req, res) => {
     findable_name: number;
     findable_email: number;
   };
-  res.json({ onboarded: !!row.onboarded, findableName: !!row.findable_name, findableEmail: !!row.findable_email });
+  res.json({
+    onboarded: !!row.onboarded,
+    findableName: !!row.findable_name,
+    findableEmail: !!row.findable_email,
+    notifications: getPrefs(req.user!.id),
+    emailEnabled: emailEnabled(),
+  });
+});
+
+accountApi.put("/notifications", (req, res) => {
+  const body = req.body ?? {};
+  if (!NOTIFY_EVENTS.every((e) => typeof body[e] === "boolean")) throw new HttpError(400, "Valeur invalide");
+  const prefs = Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, body[e]])) as NotifyPrefs;
+  setPrefs(req.user!.id, prefs);
+  res.json(prefs);
 });
 
 accountApi.put("/visibility", (req, res) => {

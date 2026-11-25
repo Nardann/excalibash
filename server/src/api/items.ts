@@ -5,7 +5,8 @@ import { atLeast, getItem, isTrashed, roleOn, subtree, visibleItems, type ItemRo
 import { activeTerminalCount, dropBoardTerminals, dropTerminals, rekeyTerminal, terminalsOfBoards } from "../terminals.ts";
 import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
-import { HttpError, blob, pid } from "../http.ts";
+import { HttpError, blob, pid, publicUrl } from "../http.ts";
+import { kindLabel, notify, usersWithAccess } from "../notify.ts";
 
 export const itemsApi = Router();
 itemsApi.use(requireUser);
@@ -185,14 +186,23 @@ function purge(item: ItemRow) {
 
 itemsApi.delete("/items/:id", (req, res) => {
   const { item, role } = need(req, "editor");
-  if (req.query.permanent === "1") {
+  const permanent = req.query.permanent === "1";
+  if (permanent) {
     if (role !== "owner" || item.owner_id !== req.user!.id) throw new HttpError(403, "Réservé au propriétaire");
     if (!item.deleted_at) throw new HttpError(400, "Mets-le d'abord à la corbeille");
-    purge(item);
-  } else {
+  }
+  // Collected before the purge, which drops the grants.
+  const recipients = usersWithAccess(subtree(item.id).map((i) => i.id));
+  if (permanent) purge(item);
+  else {
     db.prepare("UPDATE items SET deleted_at = ? WHERE id = ?").run(Date.now(), item.id);
     evictBoards(subtree(item.id), 4404, "supprimé");
   }
+  const what = kindLabel(item.kind);
+  const done = permanent ? "supprimé définitivement" : "mis à la corbeille";
+  notify(req, recipients, "itemDeleted", `Excalibash : ${what} a été ${permanent ? "supprimé" : "mis à la corbeille"}`, (self) =>
+    self ? `Tu as ${done} ${what}.` : `${req.user!.name} a ${done} ${what} auquel tu as accès.`,
+  );
   res.json({ ok: true });
 });
 
@@ -253,11 +263,17 @@ itemsApi.put("/items/:id/grants/:userId", (req, res) => {
   if (target.id === uid) throw new HttpError(400, "Tu as déjà accès");
   const role = req.body.role;
   if (role !== "editor" && role !== "viewer") throw new HttpError(400, "Rôle invalide");
+  const isNew = !db.prepare("SELECT 1 FROM grants WHERE item_id = ? AND user_id = ?").get(item.id, target.id);
   db.prepare(
     `INSERT INTO grants (item_id, user_id, role, wrapped_key, granted_by, created_at) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(item_id, user_id) DO UPDATE SET role = excluded.role, wrapped_key = excluded.wrapped_key`,
   ).run(item.id, target.id, role, blob(req.body.wrappedKey, 300), uid, Date.now());
   evictBoards(subtree(item.id), 4410, "droits modifiés");
+  if (isNew) {
+    notify(req, [target.id], "itemShared", `Excalibash : ${req.user!.name} t'a partagé ${kindLabel(item.kind)}`, () =>
+      `${req.user!.name} t'a partagé ${kindLabel(item.kind)} (${role === "editor" ? "modification" : "lecture seule"}). Tu le trouves dans « Partagés avec moi » : ${publicUrl(req)}/shared`,
+    );
+  }
   res.json({ ok: true });
 });
 
@@ -279,6 +295,9 @@ itemsApi.post("/items/:id/transfer", (req, res) => {
     db.prepare("UPDATE grants SET role = 'editor' WHERE item_id = ? AND user_id = ?").run(item.id, uid);
   });
   evictBoards(all, 4410, "droits modifiés");
+  notify(req, [to], "itemTransferred", `Excalibash : ${req.user!.name} t'a donné ${kindLabel(item.kind)}`, () =>
+    `${req.user!.name} t'a donné ${kindLabel(item.kind)} : tu en es maintenant propriétaire. Il est dans « Mes fichiers » : ${publicUrl(req)}/`,
+  );
   res.json({ ok: true });
 });
 
@@ -403,5 +422,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const keptWebs = new Set(rekeyedWebs.map((t: { id: string }) => t.id));
   dropTunnels([...knownWebs.keys()].filter((id) => !keptWebs.has(id)));
   for (const t of rekeyedWebs) rekeyTunnel(t.id, t.keyForBoard, t.keyForAgent, t.encLabel);
+  notify(req, [revoked], "accessRevoked", `Excalibash : ${req.user!.name} t'a retiré un accès`, () =>
+    `${req.user!.name} t'a retiré l'accès à ${kindLabel(item.kind)} partagé avec toi.`,
+  );
   res.json({ ok: true });
 });

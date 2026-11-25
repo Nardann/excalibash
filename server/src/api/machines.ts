@@ -5,6 +5,7 @@ import { requireUser, sha256 } from "../auth.ts";
 import { getMachine, type MachineRow } from "../access.ts";
 import { disconnectMachine, dropMachine, isMachineOnline } from "../terminals.ts";
 import { dropMachineTunnels } from "../tunnels.ts";
+import { probeRefusal, relayProbe } from "../probes.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 
 export const machinesApi = Router();
@@ -68,6 +69,21 @@ machinesApi.post("/:id/token", (req, res) => {
   db.prepare("UPDATE machines SET token_hash = ? WHERE id = ?").run(sha256(token), m.id);
   disconnectMachine(m.id);
   res.json({ token, server: publicUrl(req) });
+});
+
+// Can this machine reach these addresses? The request and the answer are boxed by the owner's
+// browser and the agent (machine auth key): the server sees neither the addresses nor the results.
+machinesApi.post("/:id/probe", (req, res, next) => {
+  const m = own(req);
+  const { rid, ts, d } = req.body ?? {};
+  if (!isClientId(rid) || !Number.isSafeInteger(ts)) throw new HttpError(400, "Requête invalide");
+  const box = blob(d, 8000);
+  const refusal = probeRefusal(m.id);
+  if (refusal === "offline") throw new HttpError(409, "Machine hors ligne");
+  if (refusal) throw new HttpError(429, "Trop de sondes, réessaie dans un instant");
+  relayProbe(m.id, rid, ts, box)
+    .then((answer) => (answer ? res.json({ d: answer }) : res.status(504).json({ error: "La machine ne répond pas" })))
+    .catch(next);
 });
 
 machinesApi.delete("/:id", (req, res) => {

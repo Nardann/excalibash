@@ -77,3 +77,13 @@
     width: 140px;
   }
 }
+.admin-badge-on {
+  background: var(--success);
+  color: #fff;
+}
+.admin-ok {
+  color: var(--success);
+}
+.admin-error {
+  color: var(--danger);
+}

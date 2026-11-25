@@ -259,6 +259,12 @@ export function keepFramesOnMove() {
   parent.appendChild = <T extends Node>(node: T) => move(node, null, () => appendChild(node));
 }
 
+/** Locks a window in place (no move, no resize) or unlocks it; what runs in it is not affected. */
+export function setWindowLocked(api: Api, windowId: string, locked: boolean) {
+  const win = findEl(api, windowId);
+  if (win && !win.isDeleted) commit(api, [newElementWith(win, { locked })]);
+}
+
 /** Hides a window; the shell / tunnel keeps running and the node remembers where it was. */
 export function hideShell(api: Api, windowId: string) {
   const win = findEl(api, windowId);

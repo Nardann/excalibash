@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -21,6 +21,8 @@ import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
+import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
+import { exportDiagram } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -45,6 +47,7 @@ import {
   removeShell,
   removeWeb,
   setNodeLook,
+  setWindowLocked,
   toggleAll,
   toggleShell,
   toggleWeb,
@@ -143,6 +146,11 @@ function Editor({ node }: { node: Node }) {
   const [cableMarks, setCableMarks] = useState<CableMark[]>([]);
   const [cableEdit, setCableEdit] = useState<{ cableId: string; end: End } | null>(null);
   const [cableZoom, setCableZoom] = useState(1);
+  /** Reachability of the IPs at the cable ends, and where each cable's state badge goes. */
+  const [links, setLinks] = useState<LinkStates>({});
+  /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
+  const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
+  const [cableMids, setCableMids] = useState<{ cableId: string; x: number; y: number }[]>([]);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
@@ -304,6 +312,8 @@ function Editor({ node }: { node: Node }) {
     }
     return null;
   };
+  const liveMachineRef = useRef(liveMachineId);
+  liveMachineRef.current = liveMachineId;
   /**
    * The machine a node talks to: its live shells' or sites', else the one it remembers. What it
    * remembers is board data, which any editor can write: a default for forms the user submits,
@@ -453,6 +463,19 @@ function Editor({ node }: { node: Node }) {
       }
       setCableMarks((prev) => (JSON.stringify(prev) === JSON.stringify(marks) ? prev : marks));
       setCableZoom(zoom);
+      // The middle of each cable with an IP at one end: where its live state shows.
+      const mids: { cableId: string; x: number; y: number }[] = [];
+      if (zoom >= 0.35) {
+        for (const e of elements) {
+          const c = !e.isDeleted ? cableOf(e) : undefined;
+          if (!c || !(c.ends?.a?.ip || c.ends?.b?.ip) || !("points" in e)) continue;
+          const pts = e.points;
+          const n = pts.length;
+          const [px, py] = n % 2 ? pts[(n - 1) / 2] : [(pts[n / 2 - 1][0] + pts[n / 2][0]) / 2, (pts[n / 2 - 1][1] + pts[n / 2][1]) / 2];
+          mids.push({ cableId: e.id, x: Math.round((e.x + px + appState.scrollX) * zoom), y: Math.round((e.y + py + appState.scrollY) * zoom) });
+        }
+      }
+      setCableMids((prev) => (JSON.stringify(prev) === JSON.stringify(mids) ? prev : mids));
       // Cables follow their items (and go with them): settled once per frame, and only when the
       // scene (or the pointer, which ends a drag) changed since the last pass.
       let sceneKey = appState.cursorButton === "down" ? 1 : 0;
@@ -563,6 +586,52 @@ function Editor({ node }: { node: Node }) {
     if (toggle && !collapse) activate(x, elementId);
   }, []);
 
+  // Live state of the cables: the IPs at their ends are pinged from the user's own machines at
+  // the other ends (see board/linkStatus.ts), as soon as cables or IPs change, else every 10 s,
+  // and not while the tab is in the background.
+  useEffect(() => {
+    if (!excalidraw) return;
+    let stopped = false;
+    let running = false;
+    let lastKey = "";
+    let lastRun = 0;
+    let machines: Machine[] | null = null;
+    let machinesAt = 0;
+    const tick = async () => {
+      if (stopped || running || document.visibilityState === "hidden") return;
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      const plan = planProbes(excalidraw, (id) => liveMachineRef.current(id), inUse);
+      const key = planKey(plan);
+      if (!plan.size) {
+        if (lastKey) setLinks({});
+        lastKey = "";
+        return;
+      }
+      if (key === lastKey && Date.now() - lastRun < 10_000) return;
+      running = true;
+      try {
+        if (!machines || Date.now() - machinesAt > 60_000) {
+          machines = await listMachines(keys);
+          machinesAt = Date.now();
+        }
+        const states = await runProbes(plan, machines);
+        if (!stopped) setLinks((prev) => (JSON.stringify(prev) === JSON.stringify(states) ? prev : states));
+        lastKey = key;
+        lastRun = Date.now();
+      } catch {
+        // Machines unavailable: try again on the next tick.
+      } finally {
+        running = false;
+      }
+    };
+    const timer = setInterval(tick, 2000);
+    void tick();
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [excalidraw, keys, session]);
+
   // A click in a terminal's shell area (below its title bar) opens it for typing right away:
   // without this, Excalidraw only selects the window and wants a second click to activate it.
   // The title bar keeps selecting and moving the window.
@@ -579,7 +648,9 @@ function Editor({ node }: { node: Node }) {
         .reverse()
         .find((el) => el.type === "embeddable" && sx >= el.x && sx <= el.x + el.width && sy >= el.y && sy <= el.y + el.height);
       if (!hit || !terminalIdOf(hit) || nodeDataOf(hit) || (hit.customData as TileData | undefined)?.collapsed) return;
-      if (sy <= hit.y + TERM_HEAD) return;
+      // The title bar selects and moves the window, except when it is locked: then any click
+      // opens the shell (and its title bar buttons), since the window can't be selected.
+      if (sy <= hit.y + TERM_HEAD && !hit.locked) return;
       if (st.activeEmbeddable?.element.id === hit.id && st.activeEmbeddable.state === "active") return;
       e.preventDefault();
       e.stopPropagation();
@@ -675,6 +746,8 @@ function Editor({ node }: { node: Node }) {
             title={owner?.title?.split("\n")[0] ?? null}
             onToggleCollapsed={editor ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
             toggleTitle="Masquer (le shell continue, l'icône reste sur le schéma)"
+            locked={element.locked}
+            onToggleLock={editor ? () => setWindowLocked(excalidrawRef.current!, element.id, !element.locked) : undefined}
             onKill={() => {
               session.closeTerminal(tid);
               if (excalidrawRef.current) removeShell(excalidrawRef.current, nodeId, tid, shellMachineName(tid));
@@ -749,6 +822,9 @@ function Editor({ node }: { node: Node }) {
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
+        <button className="btn btn-icon btn-sm" title="Exporter le schéma en image (avec les interfaces, IP et VLAN des câbles)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
+          <Download size={16} />
+        </button>
         {node.ownerId === user.id && (
           <button className="btn btn-sm" onClick={() => setSharing(true)}>
             <Share2 size={16} /> Partager
@@ -819,6 +895,8 @@ function Editor({ node }: { node: Node }) {
           editable={editor}
           onEdit={(m) => setCableEdit({ cableId: m.cableId, end: m.end })}
           onMoveLabel={(m, dx, dy) => excalidrawRef.current && m.info && setCableEnd(excalidrawRef.current, m.cableId, m.end, { ...m.info, dx, dy })}
+          links={links}
+          mids={cableMids}
         />
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>
@@ -1039,6 +1117,30 @@ function Editor({ node }: { node: Node }) {
             />
           );
         })()}
+      {exportMenu && (
+        <Menu anchor={exportMenu} onClose={() => setExportMenu(null)} align="right">
+          <div className="menu-label">Exporter le schéma</div>
+          {(["png", "svg"] as const).map((kind) => (
+            <button
+              key={kind}
+              className="menu-item"
+              onClick={() => {
+                setExportMenu(null);
+                const x = excalidrawRef.current;
+                if (!x) return;
+                const nameOf = (id: string) => {
+                  const nd = nodeDataOf(findEl(x, id));
+                  const shell = nd?.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label;
+                  return nd?.title?.split("\n")[0] || nd?.machineName || shell || "Machine";
+                };
+                exportDiagram(x, kind, node.name, nameOf).catch(toast.error);
+              }}
+            >
+              <Download size={16} /> {kind === "png" ? "Image PNG" : "Image SVG (vectorielle)"}
+            </button>
+          ))}
+        </Menu>
+      )}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>
   );
