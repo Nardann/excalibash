@@ -1,5 +1,6 @@
 import { db } from "./db.ts";
 import { agentHooks, isMachineOnline, sendAgent } from "./terminals.ts";
+import type { WebSocket } from "ws";
 import { broadcastToBoard } from "./hub.ts";
 
 // Web tunnels relay end-to-end encrypted HTTP between a viewer's browser (service worker on the
@@ -75,6 +76,7 @@ export function dropTunnels(ids: Iterable<string>): void {
     const t = tunnels.get(id);
     if (!t) continue;
     sendAgent(t.machineId, { t: "web.close", id });
+    closeLinks((l) => l.tunnelId === id, 1001);
     tunnels.delete(id);
     db.prepare("DELETE FROM tunnels WHERE id = ?").run(id);
     broadcastToBoard(t.boardId, { t: "web.gone", id });
@@ -93,6 +95,7 @@ export function dropMachineTunnels(machineId: string): void {
 export function rekeyTunnel(id: string, keyForBoard: string, keyForAgent: string, encLabel: string): void {
   const t = tunnels.get(id);
   if (!t) return;
+  closeLinks((l) => l.tunnelId === id, 1001); // sockets opened with the old key are cut
   Object.assign(t, { keyForBoard, keyForAgent, encLabel });
   db.prepare("UPDATE tunnels SET key_for_board = ?, key_for_agent = ?, enc_label = ? WHERE id = ?").run(keyForBoard, keyForAgent, encLabel, id);
   openOnAgent(t);
@@ -137,3 +140,93 @@ agentHooks.hello.push((machineId) => {
   for (const t of tunnels.values()) if (t.machineId === machineId) openOnAgent(t);
   for (const t of tunnels.values()) if (t.machineId === machineId) broadcastToBoard(t.boardId, { t: "web", web: info(t) });
 });
+
+// ---- WebSockets ----------------------------------------------------------------
+//
+// One browser socket per tunnelled-site socket. The server only pairs it with the agent and
+// forwards sealed frames ({sid, ts, d}); it cannot read, alter, replay or reorder messages (each
+// carries a counter in its AAD), only drop the whole socket.
+
+type Link = { tunnelId: string; sid: string; machineId: string; ws: WebSocket };
+const links = new Map<string, Link>(); // `${tunnelId}/${sid}`
+const MAX_LINKS_PER_TUNNEL = 64;
+const MAX_BUFFERED = 32 * 1024 * 1024;
+const SID = /^[A-Za-z0-9_-]{16,64}$/;
+
+function closeLinks(match: (l: Link) => boolean, code: number): void {
+  for (const [k, l] of links) {
+    if (!match(l)) continue;
+    links.delete(k);
+    l.ws.close(code);
+  }
+}
+
+/** Speaks the browser side of a tunnelled WebSocket (shim on the proxy origin). */
+export function attachTunnelSocket(ws: WebSocket, tunnelId: string): void {
+  let link: Link | undefined;
+  const fail = (code: number) => ws.close(code);
+
+  ws.on("message", (raw, isBinary) => {
+    if (isBinary) return fail(1003);
+    let msg: any;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return fail(1007);
+    }
+    const t = tunnels.get(tunnelId);
+    if (!t) return fail(1001);
+    if (!link) {
+      if (msg?.t !== "open" || typeof msg.sid !== "string" || !SID.test(msg.sid) || !Number.isSafeInteger(msg.ts) || typeof msg.d !== "string") return fail(1008);
+      const key = `${tunnelId}/${msg.sid}`;
+      let n = 0;
+      for (const l of links.values()) if (l.tunnelId === tunnelId) n++;
+      if (links.has(key) || n >= MAX_LINKS_PER_TUNNEL) return fail(1013);
+      const l: Link = { tunnelId, sid: msg.sid, machineId: t.machineId, ws };
+      if (!sendAgent(t.machineId, { t: "ws.open", id: tunnelId, sid: msg.sid, ts: msg.ts, d: msg.d })) return fail(1013);
+      links.set(key, l);
+      link = l;
+      return;
+    }
+    if (msg?.t === "data" && typeof msg.d === "string") {
+      if (!sendAgent(link.machineId, { t: "ws.data", id: tunnelId, sid: link.sid, d: msg.d })) fail(1013);
+    } else if (msg?.t === "close") {
+      sendAgent(link.machineId, { t: "ws.close", id: tunnelId, sid: link.sid, d: typeof msg.d === "string" ? msg.d : undefined });
+    } else {
+      fail(1008);
+    }
+  });
+
+  ws.on("close", () => {
+    if (!link) return;
+    const key = `${tunnelId}/${link.sid}`;
+    if (links.get(key) !== link) return;
+    links.delete(key);
+    sendAgent(link.machineId, { t: "ws.close", id: tunnelId, sid: link.sid });
+  });
+  ws.on("error", () => ws.terminate());
+}
+
+agentHooks.message.push((machineId, msg) => {
+  if (msg.t !== "ws.ack" && msg.t !== "ws.data" && msg.t !== "ws.close") return;
+  if (typeof msg.id !== "string" || typeof msg.sid !== "string") return;
+  const key = `${msg.id}/${msg.sid}`;
+  const l = links.get(key);
+  if (!l || l.machineId !== machineId) return;
+  if (l.ws.bufferedAmount > MAX_BUFFERED) {
+    // The browser does not keep up: cut the socket rather than buffering without bound.
+    links.delete(key);
+    l.ws.terminate();
+    sendAgent(machineId, { t: "ws.close", id: msg.id, sid: msg.sid });
+    return;
+  }
+  const d = typeof msg.d === "string" ? msg.d : undefined;
+  const type = msg.t.slice(3); // ack | data | close
+  l.ws.send(JSON.stringify({ t: type, d }));
+  if (msg.t === "ws.close") {
+    links.delete(key);
+    l.ws.close(1000);
+  }
+});
+
+agentHooks.disconnect.push((machineId) => closeLinks((l) => l.machineId === machineId, 1012));

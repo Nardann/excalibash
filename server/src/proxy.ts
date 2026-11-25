@@ -3,7 +3,10 @@ import { join } from "node:path";
 import express, { type Request } from "express";
 import { config } from "./config.ts";
 import { rateLimit } from "./auth.ts";
-import { relay, tunnelExists } from "./tunnels.ts";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+import { WebSocketServer } from "ws";
+import { attachTunnelSocket, relay, tunnelExists } from "./tunnels.ts";
 import { certificatePem, serve, type Listener } from "./tls.ts";
 
 // Second origin for web tunnels. Tunnelled sites run here, isolated from Excalibash's own origin
@@ -27,6 +30,7 @@ export function proxyUrl(req: Request): string {
 const asset = (name: string) => readFileSync(join(import.meta.dirname, "proxy", name), "utf8");
 const SW = asset("sw.js");
 const BOOT = asset("boot.js");
+const WS_SHIM = asset("ws-shim.js");
 
 const bootHtml = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -48,6 +52,12 @@ app.get("/eb-proxy/sw.js", (req, res) => {
 app.get("/eb-proxy/boot.js", (req, res) => {
   const cert = certificatePem() ? `${mainOrigin(req)}/certificate.pem` : "";
   res.type("application/javascript").set("Cache-Control", "no-cache").send(BOOT.replace("__MAIN_ORIGIN__", mainOrigin(req)).replace("__CERT_URL__", cert));
+});
+
+// Replaces WebSocket in tunnelled pages (the service worker adds the script tag): the sockets then
+// travel sealed through the agent instead of reaching this origin directly.
+app.get("/eb-proxy/ws-shim.js", (_req, res) => {
+  res.type("application/javascript").set({ "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" }).send(WS_SHIM);
 });
 
 /** Rejects unknown tunnels and floods before reading the body: this origin has no authentication. */
@@ -91,6 +101,39 @@ app.get(/.*/, (req, res) => {
     .send(bootHtml);
 });
 
+// Browser-side sockets of tunnelled sites. Like the HTTP relay this origin has no session: the
+// tunnel id only routes the socket, and the agent drops anything not sealed with the tunnel key.
+const socketWss = new WebSocketServer({ noServer: true, maxPayload: 24 * 1024 * 1024 });
+
+const LOCAL_PEER = /^(::1$|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|f[cd]|fe80|::ffff:(127|10|192\.168)\.)/i;
+
+/** Address of the viewer; X-Forwarded-For counts only when a local reverse proxy relays it. */
+function clientIp(req: IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? "?";
+  const fwd = req.headers["x-forwarded-for"];
+  if (config.trustProxy !== "false" && LOCAL_PEER.test(peer) && typeof fwd === "string") return fwd.split(",")[0]!.trim() || peer;
+  return peer;
+}
+
+function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  const reject = (code: number, text: string): void => {
+    socket.end(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\n\r\n`);
+  };
+  const m = new URL(req.url ?? "/", "http://x").pathname.match(/^\/eb-proxy\/ws\/([^/]+)$/);
+  if (!m || !ID.test(m[1]!)) return reject(404, "Not Found");
+  // Only pages of this very origin (the shim) may open one; a foreign page has no key anyway.
+  const origin = req.headers.origin;
+  try {
+    if (origin && new URL(origin).host !== req.headers.host) return reject(403, "Forbidden");
+  } catch {
+    return reject(403, "Forbidden");
+  }
+  if (!rateLimit(`proxyws:${clientIp(req)}`, 600)) return reject(429, "Too Many Requests");
+  const id = m[1]!;
+  if (!tunnelExists(id)) return reject(404, "Not Found");
+  socketWss.handleUpgrade(req, socket, head, (ws) => attachTunnelSocket(ws, id));
+}
+
 export function startProxy(): Listener {
-  return serve(app, config.proxyPort, "Tunnels web (origine séparée)");
+  return serve(app, config.proxyPort, "Tunnels web (origine séparée)", upgrade);
 }

@@ -46,6 +46,7 @@ type message struct {
 	Version  string          `json:"version,omitempty"`
 	Sessions []string        `json:"sessions,omitempty"`
 	Rid      string          `json:"rid,omitempty"`
+	Sid      string          `json:"sid,omitempty"`
 }
 
 // outbox serialises writes to one connection through a single writer goroutine.
@@ -202,5 +203,11 @@ func handle(msg message, mgr *manager, out *outbox) {
 		go mgr.web.request(msg, out)
 	case "probe":
 		go mgr.probe.handle(msg, out)
+	case "ws.open":
+		go mgr.web.wsOpen(msg, out)
+	case "ws.data":
+		mgr.web.wsData(msg)
+	case "ws.close":
+		mgr.web.wsClose(msg)
 	}
 }

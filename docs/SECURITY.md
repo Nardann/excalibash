@@ -205,6 +205,21 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 - Un Service Worker de cette origine chiffre chaque requête : `box(K_w, {m, p, h, b}, "eb:http-req:<id>:<rid>:<ts>")`.
   L'agent rejette les horodatages à plus de 5 min et les `rid` déjà vus, déchiffre, appelle la cible et renvoie
   `box(K_w, {s, h, b}, "eb:http-res:<id>:<rid>")`. Le serveur ne relaie que des chiffrés.
+- **WebSocket** : le Service Worker ne voit pas les connexions WebSocket, donc il ajoute aux pages HTML du site un script
+  (`/eb-proxy/ws-shim.js`) qui remplace `WebSocket` pour les adresses du site (l'origine proxy ou la cible). Chaque socket du
+  site ouvre une socket vers `/eb-proxy/ws/<id>` sur l'origine proxy, que le serveur apparie à l'agent sans la lire :
+  - ouverture : `box(K_w, {p, protos, cookie}, "eb:ws-open:<id>:<sid>:<ts>")`, avec les mêmes contrôles que pour une requête
+    (horodatage à moins de 5 min, `sid` jamais vu). L'agent ouvre la socket vers la **cible scellée** ; l'`Origin` est celle de
+    la cible et l'en-tête Host du navigateur est ignoré. La réponse est `box(K_w, {ok, proto}, "eb:ws-ack:<id>:<sid>")` ;
+  - messages : `box(K_w, type ‖ données, "eb:ws-msg:<id>:<sid>:<c2a|a2c>:<n>")`, avec un compteur par sens. Le serveur ne peut
+    ni rejouer, ni réordonner, ni supprimer, ni injecter un message : le premier écart ferme la socket ;
+  - fermeture : scellée aussi (`eb:ws-close:…`, avec le dernier compteur) et porte le code du site. Une fermeture sans
+    authentification (serveur, réseau, erreur d'intégrité) apparaît comme une fermeture anormale (1006) ;
+  - limites : 32 sockets par tunnel côté agent, 256 au total, 64 par tunnel côté serveur, messages de 16 Mo au plus. Fermer,
+    renouveler la clé d'un tunnel ou perdre la machine coupe ses sockets ;
+  - le serveur voit les tailles et les moments des messages, pas leur contenu ni la cible. Les sockets vers d'autres hôtes
+    que le site ne passent pas par le tunnel. Une page dont la CSP interdit le script du shim garde les WebSocket natives, qui
+    échouent. Les WebSocket ouvertes depuis un Worker ne sont pas prises en charge.
 - Options avancées, scellées avec la cible : `hostHeader` (en-tête Host et nom SNI envoyés à la cible, pour les
   hôtes virtuels) et `legacyTls` (TLS 1.0/1.1 et suites anciennes, pour les interfaces web de vieux équipements).
   L'en-tête Host envoyé par le navigateur est toujours ignoré.
@@ -213,7 +228,7 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   l'onglet Excalibash, et l'onglet plein écran perd `window.opener`.
 - La révocation renouvelle aussi les clés des tunnels qui passent par les machines du propriétaire.
 - Limites actuelles :
-  - pas de WebSocket ni de streaming dans le site tunnelisé (les réponses font au plus 48 Mo) ;
+  - pas de streaming dans le site tunnelisé (les réponses HTTP font au plus 48 Mo, d'où pas de SSE ; les WebSocket, elles, passent) ;
   - les sites ouverts partagent l'origine proxy entre eux, mais pas avec Excalibash (voir les
     risques résiduels) ;
   - l'origine proxy n'a pas de session : une requête vers un tunnel inconnu est refusée avant que

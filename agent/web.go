@@ -86,10 +86,11 @@ type webHub struct {
 	// lastPrune is when nonces was last scanned for expired entries.
 	lastPrune time.Time
 	inflight  chan struct{}
+	socks     map[string]*wsSock // tunnel id + "/" + socket id
 }
 
 func newWebHub(auth []byte) *webHub {
-	return &webHub{auth: auth, tunnels: map[string]*tunnel{}, nonces: map[string]time.Time{}, inflight: make(chan struct{}, maxInflight)}
+	return &webHub{auth: auth, tunnels: map[string]*tunnel{}, nonces: map[string]time.Time{}, inflight: make(chan struct{}, maxInflight), socks: map[string]*wsSock{}}
 }
 
 // open installs a tunnel from its owner-issued blob:
@@ -128,6 +129,8 @@ func (w *webHub) open(msg message) {
 		IdleConnTimeout:     30 * time.Second,
 		MaxIdleConnsPerHost: 4,
 	}
+	// A new key (rotation) or a re-announcement ends the sockets opened with the old one.
+	w.closeSockets(msg.ID)
 	w.mu.Lock()
 	old := w.tunnels[msg.ID]
 	w.tunnels[msg.ID] = t
@@ -139,6 +142,7 @@ func (w *webHub) open(msg message) {
 }
 
 func (w *webHub) close(id string) {
+	w.closeSockets(id)
 	w.mu.Lock()
 	old := w.tunnels[id]
 	delete(w.tunnels, id)

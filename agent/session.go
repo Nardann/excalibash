@@ -167,10 +167,14 @@ func (m *manager) attach(out *outbox) {
 
 func (m *manager) detach(out *outbox) {
 	m.mu.Lock()
-	if m.out == out {
+	detached := m.out == out
+	if detached {
 		m.out = nil
 	}
 	m.mu.Unlock()
+	if detached {
+		m.web.closeSockets("")
+	}
 }
 
 // ids lists sessions the server should know about (alive or with an unreported exit).
