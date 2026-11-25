@@ -41,7 +41,8 @@ export type Listing = { cwd: string; entries: Entry[]; truncated: boolean };
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 const sha256 = async (data: BufferSource) => hex(await crypto.subtle.digest("SHA-256", data));
 
-export type Signal = { aborted: boolean };
+/** `aborted` cancels a transfer; `stop` ends a capture early and keeps what was captured. */
+export type Signal = { aborted: boolean; stop?: boolean };
 
 /** The file operations of one local shell. */
 export class FileClient {
@@ -146,7 +147,14 @@ export class FileClient {
         timer = setTimeout(() => finish(() => reject(new FileError("La machine ne répond plus")), true), REPLY_TIMEOUT);
       };
       arm();
-      poll = setInterval(() => o.signal?.aborted && finish(() => reject(new FileError("Transfert annulé")), true), 200);
+      let stopSent = false;
+      poll = setInterval(() => {
+        if (o.signal?.aborted) finish(() => reject(new FileError("Transfert annulé")), true);
+        else if (o.signal?.stop && !stopSent) {
+          stopSent = true;
+          this.session.fileRequest(this.term, { op: "stop", xfer }).catch(() => {});
+        }
+      }, 200);
       this.session
         .fileRequest(
           this.term,

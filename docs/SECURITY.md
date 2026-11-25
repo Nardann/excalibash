@@ -322,6 +322,14 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   shell (lu dans `/proc/<pid>/cwd` sous Linux ; sous macOS, faute de mieux, le dossier personnel du compte).
 - **Téléchargement** : fichiers ordinaires seulement (ni dossier, ni périphérique, ni tube).
 
+- **Capture** : l'agent lance `tcpdump -i <interface> -U -n -s 0 -w - -- <filtre>` directement, jamais via un shell.
+  L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
+  `[A-Za-z0-9._:/!()&|<>=-]{1,64}` dont aucun ne commence par `-` (aucune option ne peut être injectée). Durée de 1 à
+  300 s, taille de 50 Mio au plus ; le groupe de processus est arrêté à la fin, à l'annulation ou à l'abandon. Il faut
+  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'erreur de tcpdump est renvoyée.
+  « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
+  l'extrémité d'un câble dont l'interface est renseignée, sur une icône qui a un shell local en cours.
+
 ## Client MCP
 
 Le client MCP (`excalibash-mcp.mjs`, voir [MCP.md](MCP.md)) est un programme local qui ouvre une session

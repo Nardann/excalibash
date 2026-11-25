@@ -117,8 +117,11 @@ function boardSocket(u: U, boardId: string) {
   });
   const next = (pred: (m: any) => boolean, ms = 6000) =>
     new Promise<any>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("timeout waiting for message")), ms);
+      let expired = false;
+      // A timed-out wait must not stay registered: it would swallow a later message meant for another wait.
+      const t = setTimeout(() => ((expired = true), reject(new Error("timeout waiting for message"))), ms);
       const check = () => {
+        if (expired) return true;
         const i = queue.findIndex(pred);
         if (i >= 0) {
           clearTimeout(t);

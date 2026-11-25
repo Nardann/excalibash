@@ -2230,3 +2230,25 @@ html.dark .term.broadcasting {
   padding: 8px;
   color: #94a3b8;
 }
+
+.capture-box {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 8px;
+}
+.capture-box legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.capture-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.capture-row .field {
+  flex: 1;
+}

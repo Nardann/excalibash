@@ -101,6 +101,8 @@ type xfer struct {
 	jobs   chan fileJob // put only: ordered operations
 	acked  atomic.Int64
 	credit chan struct{}
+	// stop ends a capture gracefully (the file so far is delivered); set once the capture runs.
+	stop atomic.Pointer[context.CancelFunc]
 }
 
 type fileJob struct {
@@ -158,6 +160,12 @@ func (h *fileHub) handle(msg message, out *outbox) {
 			default:
 			}
 		}
+	case "stop":
+		if x := h.find(msg.ID, op.Xfer); x != nil {
+			if f := x.stop.Load(); f != nil {
+				(*f)()
+			}
+		}
 	case "cancel":
 		if x := h.find(msg.ID, op.Xfer); x != nil {
 			x.cancel()
@@ -190,6 +198,13 @@ func (h *fileHub) handle(msg message, out *outbox) {
 			return
 		}
 		go h.get(x, c, op)
+	case "capture":
+		x, text := h.register(msg.ID, op.Xfer, msg.Rid, false)
+		if x == nil {
+			fail(text)
+			return
+		}
+		go h.capture(x, op)
 	default:
 		fail("opération inconnue")
 	}

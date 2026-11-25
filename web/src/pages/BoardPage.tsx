@@ -19,6 +19,7 @@ import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
+import { FileClient } from "../board/fileTransfer.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
 import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
@@ -1156,6 +1157,11 @@ function Editor({ node }: { node: Node }) {
             <CableEndForm
               info={c.ends?.[cableEdit.end]}
               itemName={itemName}
+              capture={(() => {
+                // A capture runs through a running local shell of the item, for editors.
+                const sh = session.canEdit && nd ? nd.shells.find((r) => { const t = session.terminals.get(r.terminalId); return t?.status === "running" && !isRemoteLabel(t.label); }) : undefined;
+                return sh ? new FileClient(session, sh.terminalId) : null;
+              })()}
               onClose={() => setCableEdit(null)}
               onSave={(info) => {
                 // Keep where the label was moved to (an empty info clears everything).
