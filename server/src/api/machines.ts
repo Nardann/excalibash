@@ -7,6 +7,7 @@ import { disconnectMachine, dropMachine, isMachineOnline } from "../terminals.ts
 import { dropMachineTunnels } from "../tunnels.ts";
 import { probeRefusal, relayProbe } from "../probes.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
+import { pinFor } from "../tls.ts";
 
 export const machinesApi = Router();
 machinesApi.use(requireUser);
@@ -91,5 +92,8 @@ machinesApi.delete("/:id", (req, res) => {
   dropMachine(m.id);
   dropMachineTunnels(m.id);
   db.prepare("DELETE FROM machines WHERE id = ?").run(m.id);
-  res.json({ ok: true });
+  // The command that removes the agent from the machine itself (pinned like the install ones).
+  const pin = pinFor(req);
+  const curl = pin ? `curl -k --pinnedpubkey '${pin}' -fsSL` : "curl -fsSL";
+  res.json({ ok: true, uninstall: `${curl} ${publicUrl(req)}/uninstall.sh | sh` });
 });

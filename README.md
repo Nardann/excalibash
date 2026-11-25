@@ -135,6 +135,14 @@ L'agent est ensuite installé pour démarrer avec la machine : service système 
 
 **Par copier-coller** donne une commande complète, avec une clé générée dans le navigateur.
 
+Supprimer une machine dans **Machines** la déconnecte, et le serveur refuse ensuite son agent. Excalibash donne alors la commande qui retire l'agent de la machine elle-même (service de démarrage, programme, configuration et clés) :
+
+```bash
+curl -fsSL https://excalibash.example.com/uninstall.sh | sh
+```
+
+Pour un agent installé en root (service système), la lancer avec `sudo sh`.
+
 ## Sécurité
 
 Le modèle de chiffrement, ce que le serveur voit et ses limites sont décrits dans [docs/SECURITY.md](docs/SECURITY.md). En bref :

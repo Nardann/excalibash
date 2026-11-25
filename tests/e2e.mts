@@ -595,6 +595,12 @@ site.close();
   ok((await termOutput(sp, pk, pt, "PAIRED_25")).includes("PAIRED_25"), "un shell s'ouvre sur la machine appairée");
   paired.kill();
   sp.ws.close();
+  // Removing the machine hands back the command that removes its agent from the machine itself.
+  ok((await as(bob, () => api("DELETE", `/machines/${pm!.id}`))).status === 404, "Bob ne peut pas supprimer la machine d'Alice");
+  const del = await as(alice, () => api("DELETE", `/machines/${pm!.id}`));
+  ok(del.status === 200 && /^curl .*\/uninstall\.sh \| sh$/.test(del.body.uninstall ?? ""), "suppression d'une machine : commande de désinstallation de l'agent fournie");
+  const script = await (await realFetch(`${BASE}/uninstall.sh`)).text();
+  ok(script.startsWith("#!/bin/sh") && script.includes(".config/excalibash") && script.includes("systemctl --user disable"), "/uninstall.sh retire le service, le programme et la configuration");
 }
 
 // Unauthenticated hardening.

@@ -14,7 +14,7 @@ import { adminApi } from "./api/admin.ts";
 import { getItem, isTrashed, roleOn } from "./access.ts";
 import { joinBoard, flushAllRooms } from "./rooms.ts";
 import { authenticateAgent, handleAgent } from "./terminals.ts";
-import { installScript } from "./install.ts";
+import { installScript, uninstallScript } from "./install.ts";
 import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
 import { accountApi } from "./api/account.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
@@ -97,6 +97,10 @@ const AGENT_FILE = /^excalibash-agent-(linux|darwin)-(amd64|arm64)$/;
 
 app.get("/p/:code", (req, res) => {
   res.type("text/x-shellscript").set("Cache-Control", "no-store").send(pairScript(publicUrl(req), String(req.params.code), pinFor(req)));
+});
+
+app.get("/uninstall.sh", (_req, res) => {
+  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(uninstallScript());
 });
 
 app.get("/install.sh", (req, res) => {
