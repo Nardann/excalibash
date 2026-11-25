@@ -52,6 +52,7 @@ jobs:
           npm ci
           npx tsc --noEmit -p .
           npm run build
+          npm run build:mcp
 
       - name: Bout en bout
         run: ./tests/run.sh

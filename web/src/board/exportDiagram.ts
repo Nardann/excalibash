@@ -3,11 +3,12 @@
 // machine icons become their library icon (or a rounded box) with their name, shell and site
 // windows are left out, and the interface / IP / VLAN labels of the cables become real text.
 import { convertToExcalidrawElements, exportToBlob, exportToSvg, restoreElements } from "@excalidraw/excalidraw";
+import { extractTopology, toContainerlab, toJSON, toMermaid } from "./topology.ts";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { cableEnds, cableOf } from "./cables.ts";
 import { labelRect } from "./CableOverlay.tsx";
-import { nodeDataOf } from "./nodes.ts";
+import { isWindow, nodeDataOf } from "./nodes.ts";
 
 type El = ExcalidrawElement;
 const INK = "#1e293b";
@@ -18,7 +19,6 @@ const MONO = 3;
 const PAD = 24;
 
 const cd = (el: El) => (el.customData ?? {}) as Record<string, any>;
-const isWindow = (el: El) => !!(cd(el).terminalId || cd(el).webId);
 const newId = () => crypto.getRandomValues(new Uint32Array(3)).reduce((s, n) => s + n.toString(36), "x");
 
 /** A library icon scaled into a box: elements cloned, moved and resized, under one group. */
@@ -160,4 +160,21 @@ export async function exportDiagram(x: ExcalidrawImperativeAPI, kind: "png" | "s
     const blob = await exportToBlob({ elements, appState, files, exportPadding: PAD, mimeType: "image/png" });
     save(blob, fileName(boardName, "png"));
   }
+}
+
+export type TopologyFormat = "containerlab" | "mermaid" | "json";
+const TOPOLOGY_FILES: Record<TopologyFormat, { ext: string; type: string }> = {
+  containerlab: { ext: "clab.yml", type: "application/yaml" },
+  mermaid: { ext: "mmd", type: "text/plain" },
+  json: { ext: "json", type: "application/json" },
+};
+
+/** Downloads the cables of the diagram as a topology file; returns the warnings to show. */
+export function exportTopology(x: ExcalidrawImperativeAPI, format: TopologyFormat, boardName: string, nameOf: (nodeId: string) => string): string[] {
+  const topo = extractTopology(x.getSceneElements(), nameOf);
+  if (!topo.nodes.length) throw new Error("Le tableau est vide");
+  const text = format === "containerlab" ? toContainerlab(topo, boardName) : format === "mermaid" ? toMermaid(topo) : toJSON(topo);
+  const f = TOPOLOGY_FILES[format];
+  save(new Blob([text], { type: `${f.type};charset=utf-8` }), fileName(boardName, f.ext));
+  return topo.warnings;
 }

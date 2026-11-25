@@ -81,6 +81,8 @@ export class BoardSession {
   /** Replays we asked for: anything else is ignored (it would reset the replay protection). */
   private awaitingReplay = new Set<string>();
   /** Resolvers waiting for a terminal's current gen, which keystrokes are bound to. */
+  /** Files being encrypted/sent, so concurrent changes don't send them twice. */
+  private pendingFiles = new Set<string>();
   private genWaiters = new Map<string, (() => void)[]>();
   private pendingCreates = new Map<string, { resolve: (t: TerminalInfo) => void; reject: (e: Error) => void }>();
   /** Input frames: sender id + strictly increasing counter, checked by the agent. */
@@ -342,13 +344,21 @@ export class BoardSession {
   handleChange(elements: readonly OrderedExcalidrawElement[], files: BinaryFiles) {
     if (this.state !== "online" || !this.canEdit) return;
     if (elements.some((e) => (this.syncedVersions.get(e.id) ?? -1) < e.version)) this.queueSend();
-    const newFiles = Object.keys(files).filter((id) => !this.syncedFiles.has(id));
+    const newFiles = Object.keys(files).filter((id) => !this.syncedFiles.has(id) && !this.pendingFiles.has(id));
     if (newFiles.length) {
-      for (const id of newFiles) this.syncedFiles.add(id);
+      for (const id of newFiles) this.pendingFiles.add(id);
+      // Mark as synced only once encrypted and sent, so a failure is retried on the next change.
       void (async () => {
-        const out: Record<string, string> = {};
-        for (const id of newFiles) out[id] = await encryptFile(this.key, this.boardId, id, files[id]);
-        this.send({ t: "files", epoch: this.epoch, files: out });
+        try {
+          const out: Record<string, string> = {};
+          for (const id of newFiles) out[id] = await encryptFile(this.key, this.boardId, id, files[id]);
+          if (this.send({ t: "files", epoch: this.epoch, files: out }) === false) return;
+          for (const id of newFiles) this.syncedFiles.add(id);
+        } catch (e) {
+          console.error("[excalibash]", e);
+        } finally {
+          for (const id of newFiles) this.pendingFiles.delete(id);
+        }
       })();
     }
   }
@@ -572,9 +582,22 @@ export class BoardSession {
     if (known) return known;
     await new Promise<void>((resolve) => {
       const list = this.genWaiters.get(id) ?? [];
-      list.push(resolve);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        // Timed out: drop our waiter so the list doesn't grow.
+        const cur = this.genWaiters.get(id);
+        if (cur) {
+          const rest = cur.filter((w) => w !== done);
+          if (rest.length) this.genWaiters.set(id, rest);
+          else this.genWaiters.delete(id);
+        }
+        resolve();
+      }, 5000);
+      list.push(done);
       this.genWaiters.set(id, list);
-      setTimeout(resolve, 5000);
     });
     return this.termSeq.get(id)?.gen;
   }

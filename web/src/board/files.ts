@@ -2,6 +2,7 @@ import { api } from "../api.ts";
 import type { SymKey } from "../crypto.ts";
 import { createItem, fetchBoardContent } from "../library.tsx";
 import { encryptPreview } from "./boardCrypto.ts";
+import { isWindow } from "./nodes.ts";
 
 /** Renders a scene to an SVG string for dashboard thumbnails (Excalidraw is loaded on demand). */
 export async function renderPreview(elements: readonly any[], files: Record<string, any>, background = "#ffffff"): Promise<string | null> {
@@ -33,13 +34,20 @@ export async function savePreview(boardId: string, key: SymKey, epoch: number, e
   if (svg) await api.put(`/items/${boardId}/preview`, { epoch, preview: await encryptPreview(key, boardId, svg) });
 }
 
+/** Node tiles stay as drawings (title, icon) but lose their shells, sites, machine and remote links. */
+function stripNodeRefs<T extends { customData?: Record<string, any> }>(e: T): T {
+  if (!e.customData?.node) return e;
+  const { shells: _s, webs: _w, machineId: _m, machineName: _n, remote: _r, ...rest } = e.customData;
+  return { ...e, customData: rest };
+}
+
 export async function exportBoard(name: string, key: SymKey, id: string) {
   const content = await fetchBoardContent(key, id);
   const data = {
     type: "excalidraw",
     version: 2,
     source: location.origin,
-    elements: content.elements.filter((e) => !e.customData?.terminalId),
+    elements: content.elements.filter((e) => !isWindow(e)).map(stripNodeRefs),
     appState: { viewBackgroundColor: "#ffffff", gridSize: 20 },
     files: content.files,
   };

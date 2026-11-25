@@ -12,3 +12,4 @@ docs/AUDIT.md
 docs/PROTOCOL.md
 *.log
 .DS_Store
+mcp/dist/
