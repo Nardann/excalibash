@@ -233,9 +233,12 @@ authApi.post("/login", (req, res) => {
   checkSuspended(row.id);
   createSession(req, res, row.id);
   const when = new Date().toLocaleString("fr-FR", { dateStyle: "full", timeStyle: "short" });
-  notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () =>
-    `Nouvelle connexion à ton compte Excalibash le ${when}, depuis l'adresse ${req.ip}.\n\nSi ce n'est pas toi, change ton mot de passe : ${publicUrl(req)}/account`,
-  );
+  notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () => ({
+    title: "Nouvelle connexion à ton compte",
+    lines: [`Quelqu'un vient de se connecter à ton compte Excalibash le **${when}**, depuis l'adresse **${req.ip}**.`],
+    button: { label: "Changer mon mot de passe", url: `${publicUrl(req)}/account` },
+    note: "Si c'est toi, tu n'as rien à faire. Sinon, change ton mot de passe tout de suite : les autres appareils seront déconnectés.",
+  }));
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: row.enc_private_key } });
 });
 
