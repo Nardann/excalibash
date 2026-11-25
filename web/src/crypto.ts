@@ -230,6 +230,10 @@ export const AAD = {
   file: (boardId: string, fileId: string) => `eb:file:${boardId}:${fileId}`,
   preview: (boardId: string) => `eb:preview:${boardId}`,
   pointer: (boardId: string) => `eb:ptr:${boardId}`,
+  /** Board key wrapped under a public link key (epoch binds it to the current key generation). */
+  link: (boardId: string, epoch: number) => `eb:link:${boardId}:${epoch}`,
+  linkLabel: (boardId: string, publicId: string) => `eb:link-label:${boardId}:${publicId}`,
+  linkTitle: (boardId: string, publicId: string) => `eb:link-title:${boardId}:${publicId}`,
   termKey: (boardId: string, termId: string) => `eb:termkey:${boardId}:${termId}`,
   termLabel: (boardId: string, termId: string) => `eb:termlabel:${boardId}:${termId}`,
   termAgent: (termId: string) => `eb:term:${termId}`,

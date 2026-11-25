@@ -16,6 +16,11 @@ import { Privacy } from "./pages/Privacy.tsx";
 import { Landing } from "./landing/Landing.tsx";
 
 const BoardPage = lazy(() => import("./pages/BoardPage.tsx"));
+const PublicBoard = lazy(() => import("./pages/PublicBoard.tsx"));
+
+// Public read-only link (/v/<token>#<key>): rendered on its own, with no account, session or router,
+// so nothing of the signed-in app runs for someone who only holds the link.
+const publicToken = location.pathname.match(/^\/v\/([A-Za-z0-9_-]{1,64})\/?$/)?.[1];
 
 function RequireAuth() {
   const { user, keys } = useAuth();
@@ -65,13 +70,19 @@ function App() {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ThemeProvider>
-      <AuthProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
-        <Toaster />
-        <ConfirmHost />
-      </AuthProvider>
+      {publicToken ? (
+        <Suspense fallback={<div className="board-overlay">Chargement…</div>}>
+          <PublicBoard token={publicToken} />
+        </Suspense>
+      ) : (
+        <AuthProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+          <Toaster />
+          <ConfirmHost />
+        </AuthProvider>
+      )}
     </ThemeProvider>
   </StrictMode>,
 );

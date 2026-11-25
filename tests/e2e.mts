@@ -1032,6 +1032,123 @@ site.close();
   ok(out.code === 0 && !existsSync(cfgFile), "MCP : logout supprime la configuration");
 }
 
+// Public read-only links: created with real crypto, read without any account, gone after a key rotation.
+{
+  const pl = await import("../web/src/publicLinks.ts");
+  const { createHash } = await import("node:crypto");
+  (globalThis as any).location = { origin: BASE };
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  const parts = (url: string) => ({ token: new URL(url).pathname.split("/")[2], key: new URL(url).hash.slice(1) });
+  const pubGet = (token: string, headers: Record<string, string> = {}) => realFetch(`${BASE}/api/public/${token}`, { headers });
+  const db2 = new DatabaseSync(DB);
+
+  let nL = await tree(alice);
+  const F2 = await lib.createItem(ctxOf(alice, nL), "folder", null, "Dossier jury");
+  nL = await tree(alice);
+  const sceneRect = { ...rect, id: "pubrect", label: "PUBLIC_VISIBLE_42" };
+  const win = { ...rect, id: "pubwin", type: "embeddable", customData: { terminalId: "TERM_SECRET_ID" } };
+  const nodeEl = { ...rect, id: "pubnode", customData: { node: true, title: "Routeur", shells: [{ terminalId: "TERM_SECRET_ID" }], machineId: "MACHINE_SECRET", machineName: "laptop-secret", remote: { machineId: "x", target: { kind: "ssh", host: "10.9.9.9", port: 22 } } } };
+  const P = await lib.createItem(ctxOf(alice, nL), "board", F2, "Plan public", { elements: [sceneRect], files: {} });
+  nL = await tree(alice);
+  const keyP = nL.get(P)!.key!;
+  // Windows and node data cannot be written through createItem (it drops terminals): put them in the way a client would.
+  db2.prepare("UPDATE boards SET elements = ? WHERE id = ?").run(
+    JSON.stringify(await Promise.all([sceneRect, win, nodeEl].map((e) => encryptEntry(keyP, P, e)))),
+    P,
+  );
+  await as(alice, () => lib.shareItem(ctxOf(alice, nL), F2, { id: bob.user.id, email: "bob@test.local", publicKey: bob.user.publicKey }, "editor"));
+  await as(alice, () => lib.shareItem(ctxOf(alice, nL), F2, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+  const board = (n: Map<string, lib.Node>) => ({ id: P, key: n.get(P)!.key!, epoch: n.get(P)!.epoch, name: n.get(P)!.name });
+
+  const url1 = await as(alice, () => pl.createPublicLink(board(nL), "Pour le jury", 7));
+  const { token, key: frag } = parts(url1);
+  ok(/^\/v\/[A-Za-z0-9_-]{22}$/.test(new URL(url1).pathname) && frag.length === 43, "lien public : URL /v/<jeton 128 bits>#<clé 256 bits>");
+
+  const r1 = await pubGet(token);
+  const body1 = (await r1.json()) as any;
+  ok(r1.status === 200 && /no-store/.test(r1.headers.get("cache-control") ?? ""), "lien public : lu sans compte, Cache-Control no-store");
+  const linkKey = pl.linkKeyFromFragment(frag)!;
+  const scene = await pl.decryptPublic(body1, linkKey);
+  ok(scene.title === "Plan public", "lien public : titre déchiffré avec la clé du lien");
+  ok(scene.elements.some((e: any) => e.id === "pubrect" && e.label === "PUBLIC_VISIBLE_42"), "lien public : élément déchiffré avec la clé du fragment");
+  ok(!scene.elements.some((e: any) => e.id === "pubwin"), "lien public : les fenêtres de terminal sont écartées");
+  const nodeOut = scene.elements.find((e: any) => e.id === "pubnode");
+  ok(!!nodeOut && !/TERM_SECRET_ID|MACHINE_SECRET|laptop-secret|10\.9\.9\.9/.test(JSON.stringify(scene)), "lien public : les tuiles perdent terminaux, machine et cible distante");
+  const wrongKey = await pl.decryptPublic(body1, c.randomBytes(32)).then(() => true, () => false);
+  ok(!wrongKey, "lien public : une autre clé ne déchiffre rien");
+  ok(!JSON.stringify(body1).includes("Plan public") && !JSON.stringify(body1).includes("PUBLIC_VISIBLE_42"), "lien public : le serveur ne sert que des chiffrés");
+
+  const etag = r1.headers.get("etag")!;
+  ok((await pubGet(token, { "if-none-match": etag })).status === 304, "lien public : 304 tant que rien n'a changé");
+
+  // Stored hashed, never raw; neither the token nor the key reach the database or the logs.
+  const rows = JSON.stringify(db2.prepare("SELECT * FROM board_links").all());
+  const logText = readFileSync(`${dirname(DB)}/server.log`, "utf8");
+  ok(rows.includes(sha(token)) && !rows.includes(token) && !rows.includes(frag), "lien public : base = hachage du jeton, ni jeton ni clé du lien");
+  ok(!logText.includes(token) && !logText.includes(frag), "lien public : ni jeton ni clé du lien dans les logs du serveur");
+  ok(!rows.includes("Pour le jury") && !rows.includes("Plan public"), "lien public : libellé et titre chiffrés dans la base");
+
+  // Who can manage links.
+  const carolTry = await as(carol, () => api("POST", `/items/${P}/links`, { publicId: "0123456789abcdef", epoch: nL.get(P)!.epoch, wrappedKey: "AAAA" }));
+  ok(carolTry.status === 403, "lien public : un lecteur ne peut pas créer de lien");
+  ok((await as(carol, () => api("GET", `/items/${P}/links`))).status === 403, "lien public : un lecteur ne voit pas les liens");
+  const nBL = await tree(bob);
+  const urlBob = await as(bob, () => pl.createPublicLink(board(nBL), "Par Bob", null));
+  const listed = await as(alice, () => pl.listPublicLinks(P, keyP));
+  ok(listed.length === 2 && listed.some((l) => l.label === "Pour le jury" && l.createdBy === "Alice") && listed.some((l) => l.label === "Par Bob" && l.createdBy === "Bob" && l.expiresAt === null), "lien public : un éditeur crée, la liste montre libellés déchiffrés, auteurs et expirations");
+  ok((await as(carol, () => api("DELETE", `/items/${P}/links/${listed[0].publicId}`))).status === 403, "lien public : un lecteur ne supprime pas de lien");
+  ok((await as(bob, () => api("DELETE", `/items/${P}/links/${listed.find((l) => l.label === "Par Bob")!.publicId}`))).status === 200, "lien public : un éditeur supprime un lien");
+  ok((await pubGet(parts(urlBob).token)).status === 404, "lien public : supprimé, il répond 404");
+
+  // Expired, unknown and malformed tokens answer the same way.
+  const urlExp = await as(alice, () => pl.createPublicLink(board(nL), "Court", 1));
+  db2.prepare("UPDATE board_links SET expires_at = 1 WHERE token_hash = ?").run(sha(parts(urlExp).token));
+  const exp = await pubGet(parts(urlExp).token);
+  const unknown = await pubGet(c.toB64(c.randomBytes(16)));
+  const malformed = await pubGet("nope");
+  const [bExp, bUnk, bMal] = await Promise.all([exp.text(), unknown.text(), malformed.text()]);
+  ok(exp.status === 404 && unknown.status === 404 && malformed.status === 404 && bExp === bUnk && bUnk === bMal, "lien public : expiré, inconnu et mal formé répondent identiquement (404)");
+
+  // Trash hides the board from link holders; restoring brings it back.
+  await as(alice, () => api("DELETE", `/items/${P}`));
+  ok((await pubGet(token)).status === 404, "lien public : 404 quand le tableau est à la corbeille");
+  await as(alice, () => api("POST", `/items/${P}/restore`));
+  ok((await pubGet(token)).status === 200, "lien public : de nouveau lisible après restauration");
+
+  // Limit per board.
+  let last = 200;
+  for (let i = 0; i < 25 && last === 200; i++) {
+    const publicId = [...c.randomBytes(8)].map((x) => x.toString(16).padStart(2, "0")).join("");
+    last = (await as(alice, () => api("POST", `/items/${P}/links`, { publicId, epoch: nL.get(P)!.epoch, wrappedKey: "AAAA" }))).status;
+  }
+  ok(last === 400 && (db2.prepare("SELECT COUNT(*) AS n FROM board_links WHERE board_id = ?").get(P) as any).n === 20, "lien public : 20 liens au plus par tableau");
+  db2.prepare("DELETE FROM board_links WHERE board_id = ? AND public_id != ?").run(P, body1.publicId);
+
+  // Rate limit, per IP (X-Forwarded-For is honoured behind a local proxy).
+  let throttled = 0;
+  for (let i = 0; i < 70; i++) if ((await pubGet(c.toB64(c.randomBytes(16)), { "x-forwarded-for": "7.7.7.7" })).status === 429) throttled++;
+  ok(throttled > 0, "lien public : limitation de débit par IP");
+
+  // Revoking someone rotates every key: the links made under the old keys are deleted with them.
+  nL = await tree(alice);
+  const epochBefore = nL.get(P)!.epoch;
+  await as(alice, () => lib.revokeAccess(ctxOf(alice, nL), F2, carol.user.id));
+  ok((await pubGet(token)).status === 404, "lien public : supprimé par la rotation des clés (membre retiré)");
+  ok((db2.prepare("SELECT COUNT(*) AS n FROM board_links WHERE board_id = ?").get(P) as any).n === 0, "lien public : plus aucun lien en base après rotation");
+  nL = await tree(alice);
+  ok(nL.get(P)!.epoch === epochBefore + 1, "lien public : le tableau est passé à l'époque suivante");
+  const urlNew = await as(alice, () => pl.createPublicLink(board(nL), "Après rotation", 1));
+  const bodyNew = (await (await pubGet(parts(urlNew).token)).json()) as any;
+  const sceneNew = await pl.decryptPublic(bodyNew, pl.linkKeyFromFragment(parts(urlNew).key)!);
+  ok(bodyNew.epoch === epochBefore + 1 && sceneNew.elements.some((e: any) => e.id === "pubrect"), "lien public : un nouveau lien fonctionne avec les nouvelles clés");
+
+  // Deleting the board deletes its links.
+  await as(alice, () => api("DELETE", `/items/${P}`));
+  await as(alice, () => api("DELETE", `/items/${P}?permanent=1`));
+  ok((db2.prepare("SELECT COUNT(*) AS n FROM board_links").get() as any).n === 0 && (await pubGet(parts(urlNew).token)).status === 404, "lien public : supprimé avec le tableau");
+  db2.close();
+}
+
 // Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).
 const nullOrigin = await new Promise<number>((resolve) => {
   const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });

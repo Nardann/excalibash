@@ -1006,6 +1006,22 @@ input.board-title {
 .board-canvas .excalidraw {
   --color-primary: #4f46e5;
 }
+.public-title {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-size: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.public-state {
+  max-width: 440px;
+  padding: 24px;
+  text-align: center;
+}
+.public-view .sidebar-trigger {
+  display: none;
+}
 .board-overlay {
   position: absolute;
   inset: 0;

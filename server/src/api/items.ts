@@ -8,9 +8,11 @@ import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
 import { recheckBoardSessions } from "./machines.ts";
+import { linksApi } from "./links.ts";
 
 export const itemsApi = Router();
 itemsApi.use(requireUser);
+itemsApi.use(linksApi);
 
 type Entry = { id: string; v: number; n: number; c: string };
 
@@ -417,6 +419,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
 
   const now = Date.now();
   tx(() => {
+    // The revoked member may have seen public link tokens and keys: every link of the rotated boards dies with the old keys.
+    for (const b of boards) db.prepare("DELETE FROM board_links WHERE board_id = ?").run(b);
     db.prepare("DELETE FROM grants WHERE item_id = ? AND user_id = ?").run(item.id, revoked);
     for (const i of items) {
       const isRoot = i.id === item.id;

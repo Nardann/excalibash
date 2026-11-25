@@ -129,6 +129,20 @@ CREATE TABLE IF NOT EXISTS tunnels (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tunnels_board ON tunnels(board_id);
+-- Public read-only links: only the hash of the URL token is stored; the link key lives in the URL fragment.
+CREATE TABLE IF NOT EXISTS board_links (
+  token_hash TEXT PRIMARY KEY,
+  public_id TEXT NOT NULL UNIQUE,
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  key_epoch INTEGER NOT NULL,
+  wrapped_key TEXT NOT NULL,
+  enc_label TEXT,
+  enc_title TEXT
+);
+CREATE INDEX IF NOT EXISTS board_links_board ON board_links(board_id);
 CREATE INDEX IF NOT EXISTS items_parent ON items(parent_id);
 CREATE INDEX IF NOT EXISTS items_owner ON items(owner_id);
 CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id);

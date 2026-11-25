@@ -7,7 +7,7 @@ pas non plus se faire passer pour un utilisateur afin d'obtenir ses données.
 ## Ce que le serveur voit (métadonnées)
 
 Emails et noms d'affichage, la forme de l'arbre (qui est parent de qui, qui a accès à quoi),
-les dates (dont la dernière activité de chaque compte), pour chaque session ouverte la date de dernière
+les dates (dont la dernière activité de chaque compte), les liens publics d'un tableau (créateur, dates, expiration), pour chaque session ouverte la date de dernière
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
@@ -351,6 +351,39 @@ vérification de la clé publique, mêmes websockets de tableau et mêmes trames
   `--tableaux` limite les outils à des tableaux précis.
 - Le certificat d'une instance auto-signée se fait confiance via `NODE_EXTRA_CA_CERTS`, jamais en
   désactivant la vérification TLS.
+
+## Liens publics
+
+Un **lien public** donne la lecture d'**un seul tableau** à quiconque possède l'adresse
+`https://<instance>/v/<jeton>#<cléDuLien>`, sans compte. Seuls le propriétaire et les éditeurs du tableau
+peuvent en créer, lister et supprimer (les lecteurs et les administrateurs non membres n'ont aucun accès).
+Un tableau a 20 liens au plus.
+
+- `jeton` : 128 bits aléatoires (base64url), généré par le serveur et renvoyé **une seule fois** à la création.
+  Le serveur n'en stocke que le `SHA-256`. `cléDuLien` `K_l` : 256 bits aléatoires, générés par le navigateur du
+  créateur, **uniquement dans le fragment de l'URL**. Un navigateur n'envoie jamais le fragment (ni dans la requête,
+  ni dans `Referer`, d'ailleurs `Referrer-Policy: no-referrer`) : le serveur ne voit jamais `K_l`. La page publique
+  lit `location.hash`, ne l'écrit dans aucun stockage et ne le met dans aucune requête.
+- Le serveur stocke, par lien : `wrappedKey = box(K_l, K_b, "eb:link:<boardId>:<epoch>")`, le libellé
+  `box(K_b, libellé, "eb:link-label:<boardId>:<publicId>")` (vu par les éditeurs, ex. « Pour le jury »), le titre
+  `box(K_b, nom, "eb:link-title:<boardId>:<publicId>")` (le nom du tableau n'est pas servi autrement), la date de
+  création, l'expiration éventuelle, l'auteur et un identifiant public `publicId` (16 hex, choisi par le navigateur
+  pour entrer dans les AAD) qui sert à lister et supprimer.
+- `GET /api/public/<jeton>` sert le **chiffré** du tableau (éléments, images) et `wrappedKey` à qui connaît le jeton ;
+  le navigateur déchiffre `K_b` avec `K_l`, puis les éléments avec les AAD habituels. Un jeton inconnu, mal formé,
+  expiré, supprimé, ou un tableau à la corbeille répondent tous le même `404` (pas d'oracle). Limite : 60 requêtes par
+  minute et par IP, 300 par jeton. Réponse `Cache-Control: no-store`, `ETag` (`304` pour l'interrogation toutes les 15 s).
+- **Lecture seule par construction** : aucune route d'écriture n'accepte un jeton, et la page n'ouvre aucune websocket.
+  Les terminaux et les tunnels web ne sont jamais accessibles : leurs clés (`keyForBoard`) ne sont pas servies, et le
+  navigateur écarte les fenêtres et retire des tuiles de machines leurs shells, sites et cibles distantes.
+- **Rotation** : retirer un membre renouvelle les clés, et **tous les liens des tableaux concernés sont supprimés dans
+  la même transaction** (la personne retirée a pu voir jetons et clés). Supprimer le tableau, ou le vider de la
+  corbeille, supprime ses liens. Il faut créer de nouveaux liens après une rotation.
+- Ce que le serveur apprend : qu'un lien existe, qui l'a créé, quand, son expiration, et l'IP de ceux qui le lisent
+  (comme pour toute requête). Il ne voit ni `K_l`, ni le titre, ni le libellé, ni le contenu.
+- Limites : qui possède l'adresse complète lit le tableau, et peut la transmettre ; un lien ne se révoque que par suppression
+  (ou rotation). Le titre est figé à la création du lien. Comme pour le reste, un serveur malveillant qui sert du
+  JavaScript piégé sur `/v/…` pourrait lire le fragment : même limite que pour tout le code servi.
 
 ## HTTPS et certificat auto-signé
 
