@@ -14,6 +14,7 @@ import {
   terminalRestart,
 } from "./terminals.ts";
 import { fileRequest } from "./files.ts";
+import { HistoryTracker } from "./history.ts";
 import { closeTunnel, createTunnel, listBoardTunnels, tunnelExists } from "./tunnels.ts";
 
 /** Encrypted element: only the merge metadata is readable by the server. */
@@ -55,9 +56,11 @@ class Room implements BoardRoom {
   private clients = new Map<WebSocket, Client>();
   private saveTimer: NodeJS.Timeout | undefined;
   private dirtyFiles = false;
+  private history: HistoryTracker;
 
   constructor(boardId: string) {
     this.boardId = boardId;
+    this.history = new HistoryTracker(boardId);
     this.epoch = getItem(boardId)!.key_epoch;
     const row = db.prepare("SELECT elements, files FROM boards WHERE id = ?").get(boardId) as { elements: string; files: string };
     for (const e of JSON.parse(row.elements) as Entry[]) {
@@ -114,6 +117,8 @@ class Room implements BoardRoom {
       this.broadcast(JSON.stringify({ t: "peer.leave", id: client.id }));
       if (this.clients.size === 0) {
         this.flush();
+        // The work session is over: keep its end state in the history.
+        this.history.capture(this.epoch, this.snapshot(), true);
         if (rooms.get(this.boardId) === this) rooms.delete(this.boardId);
       }
     });
@@ -138,6 +143,7 @@ class Room implements BoardRoom {
           accepted.push(entry);
         }
         if (accepted.length) {
+          this.history.markDirty();
           this.broadcast(JSON.stringify({ t: "scene", elements: accepted }), ws);
           this.scheduleSave();
         }
@@ -240,7 +246,7 @@ class Room implements BoardRoom {
     if (!this.saveTimer && !this.dirtyFiles) return;
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
-    const elements = JSON.stringify(this.order.map((id) => this.elements.get(id)));
+    const elements = JSON.stringify(this.snapshot());
     if (this.dirtyFiles) {
       db.prepare("UPDATE boards SET elements = ?, files = ? WHERE id = ?").run(elements, JSON.stringify(this.files), this.boardId);
       this.dirtyFiles = false;
@@ -248,6 +254,12 @@ class Room implements BoardRoom {
       db.prepare("UPDATE boards SET elements = ? WHERE id = ?").run(elements, this.boardId);
     }
     db.prepare("UPDATE items SET updated_at = ? WHERE id = ?").run(Date.now(), this.boardId);
+    this.history.capture(this.epoch, this.snapshot());
+  }
+
+  /** Entries in scene order. */
+  private snapshot(): Entry[] {
+    return this.order.map((id) => this.elements.get(id)!);
   }
 
   kick(userId: string, code: number, reason: string): void {
@@ -265,6 +277,7 @@ class Room implements BoardRoom {
       clearTimeout(this.saveTimer);
       this.saveTimer = undefined;
       this.dirtyFiles = false;
+      this.history.discard();
     }
     for (const ws of this.clients.keys()) ws.close(code, reason);
     if (rooms.get(this.boardId) === this) rooms.delete(this.boardId);

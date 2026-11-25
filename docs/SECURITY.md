@@ -133,6 +133,33 @@ Chaque dossier et chaque tableau a sa propre clé `K` et un `id` généré par l
 `id`, `version` et `versionNonce` restent en clair : c'est ce qui permet au serveur de fusionner
 les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
+## Historique des tableaux
+
+Le serveur garde des versions passées d'un tableau **sans jamais rien déchiffrer** : il copie les
+chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
+
+- Stockage par tableau, adressé par le contenu : `board_entries(board_id, hash, data)` avec
+  `hash = SHA-256(chiffré sérialisé)`, et `board_versions` qui liste les empreintes dans l'ordre de la
+  scène. Un élément inchangé n'est stocké qu'une fois, quel que soit le nombre de versions.
+- Une version au plus toutes les `HISTORY_INTERVAL_MIN` minutes, à l'enregistrement du tableau, et une à
+  la fin de la session (départ du dernier client), seulement si la scène a changé. Rétention : les
+  `HISTORY_KEEP` dernières, la dernière de chacun des `HISTORY_DAYS` derniers jours, puis les plus
+  anciennes sautent au-delà de `HISTORY_MAX_MB` ; les chiffrés plus référencés sont supprimés.
+  `HISTORY_KEEP=0` désactive tout.
+- Lecture : `GET /api/items/:id/versions` et `/versions/:vid`, réservées à qui peut lire le tableau (un
+  lecteur peut consulter). Le déchiffrement, l'aperçu et la restauration se font dans le navigateur. Restaurer
+  est une modification de scène comme une autre : seuls les éditeurs peuvent l'écrire, le serveur le refuse
+  sinon.
+- Ce que cela révèle au serveur : les dates des versions, le nombre et la taille des éléments, ce qui a
+  changé d'une version à l'autre (ids et versions déjà visibles). Rien du contenu.
+- **Rotation des clés** : les versions sont chiffrées avec l'ancienne clé, que le serveur ne peut pas
+  remplacer. Elles sont donc **supprimées** avec la rotation (compromis : une personne révoquée ne peut plus rien lire
+  d'ancien, mais l'historique repart de zéro). La suppression définitive du tableau supprime aussi son historique.
+- Images : elles ne sont pas copiées. Une version renvoie les fichiers actuels du tableau ; une image retirée du
+  stockage de fichiers peut donc manquer dans une version ancienne.
+- La restauration laisse intacts les terminaux et sites (fenêtres) et les liens des machines, pour ne jamais
+  couper un shell en cours.
+
 ## Machines et terminaux
 
 - Ajout d'une machine : **le navigateur** génère la clé privée X25519 de l'agent (32 octets). Elle

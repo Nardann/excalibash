@@ -27,6 +27,7 @@ Tout le TP tient sur un seul tableau, partagé avec le binôme ou le prof. Les d
 ## Fonctionnalités
 
 - **Terminaux sur le canvas.** Une icône de machine porte un ou plusieurs shells, chacun dans sa fenêtre. L'icône se personnalise avec la bibliothèque Excalidraw. <kbd>Alt</kbd>+<kbd>T</kbd> ouvre un shell, <kbd>Alt</kbd>+<kbd>R</kbd> ou un double-clic sur la barre de titre le masque sans l'arrêter. <kbd>Alt</kbd>+<kbd>B</kbd> diffuse la saisie du terminal actif vers les autres terminaux diffusés (comme `synchronize-panes` de tmux ; local à ton onglet, « Tout arrêter » dans l'en-tête ou le dock). <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>F</kbd> cherche dans l'historique, et l'en-tête exporte l'historique en `.txt` ou enregistre la sortie en `.cast` (asciinema), le tout dans le navigateur.
+- **Historique des tableaux.** Le bouton « Historique » de l'en-tête liste les versions passées (une toutes les 15 minutes de travail au plus, et une à la fin de chaque session), affiche un aperçu et restaure la version choisie. La restauration est une modification normale : elle se synchronise et s'annule avec <kbd>Ctrl</kbd>+<kbd>Z</kbd>, et ne touche ni aux terminaux ni aux sites ouverts. Le serveur ne copie que des chiffrés, déchiffrés dans le navigateur.
 - **Telnet et SSH vers les équipements.** Un switch, un routeur ou un PC joignable depuis une machine s'ouvre en Telnet, SSH ou TCP brut dans un terminal du tableau. Le client est intégré à l'agent. L'option « Équipement ancien » réactive les vieux algorithmes SSH (`diffie-hellman-group1-sha1`, `ssh-rsa`, CBC) qui provoquent les erreurs « no matching key exchange method found ».
 - **Sites web des machines.** `http://127.0.0.1:80`, l'interface d'un routeur ou un Proxmox du réseau de la machine s'ouvrent dans une fenêtre du tableau ou en plein onglet. La configuration avancée accepte un en-tête Host et le TLS 1.0/1.1 des vieux équipements. Le serveur ne voit ni l'adresse ni les pages.
 - **Transfert de fichiers.** Glisse un fichier sur la fenêtre d'un shell local pour l'envoyer dans son dossier courant, ou ouvre « Fichiers » dans l'en-tête pour parcourir ce dossier et télécharger. 200 Mio au maximum, vérification SHA-256, jamais d'écrasement sans confirmation ; réservé aux éditeurs et aux shells locaux (pas Telnet ni SSH). Le serveur ne voit ni noms, ni chemins, ni contenus : voir [docs/SECURITY.md](docs/SECURITY.md).
@@ -82,6 +83,10 @@ Les variables se placent dans un fichier `.env` à côté de `docker-compose.yml
 | `BIND_ADDR` | `127.0.0.1` | interface où les ports sont publiés. `0.0.0.0` pour un accès direct depuis le réseau |
 | `SETUP_CODE` | aléatoire | code exigé pour créer le premier compte (affiché dans les logs s'il n'est pas fixé) |
 | `TRUST_PROXY` | réseaux locaux | proxys dont l'en-tête `X-Forwarded-For` est cru (format Express `trust proxy`) |
+| `HISTORY_KEEP` | `10` | nombre de dernières versions gardées par tableau (en plus de la dernière de chacun des `HISTORY_DAYS` derniers jours). `0` désactive l'historique |
+| `HISTORY_DAYS` | `7` | jours pendant lesquels la dernière version de chaque jour est conservée |
+| `HISTORY_MAX_MB` | `5` | taille maximale de l'historique d'un tableau (chiffrés distincts) : les plus anciennes versions sautent au-delà |
+| `HISTORY_INTERVAL_MIN` | `15` | délai minimal entre deux versions d'un même tableau, en minutes (`0` : aucune limite, pour les tests) |
 
 ## HTTPS
 

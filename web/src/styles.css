@@ -2268,3 +2268,48 @@ html.dark .term.broadcasting {
 .capture-row .field {
   flex: 1;
 }
+
+/* ---- Board history panel (left side, the dock stays on the right) ------------------------- */
+.history-panel {
+  right: auto;
+  left: 12px;
+  width: 280px;
+}
+.history-item {
+  display: flex !important;
+  width: 100%;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+}
+.history-item:hover,
+.history-item.selected {
+  background: var(--brand-soft);
+}
+.history-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.history-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.history-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+}
+.history-preview img {
+  width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}

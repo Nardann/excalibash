@@ -4,10 +4,11 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, History, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
+import { HistoryPanel } from "../board/HistoryPanel.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
@@ -151,6 +152,7 @@ function Editor({ node }: { node: Node }) {
   const [links, setLinks] = useState<LinkStates>({});
   /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
   const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   // Display name of a machine icon, as drawn on the diagram (image and topology exports).
   const exportNameOf = (x: NonNullable<typeof excalidrawRef.current>) => (id: string) => {
     const nd = nodeDataOf(findEl(x, id));
@@ -874,6 +876,9 @@ function Editor({ node }: { node: Node }) {
         <button className="btn btn-icon btn-sm" title="Exporter le schéma (image, topologie Containerlab, Mermaid, JSON)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
           <Download size={16} />
         </button>
+        <button className={`btn btn-icon btn-sm ${historyOpen ? "btn-primary" : ""}`} aria-pressed={historyOpen} title="Historique des versions" onClick={() => setHistoryOpen((o) => !o)}>
+          <History size={16} />
+        </button>
         {node.ownerId === user.id && (
           <button className="btn btn-sm" onClick={() => setSharing(true)}>
             <Share2 size={16} /> Partager
@@ -901,6 +906,7 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        {historyOpen && <HistoryPanel boardId={node.id} boardKey={node.key!} api={excalidraw} editor={editor} onClose={() => setHistoryOpen(false)} />}
         {editor && dock.length > 0 && (
           <WindowDock
             session={session}

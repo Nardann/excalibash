@@ -148,6 +148,23 @@ CREATE INDEX IF NOT EXISTS items_owner ON items(owner_id);
 CREATE INDEX IF NOT EXISTS grants_user ON grants(user_id);
 CREATE INDEX IF NOT EXISTS terminals_board ON terminals(board_id);
 CREATE INDEX IF NOT EXISTS terminals_machine ON terminals(machine_id);
+-- Board history: ciphertext entries stored once per board (content-addressed), versions list hashes.
+CREATE TABLE IF NOT EXISTS board_entries (
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  hash TEXT NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (board_id, hash)
+);
+CREATE TABLE IF NOT EXISTS board_versions (
+  id INTEGER PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  epoch INTEGER NOT NULL,
+  hashes TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS board_versions_board ON board_versions(board_id, id);
 PRAGMA user_version = ${SCHEMA_VERSION};
 `);
 

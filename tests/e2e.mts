@@ -1149,6 +1149,81 @@ site.close();
   db2.close();
 }
 
+// Board history: ciphertext snapshots, deduplicated per element, retention, purge on rotation.
+// (The server runs with HISTORY_INTERVAL_MIN=0: a version at every flush; HISTORY_KEEP=3.)
+{
+  nA = await tree(alice);
+  const H = await as(alice, () => lib.createItem(ctxOf(alice, nA), "board", null, "Historique"));
+  nA = await tree(alice);
+  await as(alice, () => lib.shareItem(ctxOf(alice, nA), H, bobPub, "viewer"));
+  let hKey = (await tree(alice)).get(H)!.key!;
+  const box = (id: string, version: number, label: string) => ({ id, type: "rectangle", version, versionNonce: Math.floor(Math.random() * 1e9), x: 0, y: 0, width: 10, height: 10, isDeleted: false, label });
+  const versions = async (u: U = alice) => (await as(u, () => api("GET", `/items/${H}/versions`))).body as { id: number; createdAt: number; count: number; epoch: number }[];
+  const stored = () => (rw.prepare("SELECT COUNT(*) AS n FROM board_entries WHERE board_id = ?").get(H) as any).n as number;
+  /** Connects, optionally writes the given entries, leaves (the end of the session captures a version). */
+  async function session(u: U, key: c.SymKey, els: any[], raw?: any[]) {
+    const s = boardSocket(u, H);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    const entries = raw ?? (await Promise.all(els.map((e) => encryptEntry(key, H, e))));
+    if (entries.length) s.send({ t: "scene", epoch: init.epoch, elements: entries });
+    const err = entries.length ? await s.next((m) => m.t === "error", 400).catch(() => null) : null;
+    s.ws.close();
+    await s.closed;
+    await new Promise((r) => setTimeout(r, 150));
+    return { entries, err, init };
+  }
+
+  ok((await versions()).length === 0, "historique : aucun version pour un tableau vide");
+  const a1 = box("ha", 1, "HISTSECRET_ONE");
+  const b1 = box("hb", 1, "HISTSTABLE");
+  await session(alice, hKey, [a1, b1]);
+  const afterOne = await versions();
+  ok(afterOne.length === 1 && afterOne[0].count === 2, "historique : une première version enregistrée en fin de session");
+  const second = await session(alice, hKey, [box("ha", 2, "HISTSECRET_TWO")]);
+  ok((await versions()).length === 2, "historique : une modification ajoute une version");
+  ok(stored() === 3, "historique : l'élément inchangé n'est stocké qu'une fois (3 chiffrés pour 2 versions)");
+  await session(alice, hKey, []);
+  ok((await versions()).length === 2, "historique : un état identique n'ajoute pas de version");
+  const replay = await session(alice, hKey, [], second.entries);
+  ok(replay.err === null && (await versions()).length === 2 && stored() === 3, "historique : un envoi non plus récent n'ajoute rien");
+
+  const list = await versions();
+  ok(list[0].id > list[1].id && list[0].epoch === 0, "historique : liste du plus récent au plus ancien");
+  const getV = async (id: number, u: U = alice) => (await as(u, () => api("GET", `/items/${H}/versions/${id}`))).body;
+  const old = await getV(list[1].id);
+  const oldEls = await Promise.all(old.elements.map((e: any) => decryptEntry(hKey, H, e)));
+  ok(oldEls.length === 2 && oldEls.some((e: any) => e.label === "HISTSECRET_ONE") && !oldEls.some((e: any) => e.label === "HISTSECRET_TWO"), "historique : la version ancienne se déchiffre dans son état d'alors");
+  const cur = await getV(list[0].id);
+  const curEls = await Promise.all(cur.elements.map((e: any) => decryptEntry(hKey, H, e)));
+  ok(curEls.some((e: any) => e.label === "HISTSECRET_TWO") && curEls.some((e: any) => e.label === "HISTSTABLE") && typeof cur.files === "object", "historique : la version récente contient l'état courant");
+  ok((await as(alice, () => api("GET", `/items/${H}/versions/999999`))).status === 404, "historique : version inconnue : 404");
+  const dump = JSON.stringify(rw.prepare("SELECT data FROM board_entries WHERE board_id = ?").all(H)) + JSON.stringify(rw.prepare("SELECT hashes FROM board_versions WHERE board_id = ?").all(H));
+  ok(!dump.includes("HISTSECRET") && !dump.includes("HISTSTABLE"), "historique : aucun texte en clair dans la base");
+
+  // A viewer can browse but not write; a stranger sees nothing.
+  const asViewer = await versions(bob);
+  ok(asViewer.length === 2 && (await getV(list[1].id, bob)).elements.length === 2, "historique : un lecteur peut consulter les versions");
+  const viewerWrite = await session(bob, hKey, [box("ha", 9, "HACK")]);
+  ok(viewerWrite.err?.message === "Lecture seule" && (await versions()).length === 2, "historique : un lecteur ne peut toujours pas écrire");
+  ok((await as(bob, () => api("GET", `/items/${B}/versions`))).status === 404, "historique : pas d'accès aux versions d'un tableau non partagé");
+
+  // Retention (HISTORY_KEEP=3): oldest versions and their now-unreferenced entries go.
+  for (let v = 3; v <= 6; v++) await session(alice, hKey, [box("ha", v, `HISTSECRET_V${v}`)]);
+  const kept = await versions();
+  ok(kept.length === 3 && !kept.some((v) => v.id === list[1].id), "historique : rétention, seules les 3 dernières versions restent");
+  const referenced = new Set((rw.prepare("SELECT hashes FROM board_versions WHERE board_id = ?").all(H) as any[]).flatMap((r) => JSON.parse(r.hashes)));
+  ok(stored() === referenced.size && stored() === 4, "historique : les chiffrés orphelins sont supprimés");
+
+  // Key rotation: history sealed under the old key is purged; a new one starts.
+  await as(alice, () => lib.revokeAccess(ctxOf(alice, nA), H, bob.user.id));
+  ok((await versions()).length === 0 && stored() === 0, "historique : la rotation des clés purge l'historique");
+  hKey = (await tree(alice)).get(H)!.key!;
+  await session(alice, hKey, [box("ha", 7, "HISTSECRET_NEW")]);
+  const fresh = await versions();
+  ok(fresh.length === 1 && fresh[0].epoch === 1 && (await getV(fresh[0].id)).elements.length > 0, "historique : une nouvelle version repart avec les nouvelles clés");
+}
+
 // Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).
 const nullOrigin = await new Promise<number>((resolve) => {
   const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });
