@@ -10,6 +10,7 @@ import { dropBoardTunnels, dropMachineTunnels } from "../tunnels.ts";
 import { evictRoom, kickUser } from "../rooms.ts";
 import { HttpError, pid, publicUrl, str } from "../http.ts";
 import { newInviteToken } from "./auth.ts";
+import { sendTestMail, smtpStatus } from "../mailer.ts";
 
 /**
  * Administration is deliberately narrow: admins manage *accounts*, never content.
@@ -105,6 +106,24 @@ adminApi.get("/", async (_req, res) => {
 adminApi.patch("/settings", (req, res) => {
   if (typeof req.body.registrationOpen === "boolean") setSetting("registration_open", String(req.body.registrationOpen));
   res.json({ ok: true });
+});
+
+adminApi.get("/smtp", (_req, res) => {
+  res.json(smtpStatus());
+});
+
+/** Sends a test email (to the admin by default) and reports the SMTP server's answer. */
+adminApi.post("/smtp/test", async (req, res) => {
+  const to = str(req.body?.to, 254) || req.user!.email;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new HttpError(400, "Adresse email invalide");
+  if (smtpStatus().mode === "off") throw new HttpError(400, "Aucun serveur SMTP configuré (variable SMTP_HOST)");
+  const started = Date.now();
+  try {
+    await sendTestMail(to);
+  } catch (e) {
+    throw new HttpError(502, `Échec de l'envoi : ${(e as Error).message}`);
+  }
+  res.json({ ok: true, to, ms: Date.now() - started, status: smtpStatus() });
 });
 
 adminApi.post("/invites", (req, res) => {

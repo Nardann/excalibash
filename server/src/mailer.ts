@@ -1,11 +1,40 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { config } from "./config.ts";
+import { getSetting, setSetting } from "./db.ts";
 
 export function emailEnabled(): boolean {
   return !!config.smtp.host || config.smtp.transport === "log";
 }
 
 let transport: Transporter | null = null;
+
+function smtpTransport(): Transporter {
+  transport ??= nodemailer.createTransport({
+    host: config.smtp.host,
+    port: config.smtp.port,
+    secure: config.smtp.secure,
+    auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 30_000,
+  });
+  return transport;
+}
+
+/** Outcome of the last email the server tried to send, shown to admins. */
+export type MailOutcome = { at: number; ok: boolean; error?: string };
+
+function record(outcome: MailOutcome) {
+  setSetting(outcome.ok ? "mail_last_ok" : "mail_last_error", JSON.stringify(outcome));
+}
+
+function readOutcome(key: string): MailOutcome | null {
+  try {
+    return JSON.parse(getSetting(key, "null"));
+  } catch {
+    return null;
+  }
+}
 
 export async function sendMail(to: string, subject: string, text: string): Promise<void> {
   if (!config.smtp.host) {
@@ -14,15 +43,47 @@ export async function sendMail(to: string, subject: string, text: string): Promi
     console.log(`[mail] to=${to} subject=${subject} code=${code}`);
     return;
   }
-  transport ??= nodemailer.createTransport({
-    host: config.smtp.host,
-    port: config.smtp.port,
-    secure: config.smtp.secure,
-    auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
-  });
-  await transport.sendMail({ from: config.smtp.from || config.smtp.user, to, subject, text });
+  try {
+    await smtpTransport().sendMail({ from: config.smtp.from || config.smtp.user, to, subject, text });
+    record({ at: Date.now(), ok: true });
+  } catch (e) {
+    record({ at: Date.now(), ok: false, error: (e as Error).message.slice(0, 300) });
+    throw e;
+  }
 }
 
 export function sendVerificationCode(to: string, code: string): Promise<void> {
   return sendMail(to, "Ton code Excalibash", `Ton code Excalibash : ${code} (valable 15 minutes)\n\nSi tu n'as pas créé de compte, ignore ce message.`);
+}
+
+/** What admins see of the email setup: never the password. */
+export function smtpStatus() {
+  const mode = config.smtp.host ? "smtp" : config.smtp.transport === "log" ? "log" : "off";
+  return {
+    mode,
+    host: config.smtp.host || null,
+    port: config.smtp.host ? config.smtp.port : null,
+    secure: config.smtp.secure,
+    user: config.smtp.user || null,
+    from: config.smtp.from || config.smtp.user || null,
+    lastOk: readOutcome("mail_last_ok"),
+    lastError: readOutcome("mail_last_error"),
+  };
+}
+
+/** Checks the connection to the SMTP server, then sends a test email to `to`. */
+export async function sendTestMail(to: string): Promise<void> {
+  if (config.smtp.host) {
+    try {
+      await smtpTransport().verify();
+    } catch (e) {
+      record({ at: Date.now(), ok: false, error: (e as Error).message.slice(0, 300) });
+      throw e;
+    }
+  }
+  await sendMail(
+    to,
+    "Test d'envoi Excalibash",
+    `Ceci est un email de test envoyé depuis la page d'administration d'Excalibash.\n\nSi tu le reçois, l'envoi d'emails fonctionne.`,
+  );
 }

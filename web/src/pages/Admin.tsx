@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import { fr } from "date-fns/locale";
-import { Ban, Link2, Lock, RotateCcw, Search, Shield, Trash2 } from "lucide-react";
+import { Ban, Link2, Loader2, Lock, Mail, RotateCcw, Search, Send, Shield, Trash2 } from "lucide-react";
 import { api } from "../api.ts";
 import { useUser } from "../auth.tsx";
 import "./admin.css";
@@ -42,6 +42,17 @@ type Stats = {
 type Invite = { id: string; note: string | null; expiresAt: number; createdAt: number; usedBy: string | null };
 type Data = { users: AdminUser[]; invites: Invite[]; stats: Stats; registrationOpen: boolean };
 type Sort = "storage" | "seen" | "created";
+type MailOutcome = { at: number; ok: boolean; error?: string };
+type Smtp = {
+  mode: "smtp" | "log" | "off";
+  host: string | null;
+  port: number | null;
+  secure: boolean;
+  user: string | null;
+  from: string | null;
+  lastOk: MailOutcome | null;
+  lastError: MailOutcome | null;
+};
 
 function bytes(n: number): string {
   if (n < 1000) return `${n} o`;
@@ -64,8 +75,14 @@ export function Admin() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("created");
 
+  const [smtp, setSmtp] = useState<Smtp | null>(null);
+  const [testTo, setTestTo] = useState(me.email);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
   const load = useCallback(() => {
     api.get<Data>("/admin").then(setData).catch(toast.error);
+    api.get<Smtp>("/admin/smtp").then(setSmtp).catch(toast.error);
   }, []);
   useEffect(load, [load]);
 
@@ -91,6 +108,28 @@ export function Admin() {
       load();
     } catch (e) {
       toast.error(e);
+    }
+  };
+
+  const testMail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await api.post<{ to: string; ms: number; status: Smtp }>("/admin/smtp/test", { to: testTo });
+      setSmtp(r.status);
+      setTestResult({
+        ok: true,
+        text:
+          smtp?.mode === "log"
+            ? `Email écrit dans les journaux du serveur (mode log), rien n'est réellement envoyé.`
+            : `Accepté par le serveur SMTP en ${(r.ms / 1000).toFixed(1).replace(".", ",")} s. Vérifie la boîte de ${r.to} (et les indésirables).`,
+      });
+    } catch (err) {
+      setTestResult({ ok: false, text: err instanceof Error ? err.message : String(err) });
+      api.get<Smtp>("/admin/smtp").then(setSmtp).catch(() => {});
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -181,6 +220,73 @@ export function Admin() {
             </button>
           </div>
         ))}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>
+            <Mail size={16} /> Emails (SMTP)
+          </h3>
+          {smtp && (
+            <span className={`badge${smtp.mode === "off" ? " admin-badge-off" : smtp.mode === "smtp" ? " admin-badge-on" : ""}`}>
+              {smtp.mode === "smtp" ? "configuré" : smtp.mode === "log" ? "mode log" : "désactivé"}
+            </span>
+          )}
+        </div>
+        {smtp && (
+          <>
+            <div className="row">
+              <div className="grow">
+                {smtp.mode === "smtp" ? (
+                  <>
+                    <div className="title mono">
+                      {smtp.host}:{smtp.port} {smtp.secure ? "(TLS)" : "(STARTTLS si proposé)"}
+                    </div>
+                    <div className="sub">
+                      Expéditeur : {smtp.from ?? "non défini"}
+                      {smtp.user && ` · compte ${smtp.user}`}
+                    </div>
+                  </>
+                ) : smtp.mode === "log" ? (
+                  <>
+                    <div className="title">Les emails sont écrits dans les journaux du serveur</div>
+                    <div className="sub">SMTP_TRANSPORT=log : pratique en développement, personne ne reçoit rien.</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="title">Aucun email n'est envoyé</div>
+                    <div className="sub">
+                      Sans SMTP_HOST, les comptes ne sont pas vérifiés par email et les notifications sont indisponibles. Configure SMTP_HOST, SMTP_PORT,
+                      SMTP_USER, SMTP_PASS et SMTP_FROM puis redémarre le serveur.
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            {smtp.mode === "smtp" && (smtp.lastOk || smtp.lastError) && (
+              <p className="admin-note">
+                {smtp.lastOk && <>Dernier envoi réussi {ago(smtp.lastOk.at)}. </>}
+                {smtp.lastError && (!smtp.lastOk || smtp.lastError.at > smtp.lastOk.at) && (
+                  <span className="admin-error">
+                    Dernier échec {ago(smtp.lastError.at)} : {smtp.lastError.error}
+                  </span>
+                )}
+              </p>
+            )}
+            {smtp.mode !== "off" && (
+              <form className="row" onSubmit={testMail}>
+                <label className="field grow">
+                  Envoyer un email de test à
+                  <input className="input" type="email" required value={testTo} onChange={(e) => setTestTo(e.target.value)} />
+                </label>
+                <button className="btn" style={{ alignSelf: "flex-end" }} disabled={testing}>
+                  {testing ? <Loader2 size={16} className="spin" /> : <Send size={16} />} Tester
+                </button>
+              </form>
+            )}
+            {testResult && <p className={`admin-note ${testResult.ok ? "admin-ok" : "admin-error"}`}>{testResult.text}</p>}
+          </>
+        )}
       </div>
 
       <div className="panel">
