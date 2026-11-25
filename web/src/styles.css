@@ -1992,3 +1992,48 @@ html.dark .term-tile.custom {
     animation: none;
   }
 }
+
+/* ---- Broadcast input (local to this browser) ------------------------------------ */
+
+.term.broadcasting {
+  border-color: #f59e0b;
+  box-shadow: 3px 3px 0 0 rgba(245, 158, 11, 0.55);
+}
+html.dark .term.broadcasting {
+  border-color: #f59e0b;
+  box-shadow: 3px 3px 0 0 rgba(245, 158, 11, 0.4);
+}
+.term.broadcasting .term-head {
+  border-bottom-color: #f59e0b;
+}
+.term-head .term-bcast {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 1px 2px 1px 7px;
+  border-radius: 999px;
+  background: #f59e0b;
+  color: #1c1917;
+  font-size: 11px;
+  font-weight: 800;
+}
+.term-head .term-bcast button {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+}
+.dock-bcast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.dock-bcast span {
+  flex: 1;
+}

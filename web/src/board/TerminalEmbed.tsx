@@ -3,11 +3,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Cable, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
+import { Cable, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, Radio, RotateCcw, TerminalSquare, X } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog, useTheme } from "../components/ui.tsx";
 import { iconUrl, type TileIcon } from "./personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "./TileCustomizer.tsx";
+import { clearBroadcast, fanOut, liveTargets, setBroadcast, toggleBroadcast, useBroadcastGroup } from "./broadcast.ts";
 
 const FONT = '"Cascadia Code", ui-monospace, Menlo, monospace';
 
@@ -138,8 +139,15 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     document.fonts.load(`13px ${FONT}`).finally(() => {
       if (disposed) return;
       term.open(body);
-      term.onData((d) => session.terminalInput(terminalId, d));
-      term.onBinary((d) => session.terminalInput(terminalId, Uint8Array.from(d, (c) => c.charCodeAt(0))));
+      term.onData((d) => {
+        session.terminalInput(terminalId, d);
+        fanOut(session, terminalId, d);
+      });
+      term.onBinary((d) => {
+        const bytes = Uint8Array.from(d, (c) => c.charCodeAt(0));
+        session.terminalInput(terminalId, bytes);
+        fanOut(session, terminalId, bytes);
+      });
       unsubscribe = session.subscribeTerminal(terminalId, {
         onReplay: (data) => {
           term.reset();
@@ -160,6 +168,8 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
       disposed = true;
       observer?.disconnect();
       unsubscribe();
+      // A window that goes away must not keep receiving keystrokes it can't show.
+      setBroadcast(terminalId, false);
       term.dispose();
       termRef.current = null;
     };
@@ -214,6 +224,47 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     return () => el.removeEventListener("contextmenu", toCanvas, true);
   }, []);
 
+  // Broadcast input: Alt+B toggles the terminal that has the keyboard focus.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.code !== "KeyB" || e.ctrlKey || e.metaKey || !session.canEdit) return;
+      if (!rootRef.current?.contains(document.activeElement)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleBroadcast(terminalId);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [session, terminalId]);
+
+  // Pasting several lines into a group is dangerous (each line runs everywhere): ask first.
+  useEffect(() => {
+    const el = rootRef.current!;
+    const onPaste = async (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData("text") ?? "";
+      if (!/[\r\n]/.test(text.replace(/[\r\n]+$/, ""))) return;
+      const n = liveTargets(session).length;
+      if (n < 2 || !liveTargets(session).includes(terminalId)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const lines = text.replace(/[\r\n]+$/, "").split(/\r\n|\r|\n/).length;
+      const ok = await confirmDialog({
+        title: `Coller ${lines} lignes dans ${n} terminaux ?`,
+        text: "La saisie est diffusée : ce texte sera collé, et donc exécuté ligne par ligne, dans tous les terminaux de la diffusion.",
+        confirm: "Coller partout",
+        danger: true,
+      });
+      if (ok) termRef.current?.paste(text);
+      else termRef.current?.focus();
+    };
+    el.addEventListener("paste", onPaste, true);
+    return () => el.removeEventListener("paste", onPaste, true);
+  }, [session, terminalId]);
+
+  const group = useBroadcastGroup();
+  const broadcasting = group.has(terminalId);
+  const groupSize = liveTargets(session).length + (broadcasting && info?.status !== "running" ? 1 : 0);
+
   const status = info?.status;
   const kill = async () => {
     const ok = await confirmDialog({
@@ -232,7 +283,7 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
   const name = title || label;
 
   return (
-    <div className={`term ${collapsed ? "collapsed" : ""}`} ref={rootRef}>
+    <div className={`term ${collapsed ? "collapsed" : ""} ${broadcasting ? "broadcasting" : ""}`} ref={rootRef}>
       {collapsed && (
         <div className={`term-tile ${unread ? "unread" : ""} ${iconSrc ? "custom" : ""}`} title={`${name} (${label}) — clique pour ouvrir le shell`}>
           {iconSrc ? (
@@ -263,11 +314,29 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
           {name.split("\n")[0]}
           {title && <span className="status"> · {label}</span>}
         </span>
+        {broadcasting && (
+          <span className="term-bcast" title="La saisie de ce terminal est envoyée à tous les terminaux de la diffusion">
+            Diffusion · {groupSize}
+            <button title="Tout arrêter (retire tous les terminaux de la diffusion)" onClick={clearBroadcast}>
+              <X size={11} />
+            </button>
+          </span>
+        )}
         {!session.canEdit && <span className="status">lecture seule</span>}
         <span className="status">{status ? STATUS_LABEL[status] : "introuvable"}</span>
         {status === "exited" && session.canEdit && (
           <button title="Relancer" onClick={() => session.restartTerminal(terminalId)}>
             <RotateCcw size={14} />
+          </button>
+        )}
+        {session.canEdit && (
+          <button
+            className={broadcasting ? "on" : undefined}
+            aria-pressed={broadcasting}
+            title={broadcasting ? "Ne plus diffuser la saisie (Alt+B)" : "Diffuser la saisie : ce que tu tapes ici est envoyé à tous les terminaux de la diffusion (Alt+B)"}
+            onClick={() => toggleBroadcast(terminalId)}
+          >
+            <Radio size={14} />
           </button>
         )}
         {onToggleLock && (
