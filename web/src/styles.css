@@ -1081,6 +1081,11 @@ html.dark .term {
   opacity: 1;
   background: rgba(99, 102, 241, 0.15);
 }
+/* Lock toggle while the window is locked: stays visible so the state reads at a glance. */
+.term-head button.on {
+  opacity: 1;
+  color: var(--brand);
+}
 .term-body {
   position: relative;
   flex: 1;

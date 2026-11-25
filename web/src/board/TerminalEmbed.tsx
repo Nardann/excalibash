@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Cable, Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
+import { Cable, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, RotateCcw, TerminalSquare } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog, useTheme } from "../components/ui.tsx";
 import { iconUrl, type TileIcon } from "./personalLibrary.ts";
@@ -68,6 +68,9 @@ type Props = {
   onCustomize?: (patch: TilePatch, collapse: boolean) => void;
   /** Replaces the plain close: the shell of a machine icon is also removed from it. */
   onKill?: () => void;
+  /** Window locked in place (can't be moved or resized); the shell stays usable. */
+  locked?: boolean;
+  onToggleLock?: () => void;
 };
 
 export function useIconUrl(icon: TileIcon | null | undefined) {
@@ -84,7 +87,7 @@ export function useIconUrl(icon: TileIcon | null | undefined) {
   return url;
 }
 
-export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, toggleTitle, onCustomize, onKill }: Props) {
+export function TerminalEmbed({ session, terminalId, active, collapsed, title, icon, onToggleCollapsed, toggleTitle, onCustomize, onKill, locked, onToggleLock }: Props) {
   const info = useTerminalInfo(session, terminalId);
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -247,6 +250,16 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
         {status === "exited" && session.canEdit && (
           <button title="Relancer" onClick={() => session.restartTerminal(terminalId)}>
             <RotateCcw size={14} />
+          </button>
+        )}
+        {onToggleLock && (
+          <button
+            className={locked ? "on" : undefined}
+            aria-pressed={!!locked}
+            title={locked ? "Déverrouiller (la fenêtre pourra de nouveau être déplacée)" : "Verrouiller la fenêtre en place (le shell reste utilisable)"}
+            onClick={onToggleLock}
+          >
+            {locked ? <Lock size={14} /> : <LockOpen size={14} />}
           </button>
         )}
         {onCustomize && (

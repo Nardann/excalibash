@@ -45,6 +45,7 @@ import {
   removeShell,
   removeWeb,
   setNodeLook,
+  setWindowLocked,
   toggleAll,
   toggleShell,
   toggleWeb,
@@ -579,7 +580,9 @@ function Editor({ node }: { node: Node }) {
         .reverse()
         .find((el) => el.type === "embeddable" && sx >= el.x && sx <= el.x + el.width && sy >= el.y && sy <= el.y + el.height);
       if (!hit || !terminalIdOf(hit) || nodeDataOf(hit) || (hit.customData as TileData | undefined)?.collapsed) return;
-      if (sy <= hit.y + TERM_HEAD) return;
+      // The title bar selects and moves the window, except when it is locked: then any click
+      // opens the shell (and its title bar buttons), since the window can't be selected.
+      if (sy <= hit.y + TERM_HEAD && !hit.locked) return;
       if (st.activeEmbeddable?.element.id === hit.id && st.activeEmbeddable.state === "active") return;
       e.preventDefault();
       e.stopPropagation();
@@ -675,6 +678,8 @@ function Editor({ node }: { node: Node }) {
             title={owner?.title?.split("\n")[0] ?? null}
             onToggleCollapsed={editor ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
             toggleTitle="Masquer (le shell continue, l'icône reste sur le schéma)"
+            locked={element.locked}
+            onToggleLock={editor ? () => setWindowLocked(excalidrawRef.current!, element.id, !element.locked) : undefined}
             onKill={() => {
               session.closeTerminal(tid);
               if (excalidrawRef.current) removeShell(excalidrawRef.current, nodeId, tid, shellMachineName(tid));
