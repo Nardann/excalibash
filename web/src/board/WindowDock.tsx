@@ -1,9 +1,10 @@
 // Side dock: every machine icon of the board with its shells and sites, so a hidden window opens
 // (or an open one comes to the front) in one click, without hunting for its icon on the canvas.
 import { useState, useSyncExternalStore } from "react";
-import { Cable, ChevronRight, Globe, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Plus, Power, TerminalSquare } from "lucide-react";
+import { Cable, ChevronRight, Globe, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Plus, Power, Radio, TerminalSquare } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog } from "../components/ui.tsx";
+import { clearBroadcast, liveTargets, useBroadcastGroup } from "./broadcast.ts";
 
 export type DockItem = { id: string; open: boolean };
 /** `remote`: a Telnet / SSH device, through which nothing else can be reached. */
@@ -55,6 +56,8 @@ export function WindowDock(p: {
     }
   };
 
+  const bcast = useBroadcastGroup();
+  const bcastLive = bcast.size ? liveTargets(p.session).length : 0;
   const hidden = p.groups.reduce((n, g) => n + [...g.shells, ...g.webs].filter((i) => !i.open).length, 0);
 
   if (collapsed)
@@ -74,6 +77,15 @@ export function WindowDock(p: {
           <PanelRightClose size={15} />
         </button>
       </div>
+      {bcast.size > 0 && (
+        <div className="dock-bcast">
+          <Radio size={13} />
+          <span>Diffusion · {bcastLive}</span>
+          <button className="btn btn-sm" title="Retire tous les terminaux de la diffusion de saisie" onClick={clearBroadcast}>
+            Tout arrêter
+          </button>
+        </div>
+      )}
       <div className="dock-body">
         {p.groups.map((g) => {
           const firstShell = g.shells[0] && p.session.terminals.get(g.shells[0].id);
