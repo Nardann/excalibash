@@ -20,12 +20,16 @@ type Box = { w: number; h: number };
 const labelBox = (lines: string[]): Box => ({ w: Math.max(...lines.map((l) => l.length)) * 6.7 + 14, h: lines.length * 15 + 6 });
 const BUTTON: Box = { w: 30, h: 20 };
 
+/** The lines of a cable end's label (interface, IP, VLANs), in display order. */
+export const labelLines = (i?: EndInfo) => [i?.iface, i?.ip, i?.vlans && `VLAN ${i.vlans}`].filter(Boolean) as string[];
+
 /**
  * A box beside the cable end, clear of the item and of the cable: on one side of the cable
  * (`side`), growing along the cable away from the item. When the cable runs diagonally under the
- * box, the box steps aside by what the cable drifts over its length.
+ * box, the box steps aside by what the cable drifts over its length. Returns the corner the box
+ * grows from and the growth direction on each axis.
  */
-function place(m: CableMark, side: 1 | -1, box: Box, offset = { x: 0, y: 0 }): React.CSSProperties {
+function anchor(m: { x: number; y: number; dir: { x: number; y: number } }, side: 1 | -1, box: Box) {
   const d = m.dir;
   let n = { x: -d.y, y: d.x };
   if (n.x < 0 || (n.x === 0 && n.y < 0)) n = { x: -n.x, y: -n.y };
@@ -39,7 +43,23 @@ function place(m: CableMark, side: 1 | -1, box: Box, offset = { x: 0, y: 0 }): R
   let y = m.y + d.y * ALONG + n.y * SIDE;
   if (horizontal && sgn(d.y) === gy && d.y !== 0) y += gy * box.w * (Math.abs(d.y) / Math.abs(d.x));
   if (!horizontal && sgn(d.x) === gx && d.x !== 0) x += gx * box.h * (Math.abs(d.x) / Math.abs(d.y));
-  return { left: x + offset.x, top: y + offset.y, transform: `translate(${gx > 0 ? "0" : "-100%"}, ${gy > 0 ? "0" : "-100%"})` };
+  return { x, y, gx, gy };
+}
+
+function place(m: CableMark, side: 1 | -1, box: Box, offset = { x: 0, y: 0 }): React.CSSProperties {
+  const a = anchor(m, side, box);
+  return { left: a.x + offset.x, top: a.y + offset.y, transform: `translate(${a.gx > 0 ? "0" : "-100%"}, ${a.gy > 0 ? "0" : "-100%"})` };
+}
+
+/**
+ * Where a cable end's label sits at zoom 1, as a box (top-left corner and size): the same spot as
+ * on screen, for an export. `p` and `dir` are the end and the cable's direction (scene units).
+ */
+export function labelRect(p: { x: number; y: number }, dir: { x: number; y: number }, info: EndInfo) {
+  const lines = labelLines(info);
+  const box = labelBox(lines);
+  const a = anchor({ ...p, dir }, 1, box);
+  return { x: a.x + (info.dx ?? 0) - (a.gx > 0 ? 0 : box.w), y: a.y + (info.dy ?? 0) - (a.gy > 0 ? 0 : box.h), w: box.w, h: box.h, lines };
 }
 
 export function CableOverlay({
@@ -102,7 +122,7 @@ export function CableOverlay({
     <>
       {marks.map((m) => {
         const i = m.info;
-        const lines = [i?.iface, i?.ip, i?.vlans && `VLAN ${i.vlans}`].filter(Boolean) as string[];
+        const lines = labelLines(i);
         const key = `${m.cableId}:${m.end}`;
         const off = drag?.key === key ? drag : { dx: i?.dx ?? 0, dy: i?.dy ?? 0 };
         return (

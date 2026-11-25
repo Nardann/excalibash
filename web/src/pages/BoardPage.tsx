@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -22,6 +22,7 @@ import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End 
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
 import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
+import { exportDiagram } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -147,6 +148,8 @@ function Editor({ node }: { node: Node }) {
   const [cableZoom, setCableZoom] = useState(1);
   /** Reachability of the IPs at the cable ends, and where each cable's state badge goes. */
   const [links, setLinks] = useState<LinkStates>({});
+  /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
+  const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
   const [cableMids, setCableMids] = useState<{ cableId: string; x: number; y: number }[]>([]);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
@@ -819,6 +822,9 @@ function Editor({ node }: { node: Node }) {
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
+        <button className="btn btn-icon btn-sm" title="Exporter le schéma en image (avec les interfaces, IP et VLAN des câbles)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
+          <Download size={16} />
+        </button>
         {node.ownerId === user.id && (
           <button className="btn btn-sm" onClick={() => setSharing(true)}>
             <Share2 size={16} /> Partager
@@ -1111,6 +1117,30 @@ function Editor({ node }: { node: Node }) {
             />
           );
         })()}
+      {exportMenu && (
+        <Menu anchor={exportMenu} onClose={() => setExportMenu(null)} align="right">
+          <div className="menu-label">Exporter le schéma</div>
+          {(["png", "svg"] as const).map((kind) => (
+            <button
+              key={kind}
+              className="menu-item"
+              onClick={() => {
+                setExportMenu(null);
+                const x = excalidrawRef.current;
+                if (!x) return;
+                const nameOf = (id: string) => {
+                  const nd = nodeDataOf(findEl(x, id));
+                  const shell = nd?.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label;
+                  return nd?.title?.split("\n")[0] || nd?.machineName || shell || "Machine";
+                };
+                exportDiagram(x, kind, node.name, nameOf).catch(toast.error);
+              }}
+            >
+              <Download size={16} /> {kind === "png" ? "Image PNG" : "Image SVG (vectorielle)"}
+            </button>
+          ))}
+        </Menu>
+      )}
       {sharing && <ShareModal node={node} onClose={() => setSharing(false)} />}
     </div>
   );
