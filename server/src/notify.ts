@@ -2,21 +2,24 @@ import type { Request } from "express";
 import { db } from "./db.ts";
 import { emailEnabled, sendMail } from "./mailer.ts";
 import { publicUrl } from "./http.ts";
+import type { MailBody } from "./mailTemplate.ts";
 
 /**
- * Email notifications, chosen by each person in their account (all off by default).
+ * Email notifications, chosen by each person in their account (only shares on by default).
  * Names of boards and folders are encrypted, so emails can only say *what kind* of item it was.
  */
 export const NOTIFY_EVENTS = ["itemDeleted", "itemShared", "accessRevoked", "itemTransferred", "newLogin"] as const;
 export type NotifyEvent = (typeof NOTIFY_EVENTS)[number];
 export type NotifyPrefs = Record<NotifyEvent, boolean>;
+/** Only shares are announced by default; a choice the person saved always wins. */
+const DEFAULTS: NotifyPrefs = { itemDeleted: false, itemShared: true, accessRevoked: false, itemTransferred: false, newLogin: false };
 
 export function readPrefs(raw: string | null | undefined): NotifyPrefs {
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(raw || "{}") ?? {};
   } catch {}
-  return Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, parsed[e] === true])) as NotifyPrefs;
+  return Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, typeof parsed[e] === "boolean" ? parsed[e] : DEFAULTS[e]])) as NotifyPrefs;
 }
 
 export function getPrefs(userId: string): NotifyPrefs {
@@ -49,15 +52,18 @@ export const kindLabel = (kind: "board" | "folder") => (kind === "board" ? "un t
  * Emails each recipient who turned `event` on. Never blocks or fails the request:
  * mail errors are logged and recorded for the admin page.
  */
-export function notify(req: Request, userIds: string[], event: NotifyEvent, subject: string, body: (self: boolean) => string): void {
+export function notify(req: Request, userIds: string[], event: NotifyEvent, subject: string, body: (self: boolean) => Omit<MailBody, "footer">): void {
   if (!emailEnabled() || !userIds.length) return;
   const ids = [...new Set(userIds)];
   const rows = db
     .prepare(`SELECT id, email, notify FROM users WHERE suspended = 0 AND email_verified = 1 AND id IN (${ids.map(() => "?").join(",")})`)
     .all(...ids) as { id: string; email: string; notify: string }[];
-  const footer = `\n\n—\nTu reçois cet email parce que tu as activé cette notification. Pour la couper : ${publicUrl(req)}/account`;
+  const footer = {
+    text: "Tu reçois cet email parce que cette notification est activée sur ton compte.",
+    link: { label: "Gérer mes notifications", url: `${publicUrl(req)}/account` },
+  };
   for (const r of rows) {
     if (!readPrefs(r.notify)[event]) continue;
-    sendMail(r.email, subject, body(r.id === req.user?.id) + footer).catch((e) => console.error(`[mail] notification ${event} : ${(e as Error).message}`));
+    sendMail(r.email, subject, { ...body(r.id === req.user?.id), footer }).catch((e) => console.error(`[mail] notification ${event} : ${(e as Error).message}`));
   }
 }

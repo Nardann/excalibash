@@ -74,7 +74,7 @@ un chiffré d'un objet à un autre.
   (stocké haché, 5 essais, 15 min). Une preuve de travail calculée par le navigateur, un champ piège
   et un plafond horaire limitent les inscriptions automatiques. Ces mesures protègent le serveur,
   pas les données : elles n'ont aucun rôle dans le chiffrement.
-- **Notifications par email** : coupées par défaut, chacun choisit lesquelles recevoir. Les noms des
+- **Notifications par email** : seuls les partages sont annoncés par défaut, chacun choisit lesquelles recevoir. Les noms des
   tableaux et dossiers étant chiffrés, un email dit seulement le type d'élément (« un tableau »), le nom
   affiché de la personne à l'origine et, pour une connexion, la date et l'adresse IP.
 

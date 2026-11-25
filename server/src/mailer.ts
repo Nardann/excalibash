@@ -1,9 +1,15 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { config } from "./config.ts";
 import { getSetting, setSetting } from "./db.ts";
+import { renderMail, type MailBody } from "./mailTemplate.ts";
 
 export function emailEnabled(): boolean {
   return !!config.smtp.host || config.smtp.transport === "log";
+}
+
+/** New accounts confirm their email with a code: on by default, admins may turn it off. */
+export function verificationRequired(): boolean {
+  return emailEnabled() && getSetting("email_verification", "true") === "true";
 }
 
 let transport: Transporter | null = null;
@@ -36,7 +42,8 @@ function readOutcome(key: string): MailOutcome | null {
   }
 }
 
-export async function sendMail(to: string, subject: string, text: string): Promise<void> {
+export async function sendMail(to: string, subject: string, body: MailBody): Promise<void> {
+  const { text, html } = renderMail(body);
   if (!config.smtp.host) {
     // Log transport: development and tests read the code from the server output.
     const code = text.match(/\b\d{6}\b/)?.[0] ?? "";
@@ -44,7 +51,7 @@ export async function sendMail(to: string, subject: string, text: string): Promi
     return;
   }
   try {
-    await smtpTransport().sendMail({ from: config.smtp.from || config.smtp.user, to, subject, text });
+    await smtpTransport().sendMail({ from: config.smtp.from || config.smtp.user, to, subject, text, html });
     record({ at: Date.now(), ok: true });
   } catch (e) {
     record({ at: Date.now(), ok: false, error: (e as Error).message.slice(0, 300) });
@@ -53,7 +60,12 @@ export async function sendMail(to: string, subject: string, text: string): Promi
 }
 
 export function sendVerificationCode(to: string, code: string): Promise<void> {
-  return sendMail(to, "Ton code Excalibash", `Ton code Excalibash : ${code} (valable 15 minutes)\n\nSi tu n'as pas créé de compte, ignore ce message.`);
+  return sendMail(to, "Ton code Excalibash", {
+    title: "Confirme ton adresse email",
+    lines: ["Voici ton code pour activer ton compte Excalibash. Il est valable **15 minutes**."],
+    code,
+    note: "Si tu n'as pas créé de compte, ignore ce message : sans ce code, le compte ne sera jamais activé.",
+  });
 }
 
 /** What admins see of the email setup: never the password. */
@@ -81,9 +93,12 @@ export async function sendTestMail(to: string): Promise<void> {
       throw e;
     }
   }
-  await sendMail(
-    to,
-    "Test d'envoi Excalibash",
-    `Ceci est un email de test envoyé depuis la page d'administration d'Excalibash.\n\nSi tu le reçois, l'envoi d'emails fonctionne.`,
-  );
+  await sendMail(to, "Test d'envoi Excalibash", {
+    title: "L'envoi d'emails fonctionne",
+    lines: [
+      "Cet email de test a été envoyé depuis la page d'administration d'Excalibash.",
+      "S'il est bien arrivé dans ta boîte de réception, les codes de vérification et les notifications arriveront aussi.",
+    ],
+    note: `Envoyé le ${new Date().toLocaleString("fr-FR", { dateStyle: "full", timeStyle: "short" })}.`,
+  });
 }

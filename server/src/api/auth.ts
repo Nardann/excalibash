@@ -22,7 +22,7 @@ import {
 } from "../auth.ts";
 import { HttpError, blob, publicUrl, str } from "../http.ts";
 import { config } from "../config.ts";
-import { emailEnabled, sendVerificationCode } from "../mailer.ts";
+import { emailEnabled, sendVerificationCode, verificationRequired } from "../mailer.ts";
 import { notify } from "../notify.ts";
 import { createChallenge, verifyPow } from "../pow.ts";
 import { kickUser } from "../rooms.ts";
@@ -142,7 +142,7 @@ authApi.post("/register", async (req, res) => {
     throw new HttpError(409, "Un compte attend déjà la vérification de cet email : utilise « Renvoyer le code » ou réessaie dans 24 h");
   }
   if (existing || getUserRow(b.id)) throw new HttpError(409, "Cet email est déjà utilisé");
-  const verify = emailEnabled();
+  const verify = verificationRequired();
   const first = userCount() === 0;
   db.prepare(
     `INSERT INTO users (id, email, name, auth_hash, kdf_salt, public_key, enc_private_key, recovery_enc_private_key, recovery_auth_hash, is_admin, color, created_at)
@@ -233,9 +233,12 @@ authApi.post("/login", (req, res) => {
   checkSuspended(row.id);
   createSession(req, res, row.id);
   const when = new Date().toLocaleString("fr-FR", { dateStyle: "full", timeStyle: "short" });
-  notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () =>
-    `Nouvelle connexion à ton compte Excalibash le ${when}, depuis l'adresse ${req.ip}.\n\nSi ce n'est pas toi, change ton mot de passe : ${publicUrl(req)}/account`,
-  );
+  notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () => ({
+    title: "Nouvelle connexion à ton compte",
+    lines: [`Quelqu'un vient de se connecter à ton compte Excalibash le **${when}**, depuis l'adresse **${req.ip}**.`],
+    button: { label: "Changer mon mot de passe", url: `${publicUrl(req)}/account` },
+    note: "Si c'est toi, tu n'as rien à faire. Sinon, change ton mot de passe tout de suite : les autres appareils seront déconnectés.",
+  }));
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: row.enc_private_key } });
 });
 

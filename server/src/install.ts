@@ -89,3 +89,52 @@ export function pinPreamble(pin: string | null): string {
 command -v curl >/dev/null 2>&1 || { echo "curl est nécessaire : ce serveur a un certificat auto-signé, que seul curl sait épingler" >&2; exit 1; }
 `;
 }
+
+/**
+ * Removes the agent from a machine, whichever way it was installed (system service as root, user
+ * service, @reboot crontab entry, or started by hand): stops it, then deletes its binary and its
+ * configuration (machine key, token, known SSH hosts). Nothing secret in it: the same for everyone.
+ */
+export function uninstallScript(): string {
+  return `#!/bin/sh
+# Excalibash : retire l'agent de cette machine (service, binaire, configuration et clés).
+set -u
+BIN="$HOME/.local/bin/excalibash-agent"
+CONF="$HOME/.config/excalibash"
+UNIT=excalibash-agent.service
+
+if [ -f "/etc/systemd/system/$UNIT" ]; then
+  if [ "$(id -u)" = 0 ]; then
+    systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$UNIT"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    echo "✓ service système retiré"
+  else
+    echo "⚠ un service système excalibash-agent existe : relance cette commande avec sudo pour le retirer aussi" >&2
+  fi
+fi
+if [ -f "$HOME/.config/systemd/user/$UNIT" ]; then
+  systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  rm -f "$HOME/.config/systemd/user/$UNIT"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  echo "✓ service utilisateur retiré"
+fi
+if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'excalibash-agent'; then
+  crontab -l 2>/dev/null | grep -v 'excalibash-agent' | crontab -
+  echo "✓ démarrage automatique (crontab) retiré"
+fi
+# Only processes started as this program (the command line begins with its path).
+if command -v pkill >/dev/null 2>&1 && pkill -f "^$BIN( |\$)" 2>/dev/null; then
+  echo "✓ agent arrêté"
+fi
+if [ -e "$BIN" ]; then
+  rm -f "$BIN" "$BIN.tmp"
+  echo "✓ programme supprimé ($BIN)"
+fi
+if [ -d "$CONF" ]; then
+  rm -rf -- "$CONF"
+  echo "✓ configuration et clés supprimées ($CONF)"
+fi
+echo "Agent Excalibash retiré de cette machine."
+`;
+}

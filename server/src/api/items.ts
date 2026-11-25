@@ -200,9 +200,14 @@ itemsApi.delete("/items/:id", (req, res) => {
   }
   const what = kindLabel(item.kind);
   const done = permanent ? "supprimé définitivement" : "mis à la corbeille";
-  notify(req, recipients, "itemDeleted", `Excalibash : ${what} a été ${permanent ? "supprimé" : "mis à la corbeille"}`, (self) =>
-    self ? `Tu as ${done} ${what}.` : `${req.user!.name} a ${done} ${what} auquel tu as accès.`,
-  );
+  notify(req, recipients, "itemDeleted", `Excalibash : ${what} a été ${permanent ? "supprimé" : "mis à la corbeille"}`, (self) => ({
+    title: permanent ? `${what[0].toUpperCase()}${what.slice(1)} a été supprimé` : `${what[0].toUpperCase()}${what.slice(1)} est dans la corbeille`,
+    lines: [self ? `Tu as ${done} ${what}.` : `**${req.user!.name}** a ${done} ${what} auquel tu as accès.`],
+    button: permanent ? undefined : { label: "Ouvrir Excalibash", url: `${publicUrl(req)}/` },
+    note: permanent
+      ? "La suppression est définitive : le contenu chiffré a été effacé du serveur."
+      : "Tant qu'il est dans la corbeille, son propriétaire peut encore le restaurer.",
+  }));
   res.json({ ok: true });
 });
 
@@ -270,9 +275,15 @@ itemsApi.put("/items/:id/grants/:userId", (req, res) => {
   ).run(item.id, target.id, role, blob(req.body.wrappedKey, 300), uid, Date.now());
   evictBoards(subtree(item.id), 4410, "droits modifiés");
   if (isNew) {
-    notify(req, [target.id], "itemShared", `Excalibash : ${req.user!.name} t'a partagé ${kindLabel(item.kind)}`, () =>
-      `${req.user!.name} t'a partagé ${kindLabel(item.kind)} (${role === "editor" ? "modification" : "lecture seule"}). Tu le trouves dans « Partagés avec moi » : ${publicUrl(req)}/shared`,
-    );
+    notify(req, [target.id], "itemShared", `Excalibash : ${req.user!.name} t'a partagé ${kindLabel(item.kind)}`, () => ({
+      title: `${req.user!.name} t'a partagé ${kindLabel(item.kind)}`,
+      lines: [
+        `**${req.user!.name}** t'a donné accès à ${kindLabel(item.kind)} en ${role === "editor" ? "**modification**" : "**lecture seule**"}.`,
+        "Tu le trouves dans « Partagés avec moi ».",
+      ],
+      button: { label: "Voir mes partages", url: `${publicUrl(req)}/shared` },
+      note: "Son nom est chiffré : seul ton navigateur peut le lire, c'est pourquoi il n'apparaît pas ici.",
+    }));
   }
   res.json({ ok: true });
 });
@@ -295,9 +306,11 @@ itemsApi.post("/items/:id/transfer", (req, res) => {
     db.prepare("UPDATE grants SET role = 'editor' WHERE item_id = ? AND user_id = ?").run(item.id, uid);
   });
   evictBoards(all, 4410, "droits modifiés");
-  notify(req, [to], "itemTransferred", `Excalibash : ${req.user!.name} t'a donné ${kindLabel(item.kind)}`, () =>
-    `${req.user!.name} t'a donné ${kindLabel(item.kind)} : tu en es maintenant propriétaire. Il est dans « Mes fichiers » : ${publicUrl(req)}/`,
-  );
+  notify(req, [to], "itemTransferred", `Excalibash : ${req.user!.name} t'a donné ${kindLabel(item.kind)}`, () => ({
+    title: `${req.user!.name} t'a donné ${kindLabel(item.kind)}`,
+    lines: [`**${req.user!.name}** t'a transféré ${kindLabel(item.kind)} : tu en es maintenant **propriétaire**.`, "Il est rangé dans « Mes fichiers »."],
+    button: { label: "Ouvrir mes fichiers", url: `${publicUrl(req)}/` },
+  }));
   res.json({ ok: true });
 });
 
@@ -422,8 +435,10 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const keptWebs = new Set(rekeyedWebs.map((t: { id: string }) => t.id));
   dropTunnels([...knownWebs.keys()].filter((id) => !keptWebs.has(id)));
   for (const t of rekeyedWebs) rekeyTunnel(t.id, t.keyForBoard, t.keyForAgent, t.encLabel);
-  notify(req, [revoked], "accessRevoked", `Excalibash : ${req.user!.name} t'a retiré un accès`, () =>
-    `${req.user!.name} t'a retiré l'accès à ${kindLabel(item.kind)} partagé avec toi.`,
-  );
+  notify(req, [revoked], "accessRevoked", `Excalibash : ${req.user!.name} t'a retiré un accès`, () => ({
+    title: "Un accès t'a été retiré",
+    lines: [`**${req.user!.name}** t'a retiré l'accès à ${kindLabel(item.kind)} partagé avec toi.`],
+    note: "Ses clés ont été renouvelées : ce qui y sera écrit désormais ne te sera plus lisible.",
+  }));
   res.json({ ok: true });
 });

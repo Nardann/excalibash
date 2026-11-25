@@ -16,6 +16,8 @@ export function Machines() {
   const [adding, setAdding] = useState(false);
   const [method, setMethod] = useState<"code" | "command">("code");
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
+  /** A machine just removed: the command that removes its agent from the machine itself. */
+  const [removed, setRemoved] = useState<{ name: string; command: string } | null>(null);
 
   const load = useCallback(() => {
     listMachines(keys).then(setMachines).catch(toast.error);
@@ -30,12 +32,13 @@ export function Machines() {
   const remove = async (m: Machine) => {
     const ok = await confirmDialog({
       title: "Supprimer la machine ?",
-      text: `« ${m.name} » sera déconnectée et tous ses terminaux disparaîtront des tableaux. Sa clé ne sera plus jamais acceptée.`,
+      text: `« ${m.name} » sera déconnectée et tous ses terminaux disparaîtront des tableaux. Sa clé ne sera plus jamais acceptée. Une commande te sera ensuite donnée pour retirer l'agent de la machine elle-même.`,
       confirm: "Supprimer",
       danger: true,
     });
     if (!ok) return;
-    await api.del(`/machines/${m.id}`).catch(toast.error);
+    const r = await api.del<{ ok: boolean; uninstall?: string }>(`/machines/${m.id}`).catch((e) => (toast.error(e), null));
+    if (r?.uninstall) setRemoved({ name: m.name, command: r.uninstall });
     load();
   };
 
@@ -48,6 +51,24 @@ export function Machines() {
 
   return (
     <>
+      {removed && (
+        <Modal onClose={() => setRemoved(null)} width={600}>
+          <h2 className="display">Retirer l'agent de « {removed.name} »</h2>
+          <p>
+            La machine est supprimée d'Excalibash : son agent est déjà refusé par le serveur. Pour l'effacer aussi de la machine (service de démarrage, programme,
+            configuration et clés), lance cette commande dessus :
+          </p>
+          <Code text={removed.command} />
+          <p className="sub" style={{ marginTop: 10 }}>
+            Si l'agent a été installé en root (service système), lance-la avec <code>sudo sh</code> à la place de <code>sh</code>.
+          </p>
+          <div className="modal-actions">
+            <button className="btn btn-primary" onClick={() => setRemoved(null)}>
+              Fermer
+            </button>
+          </div>
+        </Modal>
+      )}
       <h1 className="page-title display">Machines</h1>
       <p className="page-sub">
         Chaque machine fait tourner un agent qui ouvre des shells pour tes tableaux. Pas de copier-coller sur la machine ? Ajoute-la avec un code court à taper.
