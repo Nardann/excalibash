@@ -5,7 +5,7 @@ import { WebSocketServer } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { config } from "./config.ts";
-import { pruneSessions, userFromRequest } from "./auth.ts";
+import { currentSessionHash, pruneSessions, userFromRequest } from "./auth.ts";
 import { HttpError, publicUrl } from "./http.ts";
 import { announceSetup, authApi } from "./api/auth.ts";
 import { itemsApi } from "./api/items.ts";
@@ -167,7 +167,7 @@ function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const item = getItem(url.searchParams.get("board") ?? "");
     const role = item ? roleOn(user.id, item.id) : undefined;
     if (!item || item.kind !== "board" || !role || isTrashed(item.id)) return reject(403, "Forbidden");
-    boardWss.handleUpgrade(req, socket, head, (ws) => joinBoard(ws, user, item.id, role));
+    boardWss.handleUpgrade(req, socket, head, (ws) => joinBoard(ws, user, item.id, role, currentSessionHash(req)));
     return;
   }
 

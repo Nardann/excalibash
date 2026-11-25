@@ -7,7 +7,10 @@ pas non plus se faire passer pour un utilisateur afin d'obtenir ses données.
 ## Ce que le serveur voit (métadonnées)
 
 Emails et noms d'affichage, la forme de l'arbre (qui est parent de qui, qui a accès à quoi),
-les dates (dont la dernière activité de chaque compte), les tailles, le nombre d'éléments, les ids
+les dates (dont la dernière activité de chaque compte), pour chaque session ouverte la date de dernière
+utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
+déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
+IPv6 en /48), les tailles, le nombre d'éléments, les ids
 et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
@@ -60,6 +63,13 @@ un chiffré d'un objet à un autre.
 - Mot de passe perdu : la clé de récupération permet d'en redéfinir un. Sans elle, les données sont perdues.
 - Déconnexion, changement de mot de passe, récupération ou suppression du compte : les sessions
   concernées sont supprimées et les connexions temps réel ouvertes sont coupées.
+- **Sessions actives** (« Mon compte → Appareils connectés ») : chaque session stocke sa date de création, sa
+  dernière utilisation (écrite au plus une fois toutes les 5 minutes), un libellé approximatif navigateur / système
+  et un préfixe d'IP grossier. Ni l'User-Agent brut ni l'adresse IP complète ne sont enregistrés (celle-ci figure
+  seulement dans l'email de nouvelle connexion, si tu l'actives). Chaque session a un identifiant public aléatoire,
+  distinct du hachage du jeton. Le titulaire peut déconnecter un appareil ou tous les autres : la session est supprimée
+  et ses connexions temps réel sont coupées aussitôt. Personne d'autre, administrateurs compris, ne peut lister ni
+  révoquer les sessions d'un compte par l'API.
 - **Inscription** : quand un serveur SMTP est configuré, l'email est vérifié par un code à 6 chiffres
   (stocké haché, 5 essais, 15 min). Une preuve de travail calculée par le navigateur, un champ piège
   et un plafond horaire limitent les inscriptions automatiques. Ces mesures protègent le serveur,

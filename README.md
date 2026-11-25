@@ -32,7 +32,7 @@ Tout le TP tient sur un seul tableau, partagé avec le binôme ou le prof. Les d
 - **Collaboration en temps réel.** Dessin, curseurs, sélections et terminaux partagés.
 - **Dossiers partagés.** Partage en lecture ou en édition ; les sous-dossiers suivent. Retirer quelqu'un renouvelle toutes les clés du sous-arbre.
 - **Machines.** Agent Go statique (Linux, macOS, amd64, arm64) qui se connecte en sortie, sans port à ouvrir. Appairage par code court, démarrage avec la machine, reconnexion automatique.
-- **Comptes.** Le mot de passe ne quitte pas le navigateur et une clé de récupération est remise à l'inscription. Les inscriptions se font sur invitation ou sont ouvertes à tous, avec vérification par email. Le panneau d'administration gère les comptes et le stockage sans accès au contenu.
+- **Comptes.** Le mot de passe ne quitte pas le navigateur et une clé de récupération est remise à l'inscription. « Mon compte » liste les appareils connectés (navigateur et préfixe d'IP approximatifs, dernière activité) et permet de les déconnecter un à un ou tous d'un coup. Les inscriptions se font sur invitation ou sont ouvertes à tous, avec vérification par email. Le panneau d'administration gère les comptes et le stockage sans accès au contenu.
 
 <table>
   <tr>

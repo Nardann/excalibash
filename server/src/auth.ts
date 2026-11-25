@@ -1,3 +1,4 @@
+import { isIPv4, isIPv6 } from "node:net";
 import { scryptSync, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Request, Response, NextFunction } from "express";
@@ -90,10 +91,55 @@ export function getUserRow(id: string): UserRow | undefined {
   return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
 }
 
+/** Coarse "Browser · OS" label from a User-Agent; the raw string is never stored. */
+export function uaLabel(ua: string | undefined): string {
+  const s = ua ?? "";
+  const browser =
+    /Edg(e|A|iOS)?\//.test(s) ? "Edge"
+    : /OPR\/|Opera/.test(s) ? "Opera"
+    : /Firefox\/|FxiOS/.test(s) ? "Firefox"
+    : /Chrome\/|CriOS/.test(s) ? "Chrome"
+    : /Safari\//.test(s) ? "Safari"
+    : /curl\//i.test(s) ? "curl"
+    : "";
+  const os =
+    /Windows/.test(s) ? "Windows"
+    : /Android/.test(s) ? "Android"
+    : /iPhone|iPad|iPod/.test(s) ? "iOS"
+    : /Mac OS X|Macintosh/.test(s) ? "macOS"
+    : /CrOS/.test(s) ? "ChromeOS"
+    : /Linux|X11/.test(s) ? "Linux"
+    : "";
+  const label = [browser || "Navigateur inconnu", os].filter(Boolean).join(" · ");
+  return label.slice(0, 40);
+}
+
+/** Coarse network prefix: IPv4 /24 ("1.2.3.x"), IPv6 /48 ("2001:db8:1::/48"). */
+export function ipPrefix(ip: string | undefined): string {
+  let a = (ip ?? "").trim();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(a);
+  if (mapped) a = mapped[1];
+  if (isIPv4(a)) return a.split(".").slice(0, 3).join(".") + ".x";
+  if (isIPv6(a)) {
+    const [head, tail = ""] = a.split("::");
+    const h = head ? head.split(":") : [];
+    const t = tail ? tail.split(":") : [];
+    const groups = a.includes("::") ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t] : h;
+    return groups.slice(0, 3).map((g) => g.replace(/^0+(?=.)/, "").toLowerCase()).join(":") + "::/48";
+  }
+  return "";
+}
+
+const used = new Map<string, number>();
+
 export function createSession(req: Request, res: Response, userId: string): void {
   const token = randomBytes(32).toString("base64url");
-  const expires = Date.now() + config.sessionDays * 86400_000;
-  db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").run(sha256(token), userId, expires);
+  const now = Date.now();
+  const expires = now + config.sessionDays * 86400_000;
+  db.prepare(
+    "INSERT INTO sessions (token_hash, user_id, expires_at, public_id, created_at, last_used_at, user_agent_label, ip_prefix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(sha256(token), userId, expires, randomBytes(8).toString("hex"), now, now, uaLabel(req.headers["user-agent"]), ipPrefix(req.ip));
+  used.set(sha256(token), now);
   res.cookie(COOKIE, token, {
     httpOnly: true,
     sameSite: "strict",
@@ -131,8 +177,17 @@ export function userFromRequest(req: IncomingMessage): User | undefined {
     .prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.suspended = 0")
     .get(hash, Date.now()) as UserRow | undefined;
   if (!row) return undefined;
+  touchSession(hash);
   touchUser(row.id);
   return toUser(row);
+}
+
+/** Records session use at most once every 5 minutes per session. */
+function touchSession(hash: string): void {
+  const now = Date.now();
+  if ((used.get(hash) ?? 0) > now - 300_000) return;
+  used.set(hash, now);
+  db.prepare("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?").run(now, hash);
 }
 
 const seen = new Map<string, number>();
@@ -171,6 +226,8 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
 
 export function pruneSessions(): void {
   db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
+  const live = new Set((db.prepare("SELECT token_hash FROM sessions").all() as { token_hash: string }[]).map((r) => r.token_hash));
+  for (const k of used.keys()) if (!live.has(k)) used.delete(k);
 }
 
 // ---- Rate limiting for credential endpoints ---------------------------------------

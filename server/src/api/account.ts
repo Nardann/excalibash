@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db.ts";
-import { destroySession, rateLimit, requireUser, verifySecret, getUserRow } from "../auth.ts";
+import { currentSessionHash, destroySession, rateLimit, requireUser, verifySecret, getUserRow } from "../auth.ts";
+import { kickSession } from "../rooms.ts";
 import { HttpError, blob } from "../http.ts";
 import { purgeUser } from "./admin.ts";
 import { emailEnabled } from "../mailer.ts";
@@ -43,6 +44,48 @@ accountApi.put("/visibility", (req, res) => {
 accountApi.post("/onboarded", (req, res) => {
   db.prepare("UPDATE users SET onboarded = 1 WHERE id = ?").run(req.user!.id);
   res.json({ ok: true });
+});
+
+type SessionRow = { token_hash: string; public_id: string; created_at: number | null; last_used_at: number | null; user_agent_label: string | null; ip_prefix: string | null };
+
+/** Lists the caller's own sessions (coarse metadata only; ids are opaque, not token hashes). */
+accountApi.get("/sessions", (req, res) => {
+  const cur = currentSessionHash(req);
+  const rows = db
+    .prepare(
+      "SELECT token_hash, public_id, created_at, last_used_at, user_agent_label, ip_prefix FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY COALESCE(last_used_at, created_at, 0) DESC",
+    )
+    .all(req.user!.id, Date.now()) as SessionRow[];
+  res.json(
+    rows.map((r) => ({
+      id: r.public_id,
+      current: r.token_hash === cur,
+      createdAt: r.created_at,
+      lastUsedAt: r.last_used_at ?? r.created_at,
+      label: r.user_agent_label ?? "",
+      ipPrefix: r.ip_prefix ?? "",
+    })),
+  );
+});
+
+accountApi.post("/sessions/revoke-others", (req, res) => {
+  if (!rateLimit(`sessions:${req.user!.id}`, 20)) throw new HttpError(429, "Trop d'essais, réessaie plus tard");
+  const cur = currentSessionHash(req) ?? "";
+  const others = db.prepare("SELECT token_hash FROM sessions WHERE user_id = ? AND token_hash != ?").all(req.user!.id, cur) as { token_hash: string }[];
+  db.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").run(req.user!.id, cur);
+  for (const o of others) kickSession(o.token_hash, 4001, "session terminée");
+  res.json({ ok: true, revoked: others.length });
+});
+
+accountApi.delete("/sessions/:id", (req, res) => {
+  if (!rateLimit(`sessions:${req.user!.id}`, 20)) throw new HttpError(429, "Trop d'essais, réessaie plus tard");
+  const row = db.prepare("SELECT token_hash FROM sessions WHERE public_id = ? AND user_id = ?").get(String(req.params.id), req.user!.id) as
+    | { token_hash: string }
+    | undefined;
+  if (!row) throw new HttpError(404, "Session introuvable");
+  db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(row.token_hash);
+  kickSession(row.token_hash, 4001, "session terminée");
+  res.json({ ok: true, current: row.token_hash === currentSessionHash(req) });
 });
 
 accountApi.delete("/", (req, res) => {

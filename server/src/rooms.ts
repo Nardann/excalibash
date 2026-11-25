@@ -18,7 +18,7 @@ import { closeTunnel, createTunnel, listBoardTunnels, tunnelExists } from "./tun
 /** Encrypted element: only the merge metadata is readable by the server. */
 type Entry = { id: string; v: number; n: number; c: string };
 
-type Client = { id: string; user: User; role: Role };
+type Client = { id: string; user: User; role: Role; session?: string };
 
 const SAVE_DELAY = 1500;
 const MAX_CIPHERTEXT = 2 * 1024 * 1024;
@@ -76,8 +76,8 @@ class Room implements BoardRoom {
     return { id: c.id, userId: c.user.id, name: c.user.name, color: c.user.color, role: c.role };
   }
 
-  join(ws: WebSocket, user: User, role: Role): void {
-    const client: Client = { id: newId(6), user, role };
+  join(ws: WebSocket, user: User, role: Role, session?: string): void {
+    const client: Client = { id: newId(6), user, role, session };
     this.clients.set(ws, client);
     ws.send(
       JSON.stringify({
@@ -250,6 +250,11 @@ class Room implements BoardRoom {
     for (const [ws, c] of this.clients) if (c.user.id === userId) ws.close(code, reason);
   }
 
+  /** Closes the sockets opened with one session (token hash). */
+  kickSession(session: string, code: number, reason: string): void {
+    for (const [ws, c] of this.clients) if (c.session === session) ws.close(code, reason);
+  }
+
   /** Disconnects everyone; pending edits are dropped when `discard` (content was replaced). */
   evict(code: number, reason: string, discard = false): void {
     if (discard) {
@@ -262,13 +267,13 @@ class Room implements BoardRoom {
   }
 }
 
-export function joinBoard(ws: WebSocket, user: User, boardId: string, role: Role): void {
+export function joinBoard(ws: WebSocket, user: User, boardId: string, role: Role, session?: string): void {
   let room = rooms.get(boardId) as Room | undefined;
   if (!room) {
     room = new Room(boardId);
     rooms.set(boardId, room);
   }
-  room.join(ws, user, role);
+  room.join(ws, user, role, session);
 }
 
 /** Persists a live room right away (so REST reads see unsaved edits). */
@@ -283,6 +288,11 @@ export function evictRoom(boardId: string, code: number, reason: string, discard
 /** Closes every board socket of a user (e.g. suspended account). */
 export function kickUser(userId: string, code: number, reason: string): void {
   for (const r of rooms.values()) (r as Room).kick(userId, code, reason);
+}
+
+/** Closes the board sockets opened with a revoked session. */
+export function kickSession(session: string, code: number, reason: string): void {
+  for (const r of rooms.values()) (r as Room).kickSession(session, code, reason);
 }
 
 export function flushAllRooms(): void {

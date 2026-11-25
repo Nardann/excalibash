@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Bell, EyeOff, Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
+import { fr } from "date-fns/locale";
+import { Bell, EyeOff, Fingerprint, KeyRound, Loader2, MonitorSmartphone, Trash2 } from "lucide-react";
 import { api, type User } from "../api.ts";
 import { useAuth, useKeys, useUser } from "../auth.tsx";
 import { changePassword, forgetKeys } from "../account.ts";
@@ -18,6 +20,8 @@ const NOTIFICATIONS: { key: NotifyEvent; title: string; help: string }[] = [
   { key: "newLogin", title: "Nouvelle connexion à mon compte", help: "À chaque connexion avec ton mot de passe, avec la date et l'adresse IP." },
 ];
 
+type SessionInfo = { id: string; current: boolean; createdAt: number | null; lastUsedAt: number | null; label: string; ipPrefix: string };
+
 export function Account() {
   const user = useUser();
   const keys = useKeys();
@@ -31,6 +35,40 @@ export function Account() {
   const [busy, setBusy] = useState(false);
   const [vis, setVis] = useState<{ findableName: boolean; findableEmail: boolean } | null>(null);
   const [notif, setNotif] = useState<{ prefs: NotifyPrefs; emailEnabled: boolean } | null>(null);
+
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
+
+  const loadSessions = () => api.get<SessionInfo[]>("/account/sessions").then(setSessions).catch(toast.error);
+  useEffect(() => {
+    loadSessions();
+  }, []);
+
+  const revokeSession = async (id: string) => {
+    try {
+      await api.del(`/account/sessions/${id}`);
+      toast("Appareil déconnecté");
+      await loadSessions();
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const revokeOthers = async () => {
+    const ok = await confirmDialog({
+      title: "Déconnecter les autres appareils ?",
+      text: "Toutes les autres sessions sont fermées ; il faudra s'y reconnecter avec ton mot de passe.",
+      confirm: "Déconnecter",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.post("/account/sessions/revoke-others");
+      toast("Les autres appareils sont déconnectés");
+      await loadSessions();
+    } catch (err) {
+      toast.error(err);
+    }
+  };
 
   useEffect(() => {
     fingerprint(keys.pub).then(setFp);
@@ -222,6 +260,41 @@ export function Account() {
             seulement de quel type d'élément il s'agit.
           </p>
         </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>
+            <MonitorSmartphone size={16} /> Appareils connectés
+          </h3>
+          {sessions && sessions.length > 1 && (
+            <button className="btn btn-sm btn-danger" onClick={revokeOthers}>
+              Déconnecter les autres appareils
+            </button>
+          )}
+        </div>
+        {(sessions ?? []).map((s) => (
+          <div className="row" key={s.id}>
+            <div className="grow">
+              <div className="title">
+                {s.label || "Appareil inconnu"} {s.current && <span className="badge live">cet appareil</span>}
+              </div>
+              <div className="sub">
+                {s.ipPrefix || "adresse inconnue"}
+                {s.lastUsedAt ? ` · actif ${formatDistanceToNow(s.lastUsedAt, { addSuffix: true, locale: fr })}` : ""}
+              </div>
+            </div>
+            {!s.current && (
+              <button className="btn btn-sm" onClick={() => revokeSession(s.id)}>
+                Déconnecter
+              </button>
+            )}
+          </div>
+        ))}
+        <p className="field-help" style={{ padding: "0 20px 16px", margin: 0 }}>
+          Le serveur ne garde que le navigateur et le système approximatifs, le début de l'adresse IP (les derniers chiffres sont écartés) et la date de dernière
+          activité. Jamais le texte complet envoyé par ton navigateur.
+        </p>
       </div>
 
       <div className="panel">

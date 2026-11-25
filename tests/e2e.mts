@@ -591,6 +591,47 @@ site.close();
   sp.ws.close();
 }
 
+// Active sessions: list, revoke one (cuts its websocket), isolation between users, coarse metadata only.
+{
+  const UA = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0 RAWUA-MARKER";
+  const pre = await realFetch(BASE + "/api/auth/prelogin", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "alice@test.local" }) });
+  const { salt } = (await pre.json()) as any;
+  const { authKey } = await c.deriveAccountKeys("alice-password-1", salt);
+  const lr = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json", "user-agent": UA }, body: JSON.stringify({ email: "alice@test.local", authKey }) });
+  const second = lr.headers.get("set-cookie")!.split(";")[0];
+  ok(lr.status === 200 && !!second, "sessions : seconde connexion d'Alice (autre jeu de cookies)");
+  const asJar = async (cookie: string, method: string, path: string) => {
+    const r = await realFetch(BASE + "/api" + path, { method, headers: { cookie } });
+    return { status: r.status, body: (await r.json().catch(() => ({}))) as any };
+  };
+  const list = await asJar(alice.cookie, "GET", "/account/sessions");
+  ok(list.status === 200 && list.body.length === 2 && list.body.filter((x: any) => x.current).length === 1, "sessions : deux sessions listées, une seule « cet appareil »");
+  const other = list.body.find((x: any) => !x.current);
+  ok(other.label === "Firefox · Linux" && other.ipPrefix === "127.0.0.x" && other.lastUsedAt > 0, "sessions : libellé et préfixe IP grossiers, dernière utilisation renseignée");
+  const raw = new DatabaseSync(DB, { readOnly: true });
+  ok(!JSON.stringify(raw.prepare("SELECT * FROM sessions").all()).includes("RAWUA-MARKER"), "sessions : le User-Agent brut n'est pas stocké");
+  ok(!list.body.some((x: any) => /^[0-9a-f]{64}$/.test(x.id)), "sessions : l'id public n'est pas le hachage du jeton");
+  const bobSessions = await asJar(bob.cookie, "GET", "/account/sessions");
+  ok(bobSessions.body.length >= 1 && !bobSessions.body.some((x: any) => x.id === other.id), "sessions : Bob ne voit pas les sessions d'Alice");
+  ok((await asJar(bob.cookie, "DELETE", `/account/sessions/${other.id}`)).status === 404, "sessions : révoquer la session d'un autre renvoie 404");
+  ok((await asJar(second, "GET", "/auth/me")).status === 200, "sessions : la seconde session fonctionne avant révocation");
+  const sx = boardSocket({ ...alice, cookie: second }, B);
+  await sx.open;
+  await sx.next((m) => m.t === "init");
+  const closed = new Promise<number>((resolve) => sx.ws.on("close", (code: number) => resolve(code)));
+  const del = await asJar(alice.cookie, "DELETE", `/account/sessions/${other.id}`);
+  ok(del.status === 200, "sessions : Alice révoque sa seconde session");
+  ok((await Promise.race([closed, new Promise<number>((r) => setTimeout(() => r(-1), 4000))])) === 4001, "sessions : la websocket de la session révoquée est coupée (4001)");
+  ok((await asJar(second, "GET", "/auth/me")).status === 401, "sessions : le cookie révoqué reçoit 401");
+  ok((await asJar(alice.cookie, "GET", "/auth/me")).status === 200, "sessions : la session courante reste valable");
+  const l3 = await realFetch(BASE + "/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "alice@test.local", authKey }) });
+  const third = l3.headers.get("set-cookie")!.split(";")[0];
+  const ro = await asJar(alice.cookie, "POST", "/account/sessions/revoke-others");
+  ok(ro.status === 200 && ro.body.revoked === 1 && (await asJar(third, "GET", "/auth/me")).status === 401, "sessions : « déconnecter les autres » révoque tout sauf la session courante");
+  ok((await asJar(alice.cookie, "GET", "/account/sessions")).body.length === 1, "sessions : il ne reste que la session courante");
+  raw.close();
+}
+
 // Unauthenticated hardening.
 const nullOrigin = await new Promise<number>((resolve) => {
   const w = new WebSocket(`${BASE.replace("http", "ws")}/ws?board=${B}`, { headers: { cookie: alice.cookie, origin: "null" } });
