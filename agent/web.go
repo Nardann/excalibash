@@ -25,6 +25,10 @@ const (
 	maxHTTPBody   = 48 << 20
 	httpTimeout   = 60 * time.Second
 	nonceLifetime = inputMaxSkew * 2
+	// maxInflight bounds concurrent forwarded requests per agent (goroutines and buffered bodies).
+	maxInflight = 32
+	// noncePruneEvery spaces out the full scan of the nonce map.
+	noncePruneEvery = 5 * time.Second
 )
 
 type tunnel struct {
@@ -35,6 +39,8 @@ type tunnel struct {
 	hostHeader string
 	// legacyTLS accepts TLS 1.0/1.1 and weak cipher suites (old switches, UPS cards…).
 	legacyTLS bool
+	// transport is shared by all requests of this tunnel (keep-alive reuse) and closed with it.
+	transport *http.Transport
 }
 
 var validHostHeader = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$`)
@@ -77,10 +83,13 @@ type webHub struct {
 	auth    []byte
 	tunnels map[string]*tunnel
 	nonces  map[string]time.Time // request ids seen recently, against replays
+	// lastPrune is when nonces was last scanned for expired entries.
+	lastPrune time.Time
+	inflight  chan struct{}
 }
 
 func newWebHub(auth []byte) *webHub {
-	return &webHub{auth: auth, tunnels: map[string]*tunnel{}, nonces: map[string]time.Time{}}
+	return &webHub{auth: auth, tunnels: map[string]*tunnel{}, nonces: map[string]time.Time{}, inflight: make(chan struct{}, maxInflight)}
 }
 
 // open installs a tunnel from its owner-issued blob:
@@ -112,16 +121,31 @@ func (w *webHub) open(msg message) {
 		log.Printf("web %s: invalid tunnel spec", msg.ID)
 		return
 	}
+	t := &tunnel{key: key, target: target, insecure: spec.Insecure, hostHeader: spec.HostHeader, legacyTLS: spec.LegacyTLS}
+	t.transport = &http.Transport{
+		TLSClientConfig:     t.tlsConfig(),
+		DisableCompression:  true,
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConnsPerHost: 4,
+	}
 	w.mu.Lock()
-	w.tunnels[msg.ID] = &tunnel{key: key, target: target, insecure: spec.Insecure, hostHeader: spec.HostHeader, legacyTLS: spec.LegacyTLS}
+	old := w.tunnels[msg.ID]
+	w.tunnels[msg.ID] = t
 	w.mu.Unlock()
+	if old != nil {
+		old.transport.CloseIdleConnections()
+	}
 	log.Printf("web %s: tunnel to %s", msg.ID, target)
 }
 
 func (w *webHub) close(id string) {
 	w.mu.Lock()
+	old := w.tunnels[id]
 	delete(w.tunnels, id)
 	w.mu.Unlock()
+	if old != nil && old.transport != nil {
+		old.transport.CloseIdleConnections()
+	}
 }
 
 type httpReq struct {
@@ -152,15 +176,20 @@ func (w *webHub) request(msg message, out *outbox) {
 		debugf("http %s: timestamp out of window", msg.ID)
 		return
 	}
+	nonce := msg.ID + "/" + msg.Rid
+	now := time.Now()
 	w.mu.Lock()
 	t := w.tunnels[msg.ID]
-	now := time.Now()
-	for n, at := range w.nonces {
-		if now.Sub(at) > nonceLifetime {
-			delete(w.nonces, n)
+	// Amortised expiry: a full scan at most once per noncePruneEvery.
+	if now.Sub(w.lastPrune) > noncePruneEvery {
+		w.lastPrune = now
+		for n, at := range w.nonces {
+			if now.Sub(at) > nonceLifetime {
+				delete(w.nonces, n)
+			}
 		}
 	}
-	_, replayed := w.nonces[msg.ID+"/"+msg.Rid]
+	_, replayed := w.nonces[nonce]
 	w.mu.Unlock()
 	if t == nil || replayed {
 		return
@@ -174,15 +203,36 @@ func (w *webHub) request(msg message, out *outbox) {
 		debugf("http %s: authentication failed", msg.ID)
 		return
 	}
+	// Authoritative anti-replay: check and record in one critical section, only once the frame
+	// is authenticated (a forged frame must not burn a nonce). The pre-check above is only an
+	// optimisation, since concurrent identical frames can all pass it.
 	w.mu.Lock()
-	w.nonces[msg.ID+"/"+msg.Rid] = now
+	_, replayed = w.nonces[nonce]
+	if !replayed {
+		w.nonces[nonce] = now
+	}
 	w.mu.Unlock()
+	if replayed {
+		return
+	}
+	select {
+	case w.inflight <- struct{}{}:
+		defer func() { <-w.inflight }()
+	default:
+		// Too many requests in flight: answer with an authenticated 503 instead of queueing.
+		w.reply(t, msg, out, httpRes{S: 503, H: map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}}, B: b64.EncodeToString([]byte("Excalibash : trop de requêtes simultanées"))})
+		return
+	}
 
 	var req httpReq
 	if json.Unmarshal(pt, &req) != nil {
 		return
 	}
-	res := w.forward(t, req)
+	w.reply(t, msg, out, w.forward(t, req))
+}
+
+// reply seals a response under the tunnel key and queues it.
+func (w *webHub) reply(t *tunnel, msg message, out *outbox, res httpRes) {
 	plain, _ := json.Marshal(res)
 	boxed, err := box(t.key, plain, "eb:http-res:"+msg.ID+":"+msg.Rid)
 	if err != nil {
@@ -229,14 +279,15 @@ func (w *webHub) forward(t *tunnel, r httpReq) httpRes {
 			req.Header.Add(k, v)
 		}
 	}
+	transport := t.transport
+	if transport == nil { // tunnels built without open() (tests)
+		transport = &http.Transport{TLSClientConfig: t.tlsConfig(), DisableCompression: true, DisableKeepAlives: true}
+	}
 	client := &http.Client{
 		Timeout: httpTimeout,
 		// Redirects are handed back to the browser, which rewrites them into the tunnel.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		Transport: &http.Transport{
-			TLSClientConfig:    t.tlsConfig(),
-			DisableCompression: true,
-		},
+		Transport:     transport,
 	}
 	resp, err := client.Do(req)
 	if err != nil {

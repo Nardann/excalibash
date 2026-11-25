@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // openTunnel installs a tunnel the way the owner's browser issues it.
@@ -97,5 +100,66 @@ func TestWebTunnelLegacyTLS(t *testing.T) {
 	if res := w.forward(legacy, httpReq{M: "GET", P: "/"}); res.S != 200 {
 		b, _ := b64.DecodeString(res.B)
 		t.Fatalf("legacyTls: %d %s", res.S, b)
+	}
+}
+
+// frame builds a valid encrypted "http" frame the way the service worker does.
+func frame(t *testing.T, tn *tunnel, id, rid string, req httpReq) message {
+	t.Helper()
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	pt, _ := json.Marshal(req)
+	boxed, err := box(tn.key, pt, "eb:http-req:"+id+":"+rid+":"+ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return message{T: "http", ID: id, Rid: rid, Ts: json.RawMessage(ts), D: b64.EncodeToString(boxed)}
+}
+
+func TestWebRequestReplayConcurrent(t *testing.T) {
+	var hits atomic.Int32
+	site := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer site.Close()
+	auth := make([]byte, 32)
+	rand.Read(auth)
+	w := newWebHub(auth)
+	tn := openTunnel(t, w, auth, "w1", map[string]any{"url": site.URL})
+	msg := frame(t, tn, "w1", "rid1", httpReq{M: "POST", P: "/reboot"})
+
+	out := &outbox{ch: make(chan []byte, 64), done: make(chan struct{})}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); w.request(msg, out) }()
+	}
+	wg.Wait()
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d forwards for one frame, want 1", n)
+	}
+	if len(out.ch) != 1 {
+		t.Fatalf("%d responses, want 1", len(out.ch))
+	}
+	// A later replay is dropped too.
+	w.request(msg, out)
+	if hits.Load() != 1 {
+		t.Fatal("sequential replay forwarded")
+	}
+}
+
+func TestWebRequestForgedDoesNotBurnNonce(t *testing.T) {
+	var hits atomic.Int32
+	site := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer site.Close()
+	auth := make([]byte, 32)
+	rand.Read(auth)
+	w := newWebHub(auth)
+	tn := openTunnel(t, w, auth, "w1", map[string]any{"url": site.URL})
+	out := &outbox{ch: make(chan []byte, 8), done: make(chan struct{})}
+	good := frame(t, tn, "w1", "rid1", httpReq{M: "GET", P: "/"})
+	forged := good
+	forged.D = b64.EncodeToString([]byte("garbage garbage garbage garbage garbage garbage"))
+	w.request(forged, out)
+	w.request(good, out)
+	if hits.Load() != 1 {
+		t.Fatalf("%d forwards, want 1", hits.Load())
 	}
 }
