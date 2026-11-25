@@ -239,6 +239,28 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   que si cette machine a un terminal ou un tunnel ouvert sur ce tableau, d'après le serveur. Un éditeur ne peut
   donc pas faire envoyer des pings depuis la machine d'un autre en trafiquant une icône.
 
+## Client MCP
+
+Le client MCP (`excalibash-mcp.mjs`, voir [MCP.md](MCP.md)) est un programme local qui ouvre une session
+comme le navigateur : même connexion (`prelogin`, `authKey`), même déchiffrement de la clé privée, même
+vérification de la clé publique, mêmes websockets de tableau et mêmes trames chiffrées.
+
+- **Le serveur ne voit rien de nouveau** : c'est une session de plus du compte (visible comme un pair
+  du tableau quand elle est ouverte). Aucun contenu en clair, aucune nouvelle clé, aucun nouveau point d'API.
+- Le déchiffrement a lieu sur la machine de l'utilisateur. Le résultat des outils est ensuite remis au
+  client MCP choisi par l'utilisateur, et à travers lui à son modèle : ce que l'utilisateur lui confie
+  sort donc du périmètre du chiffrement de bout en bout, par son choix.
+- Le fichier `~/.config/excalibash/mcp.json` (0600, dossier 0700, refusé s'il est lisible par d'autres)
+  contient le cookie de session et la clé privée : même modèle de confiance que le trousseau du navigateur
+  ou `agent.json`. La session se révoque (déconnexion, changement de mot de passe) comme les autres.
+- Lecture seule par défaut. La saisie dans un terminal (`--autoriser-saisie`) et l'ajout de notes
+  (`--autoriser-edition`) sont des options explicites, journalisées sans leur contenu. Les droits sont ceux
+  du compte : le serveur refuse toujours la saisie à un lecteur.
+- Les sorties de terminal et le contenu des tableaux sont des données non fiables (injection de prompt) ;
+  `--tableaux` limite les outils à des tableaux précis.
+- Le certificat d'une instance auto-signée se fait confiance via `NODE_EXTRA_CA_CERTS`, jamais en
+  désactivant la vérification TLS.
+
 ## HTTPS et certificat auto-signé
 
 - Par défaut (`TLS=auto`), les deux ports (application et tunnels) parlent HTTPS. Un certificat
