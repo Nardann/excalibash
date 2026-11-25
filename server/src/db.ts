@@ -164,6 +164,7 @@ addColumn("users", "onboarded", "INTEGER NOT NULL DEFAULT 0", "UPDATE users SET 
 addColumn("users", "discoverable", "INTEGER NOT NULL DEFAULT 1"); // legacy, no longer read
 addColumn("users", "findable_name", "INTEGER NOT NULL DEFAULT 1");
 addColumn("users", "findable_email", "INTEGER NOT NULL DEFAULT 0");
+addColumn("users", "notify", "TEXT NOT NULL DEFAULT '{}'"); // email notifications, all off by default
 
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");

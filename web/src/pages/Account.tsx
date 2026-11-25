@@ -1,11 +1,22 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { EyeOff, Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { Bell, EyeOff, Fingerprint, KeyRound, Loader2, Trash2 } from "lucide-react";
 import { api, type User } from "../api.ts";
 import { useAuth, useKeys, useUser } from "../auth.tsx";
 import { changePassword, forgetKeys } from "../account.ts";
 import { deriveAccountKeys, fingerprint } from "../crypto.ts";
 import { confirmDialog, copyText, toast } from "../components/ui.tsx";
+
+type NotifyEvent = "itemDeleted" | "itemShared" | "accessRevoked" | "itemTransferred" | "newLogin";
+type NotifyPrefs = Record<NotifyEvent, boolean>;
+
+const NOTIFICATIONS: { key: NotifyEvent; title: string; help: string }[] = [
+  { key: "itemDeleted", title: "Un tableau ou dossier est supprimé", help: "Quand toi ou quelqu'un d'autre met à la corbeille (ou supprime) un élément auquel tu as accès." },
+  { key: "itemShared", title: "On me partage quelque chose", help: "Quand quelqu'un te donne accès à un tableau ou un dossier." },
+  { key: "accessRevoked", title: "On me retire un accès", help: "Quand le propriétaire arrête de partager un élément avec toi." },
+  { key: "itemTransferred", title: "On me donne un élément", help: "Quand quelqu'un te transfère la propriété d'un tableau ou d'un dossier." },
+  { key: "newLogin", title: "Nouvelle connexion à mon compte", help: "À chaque connexion avec ton mot de passe, avec la date et l'adresse IP." },
+];
 
 export function Account() {
   const user = useUser();
@@ -19,6 +30,7 @@ export function Account() {
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [busy, setBusy] = useState(false);
   const [vis, setVis] = useState<{ findableName: boolean; findableEmail: boolean } | null>(null);
+  const [notif, setNotif] = useState<{ prefs: NotifyPrefs; emailEnabled: boolean } | null>(null);
 
   useEffect(() => {
     fingerprint(keys.pub).then(setFp);
@@ -26,10 +38,27 @@ export function Account() {
 
   useEffect(() => {
     api
-      .get<{ findableName: boolean; findableEmail: boolean }>("/account")
-      .then((r) => setVis({ findableName: r.findableName, findableEmail: r.findableEmail }))
+      .get<{ findableName: boolean; findableEmail: boolean; notifications: NotifyPrefs; emailEnabled: boolean }>("/account")
+      .then((r) => {
+        setVis({ findableName: r.findableName, findableEmail: r.findableEmail });
+        setNotif({ prefs: r.notifications, emailEnabled: r.emailEnabled });
+      })
       .catch(toast.error);
   }, []);
+
+  const setNotification = async (key: NotifyEvent, on: boolean) => {
+    if (!notif) return;
+    const prev = notif;
+    const prefs = { ...notif.prefs, [key]: on };
+    setNotif({ ...notif, prefs });
+    try {
+      await api.put("/account/notifications", prefs);
+      toast(on ? "Notification activée" : "Notification désactivée");
+    } catch (err) {
+      setNotif(prev);
+      toast.error(err);
+    }
+  };
 
   const setVisibility = async (next: { findableName: boolean; findableEmail: boolean }) => {
     const prev = vis;
@@ -163,6 +192,34 @@ export function Account() {
           </label>
           <p className="field-help" style={{ margin: "12px 0 0" }}>
             Les personnes qui partagent déjà quelque chose avec toi te trouvent toujours, quels que soient ces réglages.
+          </p>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>
+            <Bell size={16} /> Notifications par email
+          </h3>
+        </div>
+        <div style={{ padding: 20 }}>
+          {notif && !notif.emailEnabled && (
+            <p className="field-help" style={{ margin: "0 0 12px" }}>
+              Ce serveur n'envoie pas d'emails pour l'instant : tes choix sont enregistrés et serviront dès qu'un administrateur aura configuré l'envoi.
+            </p>
+          )}
+          {NOTIFICATIONS.map((n, i) => (
+            <label className="check" key={n.key} style={i ? { marginTop: 12 } : undefined}>
+              <input type="checkbox" checked={!!notif?.prefs[n.key]} disabled={!notif} onChange={(e) => setNotification(n.key, e.target.checked)} />
+              <span>
+                {n.title}
+                <small>{n.help}</small>
+              </span>
+            </label>
+          ))}
+          <p className="field-help" style={{ margin: "12px 0 0" }}>
+            Envoyées à {user.email}. Toutes sont coupées par défaut. Les noms des tableaux sont chiffrés : le serveur ne les connaît pas, les emails disent
+            seulement de quel type d'élément il s'agit.
           </p>
         </div>
       </div>

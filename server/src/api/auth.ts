@@ -20,9 +20,10 @@ import {
   verifySecret,
   burnVerify,
 } from "../auth.ts";
-import { HttpError, blob, str } from "../http.ts";
+import { HttpError, blob, publicUrl, str } from "../http.ts";
 import { config } from "../config.ts";
 import { emailEnabled, sendVerificationCode } from "../mailer.ts";
+import { notify } from "../notify.ts";
 import { createChallenge, verifyPow } from "../pow.ts";
 import { kickUser } from "../rooms.ts";
 
@@ -231,6 +232,10 @@ authApi.post("/login", (req, res) => {
   if (!flags(row.id).email_verified) coded(403, "Vérifie ton email pour te connecter.", "EMAIL_NOT_VERIFIED");
   checkSuspended(row.id);
   createSession(req, res, row.id);
+  const when = new Date().toLocaleString("fr-FR", { dateStyle: "full", timeStyle: "short" });
+  notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () =>
+    `Nouvelle connexion à ton compte Excalibash le ${when}, depuis l'adresse ${req.ip}.\n\nSi ce n'est pas toi, change ton mot de passe : ${publicUrl(req)}/account`,
+  );
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: row.enc_private_key } });
 });
 

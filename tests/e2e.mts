@@ -47,6 +47,14 @@ function mailCode(email: string): string {
   return lines.at(-1)?.match(/code=(\d{6})/)?.[1] ?? "";
 }
 
+/** Subjects of the emails sent to `email`, read from the server log. */
+function mails(email: string): string[] {
+  return readFileSync(`${dirname(DB)}/server.log`, "utf8")
+    .split("\n")
+    .filter((l) => l.startsWith(`[mail] to=${email} `))
+    .map((l) => l.match(/subject=(.*) code=/)?.[1] ?? "");
+}
+
 /** Setup code the server prints while it has no account. */
 function setupCode(): string {
   return readFileSync(`${dirname(DB)}/server.log`, "utf8").match(/Code d'installation[^:]*: ([A-Z0-9-]+)/)?.[1] ?? "";
@@ -256,9 +264,27 @@ await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: false 
   ok(byMail.status === 200 && byMail.body.users[0]?.email === "bob@test.local", "email trouvable une fois activé, et renvoyé");
   ok((await as(bob, () => api("PUT", "/account/visibility", { findableName: true }))).status === 400, "réglages de visibilité invalides refusés");
 }
+// SMTP status and test email (admin), email notifications (all off by default).
+{
+  const status = await as(alice, () => api("GET", "/admin/smtp"));
+  ok(status.status === 200 && status.body.mode === "log" && !JSON.stringify(status.body).match(/pass/i), "admin : état du SMTP (mode log), sans mot de passe");
+  ok((await as(bob, () => api("GET", "/admin/smtp"))).status === 403, "état du SMTP réservé aux admins");
+  ok((await as(bob, () => api("POST", "/admin/smtp/test", {}))).status === 403, "email de test réservé aux admins");
+  ok((await as(alice, () => api("POST", "/admin/smtp/test", { to: "pas-un-email" }))).status === 400, "email de test : adresse invalide refusée");
+  const test = await as(alice, () => api("POST", "/admin/smtp/test", {}));
+  ok(test.status === 200 && mails("alice@test.local").some((m) => m.startsWith("Test d'envoi")), "email de test envoyé à l'admin par défaut");
+  const acc = (await as(bob, () => api("GET", "/account"))).body;
+  ok(acc.emailEnabled === true && Object.values(acc.notifications).length === 5 && Object.values(acc.notifications).every((v) => v === false), "notifications : toutes coupées par défaut");
+  ok((await as(bob, () => api("PUT", "/account/notifications", { itemShared: true }))).status === 400, "réglages de notification incomplets refusés");
+  const prefs = { itemDeleted: true, itemShared: true, accessRevoked: false, itemTransferred: true, newLogin: false };
+  ok((await as(bob, () => api("PUT", "/account/notifications", prefs))).status === 200, "Bob active des notifications");
+  ok(JSON.stringify((await as(bob, () => api("GET", "/account"))).body.notifications) === JSON.stringify(prefs), "les notifications choisies sont enregistrées");
+}
 const bobPub = (await as(alice, () => api("GET", "/auth/lookup?email=bob@test.local"))).body.users[0];
 nA = await tree(alice);
+const aliceMails = mails("alice@test.local").length;
 await as(alice, () => lib.shareItem(ctxOf(alice, nA), F, bobPub, "editor"));
+ok(mails("bob@test.local").some((m) => m.includes("Alice t'a partagé un dossier")), "notification : Bob est prévenu du partage");
 await as(bob, () => api("PUT", "/account/visibility", { findableName: false, findableEmail: false }));
 ok((await as(alice, () => api("GET", "/auth/lookup?q=bob@test.local"))).body.users?.[0]?.id === bob.user.id, "compte masqué : toujours trouvable (email compris) par qui partage déjà avec lui");
 ok((await as(alice, () => api("GET", "/auth/lookup?q=bob"))).body.users?.[0]?.email === "bob@test.local", "idem par nom, avec son email");
@@ -290,6 +316,18 @@ ok(bobContent.elements[0]?.label === "TOP_SECRET_DIAGRAM", "Bob déchiffre le co
   const alicePub = { id: alice.user.id, email: "alice@test.local", publicKey: alice.user.publicKey };
   await as(bob, () => lib.shareItem(ctxOf(bob, nB), G, alicePub, "viewer"));
   ok((await tree(alice)).get(G)?.role === "viewer", "le nouveau propriétaire peut partager");
+  ok(mails("bob@test.local").some((m) => m.includes("Alice t'a donné un dossier")), "notification : Bob est prévenu du transfert");
+}
+// Deletion notifies those who turned it on (Bob), not the others (Alice: everything off).
+{
+  const D = await as(alice, () => lib.createItem(ctxOf(alice, nA), "board", null, "À jeter"));
+  nA = await tree(alice);
+  await as(alice, () => lib.shareItem(ctxOf(alice, nA), D, bobPub, "viewer"));
+  const before = mails("bob@test.local").length;
+  ok((await as(alice, () => api("DELETE", `/items/${D}`))).status === 200, "Alice met un tableau partagé à la corbeille");
+  const after = mails("bob@test.local").slice(before);
+  ok(after.length === 1 && after[0].includes("un tableau a été mis à la corbeille"), "notification : Bob est prévenu de la suppression");
+  ok(mails("alice@test.local").length === aliceMails, "sans notification activée, aucun email n'est envoyé");
 }
 
 // Live collab + encrypted terminal.
