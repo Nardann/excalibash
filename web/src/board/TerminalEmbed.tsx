@@ -196,6 +196,24 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     };
   }, []);
 
+  // Right-click anywhere on the window (title bar or shell) opens Excalidraw's menu for it (lock,
+  // layers, copy, delete…): an active window catches the clicks itself, so pass this one to the
+  // canvas at the same spot. Copy / paste in the shell stay on the keyboard (Ctrl+Shift+C / V).
+  useEffect(() => {
+    const el = rootRef.current!;
+    const toCanvas = (e: MouseEvent) => {
+      const canvas = el.closest(".excalidraw")?.querySelector("canvas.interactive");
+      if (!canvas) return;
+      e.preventDefault();
+      e.stopPropagation();
+      canvas.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY, button: 2, buttons: 2 }),
+      );
+    };
+    el.addEventListener("contextmenu", toCanvas, true);
+    return () => el.removeEventListener("contextmenu", toCanvas, true);
+  }, []);
+
   const status = info?.status;
   const kill = async () => {
     const ok = await confirmDialog({
