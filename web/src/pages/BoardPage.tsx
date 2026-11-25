@@ -21,6 +21,7 @@ import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
+import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -144,6 +145,9 @@ function Editor({ node }: { node: Node }) {
   const [cableMarks, setCableMarks] = useState<CableMark[]>([]);
   const [cableEdit, setCableEdit] = useState<{ cableId: string; end: End } | null>(null);
   const [cableZoom, setCableZoom] = useState(1);
+  /** Reachability of the IPs at the cable ends, and where each cable's state badge goes. */
+  const [links, setLinks] = useState<LinkStates>({});
+  const [cableMids, setCableMids] = useState<{ cableId: string; x: number; y: number }[]>([]);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
   const termButton = useRef<HTMLButtonElement>(null);
@@ -305,6 +309,8 @@ function Editor({ node }: { node: Node }) {
     }
     return null;
   };
+  const liveMachineRef = useRef(liveMachineId);
+  liveMachineRef.current = liveMachineId;
   /**
    * The machine a node talks to: its live shells' or sites', else the one it remembers. What it
    * remembers is board data, which any editor can write: a default for forms the user submits,
@@ -454,6 +460,19 @@ function Editor({ node }: { node: Node }) {
       }
       setCableMarks((prev) => (JSON.stringify(prev) === JSON.stringify(marks) ? prev : marks));
       setCableZoom(zoom);
+      // The middle of each cable with an IP at one end: where its live state shows.
+      const mids: { cableId: string; x: number; y: number }[] = [];
+      if (zoom >= 0.35) {
+        for (const e of elements) {
+          const c = !e.isDeleted ? cableOf(e) : undefined;
+          if (!c || !(c.ends?.a?.ip || c.ends?.b?.ip) || !("points" in e)) continue;
+          const pts = e.points;
+          const n = pts.length;
+          const [px, py] = n % 2 ? pts[(n - 1) / 2] : [(pts[n / 2 - 1][0] + pts[n / 2][0]) / 2, (pts[n / 2 - 1][1] + pts[n / 2][1]) / 2];
+          mids.push({ cableId: e.id, x: Math.round((e.x + px + appState.scrollX) * zoom), y: Math.round((e.y + py + appState.scrollY) * zoom) });
+        }
+      }
+      setCableMids((prev) => (JSON.stringify(prev) === JSON.stringify(mids) ? prev : mids));
       // Cables follow their items (and go with them): settled once per frame, and only when the
       // scene (or the pointer, which ends a drag) changed since the last pass.
       let sceneKey = appState.cursorButton === "down" ? 1 : 0;
@@ -563,6 +582,52 @@ function Editor({ node }: { node: Node }) {
     });
     if (toggle && !collapse) activate(x, elementId);
   }, []);
+
+  // Live state of the cables: the IPs at their ends are pinged from the user's own machines at
+  // the other ends (see board/linkStatus.ts), as soon as cables or IPs change, else every 10 s,
+  // and not while the tab is in the background.
+  useEffect(() => {
+    if (!excalidraw) return;
+    let stopped = false;
+    let running = false;
+    let lastKey = "";
+    let lastRun = 0;
+    let machines: Machine[] | null = null;
+    let machinesAt = 0;
+    const tick = async () => {
+      if (stopped || running || document.visibilityState === "hidden") return;
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      const plan = planProbes(excalidraw, (id) => liveMachineRef.current(id), inUse);
+      const key = planKey(plan);
+      if (!plan.size) {
+        if (lastKey) setLinks({});
+        lastKey = "";
+        return;
+      }
+      if (key === lastKey && Date.now() - lastRun < 10_000) return;
+      running = true;
+      try {
+        if (!machines || Date.now() - machinesAt > 60_000) {
+          machines = await listMachines(keys);
+          machinesAt = Date.now();
+        }
+        const states = await runProbes(plan, machines);
+        if (!stopped) setLinks((prev) => (JSON.stringify(prev) === JSON.stringify(states) ? prev : states));
+        lastKey = key;
+        lastRun = Date.now();
+      } catch {
+        // Machines unavailable: try again on the next tick.
+      } finally {
+        running = false;
+      }
+    };
+    const timer = setInterval(tick, 2000);
+    void tick();
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [excalidraw, keys, session]);
 
   // A click in a terminal's shell area (below its title bar) opens it for typing right away:
   // without this, Excalidraw only selects the window and wants a second click to activate it.
@@ -824,6 +889,8 @@ function Editor({ node }: { node: Node }) {
           editable={editor}
           onEdit={(m) => setCableEdit({ cableId: m.cableId, end: m.end })}
           onMoveLabel={(m, dx, dy) => excalidrawRef.current && m.info && setCableEnd(excalidrawRef.current, m.cableId, m.end, { ...m.info, dx, dy })}
+          links={links}
+          mids={cableMids}
         />
         {selTerm && editor && (
           <div className="term-float" style={{ left: selTerm.left, top: selTerm.top }}>

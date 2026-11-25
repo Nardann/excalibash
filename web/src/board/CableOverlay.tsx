@@ -3,6 +3,10 @@
 import { useState } from "react";
 import { Modal } from "../components/ui.tsx";
 import { IP_RE, LABEL_RADIUS, parseVlans, type End, type EndInfo } from "./cables.ts";
+import type { LinkState, LinkStates } from "./linkStatus.ts";
+
+const linkText = (ip: string, l: LinkState) =>
+  l.up ? `${ip} joignable depuis ${l.from}${l.ms !== undefined ? ` (${l.ms < 1 ? "<1" : Math.round(l.ms)} ms)` : ""}` : `${ip} injoignable depuis ${l.from}`;
 
 /** One end of a cable, in viewport coordinates, `dir` pointing along the cable. */
 export type CableMark = { cableId: string; end: End; x: number; y: number; dir: { x: number; y: number }; info?: EndInfo; selected: boolean };
@@ -44,8 +48,14 @@ export function CableOverlay({
   editable,
   onEdit,
   onMoveLabel,
+  links = {},
+  mids = [],
 }: {
   marks: CableMark[];
+  /** Reachability of the IPs at the cable ends (by `${cableId}:${end}`). */
+  links?: LinkStates;
+  /** Middle of each cable with an IP, where its overall state shows. */
+  mids?: { cableId: string; x: number; y: number }[];
   zoom: number;
   editable: boolean;
   onEdit: (m: CableMark) => void;
@@ -106,7 +116,15 @@ export function CableOverlay({
                 onDoubleClick={() => editable && onEdit(m)}
               >
                 {i!.iface && <b>{i!.iface}</b>}
-                {i!.ip && <span>{i!.ip}</span>}
+                {i!.ip &&
+                  (links[key] ? (
+                    <span className="cable-ip" title={linkText(i!.ip, links[key])}>
+                      <span className={`link-dot ${links[key].up ? "up" : "down"}`} />
+                      {i!.ip}
+                    </span>
+                  ) : (
+                    <span>{i!.ip}</span>
+                  ))}
                 {i!.vlans && <span className="vlan">VLAN {i!.vlans}</span>}
               </div>
             )}
@@ -116,6 +134,16 @@ export function CableOverlay({
               </button>
             )}
           </div>
+        );
+      })}
+      {mids.map((m) => {
+        const states = (["a", "b"] as End[]).map((e) => links[`${m.cableId}:${e}`]).filter((l): l is LinkState => !!l);
+        if (!states.length) return null;
+        const up = states.filter((l) => l.up).length;
+        const state = up === states.length ? "up" : up === 0 ? "down" : "mixed";
+        const text = state === "up" ? "Lien actif" : state === "down" ? "Lien coupé" : "Lien partiel";
+        return (
+          <div key={`mid:${m.cableId}`} className={`cable-state ${state}`} style={{ left: m.x, top: m.y }} role="img" aria-label={text} />
         );
       })}
     </>

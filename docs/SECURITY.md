@@ -212,6 +212,23 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
     de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
     d'hôte distinct reste préférable.
 
+## État des câbles (ping)
+
+- Une IP saisie au bout d'un câble est testée depuis la machine à l'autre bout, seulement si cette machine
+  appartient à l'utilisateur qui regarde le tableau. Son navigateur dépose
+  `box(machineAuth, {targets}, "eb:probe:<rid>:<ts>")` via `POST /api/machines/<id>/probe`. Le serveur vérifie
+  que l'utilisateur possède la machine, limite à une sonde en cours et une toutes les 2 s par machine, et relaie
+  le chiffré à l'agent.
+- L'agent rejette les horodatages à plus de 5 min, les `rid` déjà vus et tout ce qui n'est pas scellé sous
+  `machineAuth`. Il ne teste que de vraies adresses IP (au plus 32), une à une, avec le `ping` du système, l'adresse
+  étant passée comme simple argument (jamais via un shell). Il répond `box(machineAuth, {r}, "eb:probe-res:<rid>")`.
+- Le serveur ne voit ni les adresses ni les résultats, et ne peut pas faire sonder quoi que ce soit : il ne
+  détient pas `machineAuth`. Les résultats restent dans le navigateur du propriétaire et ne sont pas partagés
+  avec les autres membres du tableau.
+- La machine mémorisée par une icône est une donnée du tableau, que tout éditeur peut écrire. Elle n'est retenue
+  que si cette machine a un terminal ou un tunnel ouvert sur ce tableau, d'après le serveur. Un éditeur ne peut
+  donc pas faire envoyer des pings depuis la machine d'un autre en trafiquant une icône.
+
 ## HTTPS et certificat auto-signé
 
 - Par défaut (`TLS=auto`), les deux ports (application et tunnels) parlent HTTPS. Un certificat

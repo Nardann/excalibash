@@ -440,6 +440,23 @@ async function tunnelGet(kw: c.SymKey, path: string) {
 const got = await tunnelGet(kwB, "/hello?x=1");
 ok(got.status === 200 && got.body === "site:GET:/hello?x=1:ok", "Bob consulte le site de la machine d'Alice via le tunnel chiffré");
 
+// Cable state: Alice's machine pings addresses for her, sealed both ways under the machine auth key.
+async function probe(who: any, targets: string[]) {
+  const rid = c.randomId();
+  const ts = Date.now();
+  const d = await c.boxJson(mAlice.auth, { targets }, c.AAD.probe(rid, ts));
+  const r = await as(who, () => api("POST", `/machines/${machine.id}/probe`, { rid, ts, d }));
+  return { ...r, rid };
+}
+const pr = await probe(alice, ["127.0.0.1", "not-an-ip"]);
+const pres = pr.status === 200 ? await c.unboxJson<{ r: Record<string, { up: boolean }> }>(mAlice.auth, pr.body.d, c.AAD.probeRes(pr.rid)) : null;
+ok(!!pres && "127.0.0.1" in pres.r && !("not-an-ip" in pres.r), "sonde d'un câble : l'agent d'Alice répond pour les adresses IP seulement");
+ok(pres?.r["127.0.0.1"]?.up === true, "127.0.0.1 joignable depuis la machine d'Alice");
+const misbound = pr.status === 200 ? await c.unboxJson(mAlice.auth, pr.body.d, c.AAD.probeRes(c.randomId())).then(() => true, () => false) : true;
+ok(!misbound, "la réponse de la sonde est liée à sa requête");
+ok((await probe(alice, ["127.0.0.1"])).status === 429, "sondes trop rapprochées refusées par le serveur");
+ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder depuis la machine d'Alice");
+
 // Third user / admin cannot read.
 const inv = await as(alice, () => api("POST", "/admin/invites", { note: "carol" }));
 const carol = await register("carol@test.local", "Carol", "carol-password-1", new URL(inv.body.url).searchParams.get("invite")!);

@@ -338,6 +338,7 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
         for (const fn of agentHooks.hello) fn(machineId);
         break;
       case "http.res":
+      case "probe.res":
         for (const fn of agentHooks.message) fn(machineId, msg);
         break;
       case "opened":
