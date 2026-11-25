@@ -274,8 +274,14 @@ await as(alice, () => api("PATCH", "/admin/settings", { registrationOpen: false 
   const test = await as(alice, () => api("POST", "/admin/smtp/test", {}));
   ok(test.status === 200 && mails("alice@test.local").some((m) => m.startsWith("Test d'envoi")), "email de test envoyé à l'admin par défaut");
   const acc = (await as(bob, () => api("GET", "/account"))).body;
-  ok(acc.emailEnabled === true && Object.values(acc.notifications).length === 5 && Object.values(acc.notifications).every((v) => v === false), "notifications : toutes coupées par défaut");
+  const n = acc.notifications;
+  ok(acc.emailEnabled === true && Object.keys(n).length === 5 && n.itemShared === true && !n.itemDeleted && !n.accessRevoked && !n.itemTransferred && !n.newLogin, "notifications : seuls les partages sont activés par défaut");
+  ok((await as(alice, () => api("GET", "/admin"))).body.emailVerification === true, "vérification de l'email à l'inscription activée par défaut");
+  await as(alice, () => api("PATCH", "/admin/settings", { emailVerification: false }));
+  ok((await as(alice, () => api("GET", "/admin"))).body.emailVerification === false, "l'admin peut couper la vérification de l'email");
+  await as(alice, () => api("PATCH", "/admin/settings", { emailVerification: true }));
   ok((await as(bob, () => api("PUT", "/account/notifications", { itemShared: true }))).status === 400, "réglages de notification incomplets refusés");
+  await as(alice, () => api("PUT", "/account/notifications", { itemDeleted: false, itemShared: false, accessRevoked: false, itemTransferred: false, newLogin: false }));
   const prefs = { itemDeleted: true, itemShared: true, accessRevoked: false, itemTransferred: true, newLogin: false };
   ok((await as(bob, () => api("PUT", "/account/notifications", prefs))).status === 200, "Bob active des notifications");
   ok(JSON.stringify((await as(bob, () => api("GET", "/account"))).body.notifications) === JSON.stringify(prefs), "les notifications choisies sont enregistrées");

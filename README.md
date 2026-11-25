@@ -71,7 +71,7 @@ Les variables se placent dans un fichier `.env` à côté de `docker-compose.yml
 | `TLS_CERT` `TLS_KEY` | vide | chemins PEM d'un certificat fourni (Let's Encrypt, PKI interne), utilisé à la place du certificat auto-signé |
 | `TLS_SANS` | vide | noms ou adresses IP supplémentaires du certificat auto-signé, séparés par des virgules |
 | `COOKIE_SECURE` | `false` | `true` force l'attribut `Secure` des cookies. Inutile en HTTPS direct ou derrière un proxy qui transmet `X-Forwarded-Proto` |
-| `SMTP_HOST` `SMTP_PORT` `SMTP_SECURE` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | vide, `587`, `false` | envoi des codes de vérification et des notifications (choisies par chacun dans « Mon compte », coupées par défaut). Sans `SMTP_HOST`, les emails ne sont pas vérifiés. `SMTP_SECURE=true` pour le port 465. La page d'administration montre l'état de l'envoi et permet d'envoyer un email de test |
+| `SMTP_HOST` `SMTP_PORT` `SMTP_SECURE` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | vide, `587`, `false` | envoi des codes de vérification et des notifications (choisies par chacun dans « Mon compte » ; seuls les partages sont annoncés par défaut). Sans `SMTP_HOST`, les emails ne sont pas vérifiés. `SMTP_SECURE=true` pour le port 465. La page d'administration montre l'état de l'envoi et permet d'envoyer un email de test et de couper la vérification de l'email à l'inscription (activée par défaut) |
 | `CONTACT_EMAIL` `LEGAL_NAME` | vide | contact affiché sur la page Confidentialité |
 | `REGISTRATIONS_PER_HOUR` | `50` | plafond global d'inscriptions par heure |
 | `BIND_ADDR` | `127.0.0.1` | interface où les ports sont publiés. `0.0.0.0` pour un accès direct depuis le réseau |

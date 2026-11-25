@@ -6,6 +6,11 @@ export function emailEnabled(): boolean {
   return !!config.smtp.host || config.smtp.transport === "log";
 }
 
+/** New accounts confirm their email with a code: on by default, admins may turn it off. */
+export function verificationRequired(): boolean {
+  return emailEnabled() && getSetting("email_verification", "true") === "true";
+}
+
 let transport: Transporter | null = null;
 
 function smtpTransport(): Transporter {

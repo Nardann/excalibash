@@ -218,7 +218,7 @@ export function Account() {
             </label>
           ))}
           <p className="field-help" style={{ margin: "12px 0 0" }}>
-            Envoyées à {user.email}. Toutes sont coupées par défaut. Les noms des tableaux sont chiffrés : le serveur ne les connaît pas, les emails disent
+            Envoyées à {user.email}. Par défaut, seuls les partages sont annoncés. Les noms des tableaux sont chiffrés : le serveur ne les connaît pas, les emails disent
             seulement de quel type d'élément il s'agit.
           </p>
         </div>

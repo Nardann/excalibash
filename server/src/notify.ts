@@ -4,19 +4,21 @@ import { emailEnabled, sendMail } from "./mailer.ts";
 import { publicUrl } from "./http.ts";
 
 /**
- * Email notifications, chosen by each person in their account (all off by default).
+ * Email notifications, chosen by each person in their account (only shares on by default).
  * Names of boards and folders are encrypted, so emails can only say *what kind* of item it was.
  */
 export const NOTIFY_EVENTS = ["itemDeleted", "itemShared", "accessRevoked", "itemTransferred", "newLogin"] as const;
 export type NotifyEvent = (typeof NOTIFY_EVENTS)[number];
 export type NotifyPrefs = Record<NotifyEvent, boolean>;
+/** Only shares are announced by default; a choice the person saved always wins. */
+const DEFAULTS: NotifyPrefs = { itemDeleted: false, itemShared: true, accessRevoked: false, itemTransferred: false, newLogin: false };
 
 export function readPrefs(raw: string | null | undefined): NotifyPrefs {
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(raw || "{}") ?? {};
   } catch {}
-  return Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, parsed[e] === true])) as NotifyPrefs;
+  return Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, typeof parsed[e] === "boolean" ? parsed[e] : DEFAULTS[e]])) as NotifyPrefs;
 }
 
 export function getPrefs(userId: string): NotifyPrefs {
