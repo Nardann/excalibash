@@ -22,7 +22,7 @@ import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End 
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
 import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
-import { exportDiagram } from "../board/exportDiagram.ts";
+import { exportDiagram, exportTopology, type TopologyFormat } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteTarget } from "../api.ts";
 import {
@@ -150,6 +150,12 @@ function Editor({ node }: { node: Node }) {
   const [links, setLinks] = useState<LinkStates>({});
   /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
   const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
+  // Display name of a machine icon, as drawn on the diagram (image and topology exports).
+  const exportNameOf = (x: NonNullable<typeof excalidrawRef.current>) => (id: string) => {
+    const nd = nodeDataOf(findEl(x, id));
+    const shell = nd?.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label;
+    return nd?.title?.split("\n")[0] || nd?.machineName || shell || "Machine";
+  };
   const [cableMids, setCableMids] = useState<{ cableId: string; x: number; y: number }[]>([]);
   /** Last window raised, so it is raised once per focus and not on every change. */
   const frontRef = useRef<string | null>(null);
@@ -822,7 +828,7 @@ function Editor({ node }: { node: Node }) {
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
-        <button className="btn btn-icon btn-sm" title="Exporter le schéma en image (avec les interfaces, IP et VLAN des câbles)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
+        <button className="btn btn-icon btn-sm" title="Exporter le schéma (image, topologie Containerlab, Mermaid, JSON)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
           <Download size={16} />
         </button>
         {node.ownerId === user.id && (
@@ -1128,15 +1134,36 @@ function Editor({ node }: { node: Node }) {
                 setExportMenu(null);
                 const x = excalidrawRef.current;
                 if (!x) return;
-                const nameOf = (id: string) => {
-                  const nd = nodeDataOf(findEl(x, id));
-                  const shell = nd?.shells[0] && session.terminals.get(nd.shells[0].terminalId)?.label;
-                  return nd?.title?.split("\n")[0] || nd?.machineName || shell || "Machine";
-                };
-                exportDiagram(x, kind, node.name, nameOf).catch(toast.error);
+                exportDiagram(x, kind, node.name, exportNameOf(x)).catch(toast.error);
               }}
             >
               <Download size={16} /> {kind === "png" ? "Image PNG" : "Image SVG (vectorielle)"}
+            </button>
+          ))}
+          {(
+            [
+              ["containerlab", "Topologie Containerlab (.clab.yml)"],
+              ["mermaid", "Mermaid (.mmd)"],
+              ["json", "JSON (.json)"],
+            ] as [TopologyFormat, string][]
+          ).map(([format, label]) => (
+            <button
+              key={format}
+              className="menu-item"
+              onClick={() => {
+                setExportMenu(null);
+                const x = excalidrawRef.current;
+                if (!x) return;
+                try {
+                  const warnings = exportTopology(x, format, node.name, exportNameOf(x));
+                  // Non-blocking notice: the first few warnings, the rest counted.
+                  if (warnings.length) toast(`Export avec ${warnings.length} avertissement${warnings.length > 1 ? "s" : ""} : ${warnings.slice(0, 3).join(" ")}${warnings.length > 3 ? ` (+${warnings.length - 3} autres)` : ""}`);
+                } catch (e) {
+                  toast.error(e);
+                }
+              }}
+            >
+              <Download size={16} /> {label}
             </button>
           ))}
         </Menu>
