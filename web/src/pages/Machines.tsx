@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import { fr } from "date-fns/locale";
-import { Copy, Fingerprint, LogOut, Loader2, Pencil, Plus, Server, Trash2, Users } from "lucide-react";
+import { Copy, Fingerprint, RefreshCw, LogOut, Loader2, Pencil, Plus, Server, Trash2, Users } from "lucide-react";
 import { api, serverConfig } from "../api.ts";
 import { useKeys } from "../auth.tsx";
 import {
@@ -18,6 +18,8 @@ import {
 import { CONFIRM_RE, fingerprint, fromB64, normalizeConfirm } from "../crypto.ts";
 import { Modal, Switch, confirmDialog, copyText, toast } from "../components/ui.tsx";
 import { ShareMachineModal } from "../components/ShareMachineModal.tsx";
+import { UpdateHowTo, useUpdateCommand } from "../components/AgentOutdated.tsx";
+import { FEATURES, KNOWN_CAPS, missingCaps, needsUpdate } from "../agentCaps.ts";
 import { useUser } from "../auth.tsx";
 
 type Enrollment = Awaited<ReturnType<typeof createMachine>> & { name: string };
@@ -31,6 +33,7 @@ export function Machines() {
   /** A machine just removed: the command that removes its agent from the machine itself. */
   const [removed, setRemoved] = useState<{ name: string; command: string } | null>(null);
   const [sharing, setSharing] = useState<Machine | null>(null);
+  const [updating, setUpdating] = useState<Machine | null>(null);
   const user = useUser();
   const mine = machines?.filter((m) => m.access === "owner") ?? null;
   const sharedWithMe = machines?.filter((m) => m.access === "shared") ?? [];
@@ -166,7 +169,13 @@ export function Machines() {
                 <div className="sub mono" title="Empreinte de la clé de l'agent : elle s'affiche aussi dans ses logs au démarrage">
                   <Fingerprint size={11} /> {m.fingerprint}
                 </div>
+                {m.lastSeen && <AgentVersion m={m} />}
               </div>
+              {m.lastSeen && needsUpdate(m.agentCaps) && (
+                <button className="btn btn-sm" title="Montre la commande qui met l'agent à jour sur la machine" onClick={() => setUpdating(m)}>
+                  <RefreshCw size={16} /> Mettre à jour l'agent
+                </button>
+              )}
               <button className="btn btn-sm" title="Partager la machine avec d'autres personnes, ou via les tableaux" onClick={() => setSharing(m)}>
                 <Users size={16} /> Partager
               </button>
@@ -198,6 +207,7 @@ export function Machines() {
                 <div className="sub mono" title="Empreinte de la clé de l'agent">
                   <Fingerprint size={11} /> {m.fingerprint}
                 </div>
+                {m.lastSeen && <AgentVersion m={m} />}
               </div>
               <button className="btn btn-sm btn-icon" title="Ne plus utiliser cette machine" style={{ color: "var(--danger)" }} onClick={() => leave(m)}>
                 <LogOut size={16} />
@@ -207,6 +217,7 @@ export function Machines() {
         </div>
       )}
 
+      {updating && <UpdateAgentModal machine={updating} onClose={() => setUpdating(null)} />}
       {adding && method === "code" && (
         <PairingModal
           onClose={() => {
@@ -494,5 +505,44 @@ function Code({ text }: { text: string }) {
         <Copy size={15} />
       </button>
     </div>
+  );
+}
+
+/** The agent's version and, when it lacks something the app can use, a badge. */
+function AgentVersion({ m }: { m: Machine }) {
+  const old = needsUpdate(m.agentCaps);
+  return (
+    <div className="sub" data-testid="agent-version">
+      Agent {m.agentVersion || "version inconnue"}
+      {old && (
+        <span className="badge-update" style={{ marginLeft: 8, color: "var(--danger)", fontWeight: 600 }} title={`Manque : ${missingCaps(m.agentCaps).join(", ")}`}>
+          à mettre à jour
+        </span>
+      )}
+    </div>
+  );
+}
+
+function UpdateAgentModal({ machine, onClose }: { machine: Machine; onClose: () => void }) {
+  const command = useUpdateCommand();
+  const lacking = (Object.keys(FEATURES) as (keyof typeof FEATURES)[]).filter((f) => !FEATURES[f].needs.every((c) => machine.agentCaps?.includes(c)));
+  return (
+    <Modal onClose={onClose} width={620}>
+      <h2 className="display">Mettre à jour l'agent de « {machine.name} »</h2>
+      <p>
+        {machine.agentCaps?.length
+          ? `Cet agent (${machine.agentVersion || "version inconnue"}) ne connaît pas encore : ${lacking.map((f) => FEATURES[f].label).join(", ")}.`
+          : "Cet agent date d'avant l'annonce de ses fonctions : la capture réseau, les fichiers et les notebooks ne marcheront pas tant qu'il n'est pas mis à jour."}
+      </p>
+      <UpdateHowTo command={command} />
+      <p style={{ color: "var(--text-2)", fontSize: 13 }}>
+        La machine garde son nom, sa clé et ses tableaux : seul le programme est remplacé, puis le service redémarre (les shells en cours sont interrompus). Fonctions connues de cette version : {KNOWN_CAPS.join(", ")}.
+      </p>
+      <div className="modal-actions">
+        <button className="btn btn-primary" onClick={onClose}>
+          Fermer
+        </button>
+      </div>
+    </Modal>
   );
 }

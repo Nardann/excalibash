@@ -42,6 +42,8 @@ import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkSt
 import { SchemaPanel, type SchemaReport } from "../board/SchemaPanel.tsx";
 import { applyFix, endMessages, type EndResult, type Finding } from "../board/schemaCheck.ts";
 import { planSchemaCheck, runSchemaCheck } from "../board/schemaRun.ts";
+import { OutdatedError, supports } from "../agentCaps.ts";
+import { reportOutdated } from "../outdatedBus.ts";
 import { exportDiagram, exportTopology, type TopologyFormat } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteHop, RemoteTarget } from "../api.ts";
@@ -420,6 +422,11 @@ function Editor({ node }: { node: Node }) {
       const x = excalidrawRef.current;
       if (!x) return;
       setPicker(null);
+      if (target?.kind === "jupyter" && !supports(machine.agentCaps, "kernel")) {
+        const e = new OutdatedError(machine.name, "kernel");
+        reportOutdated(e);
+        return toast(e.message);
+      }
       try {
         const info = await session.createTerminal(machine, 100, 30, target);
         linkMachine({ id: session.boardId, key: session.key }, machine).catch(() => {});
@@ -816,6 +823,8 @@ function Editor({ node }: { node: Node }) {
       const machines = plan.machines.size ? await listMachines(keys) : [];
       const machinesChecked = await runSchemaCheck(plan, machines, node.id);
       setSchema({ running: false, machines: machinesChecked, remote: plan.remote });
+      const old = machinesChecked.find((c) => c.outdated);
+      if (old) reportOutdated(new OutdatedError(old.name, "schema"));
     } catch (e) {
       toast.error(e);
       setSchema(null);
@@ -981,6 +990,12 @@ function Editor({ node }: { node: Node }) {
         }
         if (!m.online) {
           toast(`${m.name} est hors ligne`);
+          return null;
+        }
+        if (!supports(m.agentCaps, "kernel")) {
+          const e = new OutdatedError(m.name, "kernel");
+          reportOutdated(e);
+          toast(e.message);
           return null;
         }
         const ok = await confirmDialog({

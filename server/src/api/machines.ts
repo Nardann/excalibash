@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { db, isClientId } from "../db.ts";
 import { getUserRow, requireUser, sha256 } from "../auth.ts";
 import { atLeast, getItem, getMachine, isTrashed, linkHolds, machineAccess, roleOn, type MachineRow } from "../access.ts";
-import { disconnectMachine, dropMachine, dropMachineTerminalsWhere, isMachineOnline } from "../terminals.ts";
+import { parseCaps, disconnectMachine, dropMachine, dropMachineTerminalsWhere, isMachineOnline } from "../terminals.ts";
 import { dropMachineTunnels, dropMachineTunnelsWhere } from "../tunnels.ts";
 import { notify } from "../notify.ts";
 import { probeRefusal, relayProbe } from "../probes.ts";
@@ -22,6 +22,8 @@ function dto(m: MachineRow) {
     hostname: m.hostname,
     os: m.os,
     arch: m.arch,
+    agentVersion: m.agent_version,
+    agentCaps: parseCaps(m.agent_caps),
     lastSeen: m.last_seen,
     online: isMachineOnline(m.id),
     shareBoards: !!m.share_boards,
@@ -38,6 +40,8 @@ function sharedDto(m: MachineRow & { owner_name: string }, key: string) {
     hostname: m.hostname,
     os: m.os,
     arch: m.arch,
+    agentVersion: m.agent_version,
+    agentCaps: parseCaps(m.agent_caps),
     lastSeen: m.last_seen,
     online: isMachineOnline(m.id),
   };

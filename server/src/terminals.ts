@@ -35,6 +35,9 @@ export type TerminalInfo = {
   boardId: string;
   machineId: string;
   machineOwnerId: string | null;
+  /** Version and features of the machine's agent (all board members need them to know what to offer). */
+  agentVersion: string | null;
+  agentCaps: string[];
   status: Status | "offline";
   exitCode: number | null;
   cols: number;
@@ -84,6 +87,18 @@ function machineOwner(id: string): string | null {
   return row?.owner_id ?? null;
 }
 
+/** The features an agent announced in its hello: short lowercase words, a bounded list. */
+export function parseCaps(raw: unknown): string[] {
+  const list = typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : raw;
+  if (!Array.isArray(list)) return [];
+  return [...new Set(list.filter((c): c is string => typeof c === "string" && /^[a-z0-9._-]{1,24}$/.test(c)))].slice(0, 32);
+}
+
+function agentMeta(id: string): { agentVersion: string | null; agentCaps: string[] } {
+  const row = db.prepare("SELECT agent_version, agent_caps FROM machines WHERE id = ?").get(id) as { agent_version: string | null; agent_caps: string | null } | undefined;
+  return { agentVersion: row?.agent_version ?? null, agentCaps: parseCaps(row?.agent_caps) };
+}
+
 export function isMachineOnline(id: string): boolean {
   return agents.has(id);
 }
@@ -94,6 +109,7 @@ function info(t: Term): TerminalInfo {
     boardId: t.boardId,
     machineId: t.machineId,
     machineOwnerId: machineOwner(t.machineId),
+    ...agentMeta(t.machineId),
     status: t.status !== "exited" && !agents.has(t.machineId) ? "offline" : t.status,
     exitCode: t.exitCode,
     cols: t.cols,
@@ -419,10 +435,14 @@ function onAgentMessage(machineId: string, msg: any): void {
 
 
 function onHello(machineId: string, msg: any): void {
-  db.prepare("UPDATE machines SET hostname = ?, os = ?, arch = ?, last_seen = ? WHERE id = ?").run(
+  // No caps in the hello = an agent from before capabilities: stored as null, treated as old.
+  const caps = Array.isArray(msg.caps) ? JSON.stringify(parseCaps(msg.caps)) : null;
+  db.prepare("UPDATE machines SET hostname = ?, os = ?, arch = ?, agent_version = ?, agent_caps = ?, last_seen = ? WHERE id = ?").run(
     String(msg.hostname ?? "").slice(0, 100),
     String(msg.os ?? "").slice(0, 20),
     String(msg.arch ?? "").slice(0, 20),
+    typeof msg.version === "string" ? msg.version.slice(0, 64) : null,
+    caps,
     Date.now(),
     machineId,
   );

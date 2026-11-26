@@ -157,6 +157,16 @@ curl -fsSL https://excalibash.example.com/uninstall.sh | sh
 
 Pour un agent installé en root (service système), la lancer avec `sudo sh`.
 
+### Mettre à jour l'agent
+
+La page **Machines** affiche la version de chaque agent et un badge « à mettre à jour » quand il ne connaît pas une fonction de l'application (capture réseau, fichiers, notebooks…) ; **Mettre à jour l'agent** donne la commande, à lancer sur la machine :
+
+```bash
+curl -fsSL https://excalibash.example.com/update.sh | sh
+```
+
+Elle remplace le programme et relance le service sans toucher à la clé ni au nom de la machine : elle reste appairée, ses shells en cours sont seulement interrompus. Pour un agent installé en root (service système), la lancer avec `sudo sh`. Si une fonction est refusée parce que l'agent est trop ancien, l'application affiche ce message et cette commande.
+
 ### Partager une machine
 
 Le bouton **Partager** d'une machine (aussi proposé juste après l'ajout) donne accès à la machine de deux façons :

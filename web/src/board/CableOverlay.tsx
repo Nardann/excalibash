@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { Modal, toast } from "../components/ui.tsx";
+import { AgentOutdatedNotice } from "../components/AgentOutdated.tsx";
 import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, vlanParts, type End, type EndInfo } from "./cables.ts";
 import { FileClient, IFACE_RE, filterProblem, type Signal } from "./fileTransfer.ts";
 import { saveBlob, exportName } from "./termTools.ts";
@@ -238,6 +239,14 @@ function CapturePanel({ client, iface }: { client: FileClient; iface: string }) 
     }
   };
 
+  const refusal = client.refusal("capture");
+  if (refusal)
+    return (
+      <fieldset className="capture-box">
+        <legend>Capturer (pcap)</legend>
+        <AgentOutdatedNotice error={refusal} />
+      </fieldset>
+    );
   return (
     // Enter in a capture field must not submit the cable form: that would close it and cancel the capture.
     <fieldset className="capture-box" onKeyDown={(e) => e.key === "Enter" && e.target instanceof HTMLInputElement && e.preventDefault()}>

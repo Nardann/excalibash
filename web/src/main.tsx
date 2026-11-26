@@ -6,6 +6,7 @@ import "./styles.css";
 import { AuthProvider, useAuth } from "./auth.tsx";
 import { LibraryProvider } from "./library.tsx";
 import { ConfirmHost, ThemeProvider, Toaster } from "./components/ui.tsx";
+import { AgentOutdatedHost } from "./components/AgentOutdated.tsx";
 import { Layout } from "./components/Layout.tsx";
 import { AuthPage, UnlockScreen } from "./pages/AuthPage.tsx";
 import { Dashboard } from "./pages/Dashboard.tsx";
@@ -81,6 +82,7 @@ createRoot(document.getElementById("root")!).render(
           </BrowserRouter>
           <Toaster />
           <ConfirmHost />
+          <AgentOutdatedHost />
         </AuthProvider>
       )}
     </ThemeProvider>

@@ -47,12 +47,18 @@ type message struct {
 	OS       string          `json:"os,omitempty"`
 	Arch     string          `json:"arch,omitempty"`
 	Version  string          `json:"version,omitempty"`
+	Caps     []string        `json:"caps,omitempty"`
 	Sessions []string        `json:"sessions,omitempty"`
 	Rid      string          `json:"rid,omitempty"`
 	Sid      string          `json:"sid,omitempty"`
 	N        *int            `json:"n,omitempty"`
 	End      bool            `json:"end,omitempty"`
 }
+
+// agentCaps lists what this binary supports, announced in the hello so the browser can tell an agent
+// that is too old for a feature from one that is merely offline. Add a word here with every new
+// feature the web needs to gate (and to web/src/agentCaps.ts).
+var agentCaps = []string{"files", "capture", "ifaces", "jupyter", "probe", "schema"}
 
 // outbox serialises writes to one connection through a single writer goroutine.
 type outbox struct {
@@ -180,7 +186,7 @@ func connectOnce(ctx context.Context, cfg config, mgr *manager) error {
 	hostname, _ := os.Hostname()
 	out.send(message{
 		T: "hello", Hostname: hostname, Name: cfg.name, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Version: version, Shell: pickShell(), Sessions: mgr.ids(),
+		Version: version, Caps: agentCaps, Shell: pickShell(), Sessions: mgr.ids(),
 	})
 	mgr.attach(out)
 	defer mgr.detach(out)

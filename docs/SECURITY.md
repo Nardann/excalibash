@@ -11,7 +11,7 @@ les dates (dont la dernière activité de chaque compte), les liens publics d'un
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
-et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
+et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux, et pour chaque machine ce que l'agent annonce de lui-même (nom d'hôte, système, architecture, **version et liste des fonctions** qu'il connaît : `files`, `capture`…). Cette dernière liste est aussi donnée aux membres d'un tableau, dans l'état de chaque terminal, pour qu'ils sachent quoi proposer ; rien d'autre sur la machine. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
@@ -517,6 +517,12 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   shell (lu dans `/proc/<pid>/cwd` sous Linux ; sous macOS, faute de mieux, le dossier personnel du compte).
 - **Téléchargement** : fichiers ordinaires seulement (ni dossier, ni périphérique, ni tube).
 
+- **Agent trop ancien** : un agent d'avant ces fonctions ignore sans réponse les trames `file`. Le `hello` de l'agent
+  porte `version` et `caps` (liste de mots courts, métadonnée en clair) ; sans `caps`, l'agent est traité comme ancien. Le
+  navigateur refuse alors la fonction avec « L'agent de <machine> est trop ancien pour… : mets-le à jour » et la commande
+  de mise à jour, et sans réponse à une première trame il abandonne au bout de 10 s (« agent hors ligne ou trop ancien »).
+  `/update.sh` remplace le programme et redémarre le service ; il ne touche ni à `agent.json` ni à `agent.env` : la
+  machine garde son identité. Le script est le même pour tout le monde et ne contient aucun secret.
 - **Capture** : l'agent lance `tcpdump -i <interface> -U -n -s 0 -w - -- <filtre>` directement, jamais via un shell.
   L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
   `[A-Za-z0-9._:/!()&|<>=-]{1,64}` dont aucun ne commence par `-` (aucune option ne peut être injectée). Durée de 1 à

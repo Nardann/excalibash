@@ -3,12 +3,18 @@
 // paths, contents, interfaces and filters never leave a box.
 import { fromB64, randomId, toB64 } from "../crypto.ts";
 import type { BoardSession } from "./collab.ts";
+import { OutdatedError, supports, type Feature } from "../agentCaps.ts";
+import { reportOutdated } from "../outdatedBus.ts";
 
 /** Same limits as the agent. */
 export const MAX_FILE = 200 * 1024 * 1024;
 export const CHUNK = 192 * 1024;
 const WINDOW = 8;
+/** Silence between two frames of a transfer, and the wait for the answer to a chunk (the agent may be writing to disk). */
 const REPLY_TIMEOUT = 70_000;
+/** The first answer of an operation: an agent that is offline, or too old to know the frame, never answers. */
+export const FIRST_REPLY_TIMEOUT = 10_000;
+const NO_ANSWER = "La machine ne répond pas : agent hors ligne ou trop ancien";
 
 /** Interface and filter rules of the agent, for early feedback (the agent checks again). */
 export const IFACE_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$/;
@@ -37,6 +43,7 @@ export class FileError extends Error {
 
 export type Entry = { name: string; dir: boolean; size: number; mtime: number };
 export type Listing = { cwd: string; entries: Entry[]; truncated: boolean };
+export type MachineIface = { name: string; up: boolean; addrs: string[] };
 
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 const sha256 = async (data: BufferSource) => hex(await crypto.subtle.digest("SHA-256", data));
@@ -51,14 +58,34 @@ export class FileClient {
     private term: string,
   ) {}
 
+  /**
+   * Refuses early, with the update instructions, what the machine's agent announced it cannot do.
+   * Unknown terminals and hosts without a terminal list are not judged (the agent will answer).
+   */
+  private gate(feature: Feature) {
+    const t = this.session.terminals?.get(this.term);
+    if (!t || supports(t.agentCaps, feature)) return;
+    const e = new OutdatedError(t.label || "cette machine", feature);
+    reportOutdated(e);
+    throw e;
+  }
+
+  /** Why the agent of this shell cannot do this (too old), or null. Same check as the operations, without raising anything. */
+  refusal(feature: Feature): OutdatedError | null {
+    const t = this.session.terminals?.get(this.term);
+    return !t || supports(t.agentCaps, feature) ? null : new OutdatedError(t.label || "cette machine", feature);
+  }
+
   /** One request, one answer. */
   private call(op: object): Promise<any> {
+    const op0 = (op as { op?: string }).op;
+    const timeout = op0 === "chunk" || op0 === "end" ? REPLY_TIMEOUT : FIRST_REPLY_TIMEOUT;
     return new Promise((resolve, reject) => {
       let rid: string | undefined;
       const timer = setTimeout(() => {
         if (rid) this.session.fileDrop(rid);
-        reject(new FileError("La machine ne répond pas"));
-      }, REPLY_TIMEOUT);
+        reject(new FileError(timeout === REPLY_TIMEOUT ? "La machine ne répond pas" : NO_ANSWER));
+      }, timeout);
       const done = (f: () => void) => {
         clearTimeout(timer);
         f();
@@ -75,13 +102,25 @@ export class FileClient {
     });
   }
 
+  /** The network interfaces of the machine (names, state, addresses), for the capture panel. */
+  async ifaces(): Promise<MachineIface[]> {
+    this.gate("ifaces");
+    const b = await this.call({ op: "ifaces" });
+    const list: unknown[] = Array.isArray(b.ifaces) ? b.ifaces : [];
+    return list
+      .filter((i: any) => i && typeof i.name === "string" && i.name)
+      .map((i: any) => ({ name: i.name, up: i.up === true, addrs: Array.isArray(i.addrs) ? i.addrs.filter((a: unknown) => typeof a === "string") : [] }));
+  }
+
   async ls(path?: string): Promise<Listing> {
+    this.gate("files");
     const b = await this.call({ op: "ls", ...(path ? { path } : {}) });
     return { cwd: String(b.cwd), entries: Array.isArray(b.entries) ? b.entries : [], truncated: !!b.truncated };
   }
 
   /** Uploads into `dir` (default: the shell's working directory). Resolves with the final path. */
   async upload(file: File, o: { dir?: string; overwrite?: boolean; onProgress?: (done: number, total: number) => void; signal?: Signal } = {}): Promise<string> {
+    this.gate("files");
     if (!validName(file.name)) throw new FileError("Nom de fichier non pris en charge");
     if (file.size > MAX_FILE) throw new FileError("Fichier trop volumineux (200 Mio au maximum)");
     const xfer = randomId();
@@ -121,6 +160,11 @@ export class FileClient {
 
   /** Streams `get` or `capture` answers into a Blob, acknowledging as chunks arrive. */
   private stream(op: { op: string } & Record<string, unknown>, mime: string, o: { onProgress?: (bytes: number, total?: number) => void; signal?: Signal }): Promise<{ name: string; blob: Blob }> {
+    try {
+      this.gate(op.op === "capture" ? "capture" : "files");
+    } catch (e) {
+      return Promise.reject(e);
+    }
     const xfer = randomId();
     return new Promise((resolve, reject) => {
       const parts: Uint8Array<ArrayBuffer>[] = [];
@@ -142,9 +186,11 @@ export class FileClient {
         }
         f();
       };
+      let answered = false;
       const arm = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => finish(() => reject(new FileError("La machine ne répond plus")), true), REPLY_TIMEOUT);
+        const first = !answered;
+        timer = setTimeout(() => finish(() => reject(new FileError(first ? NO_ANSWER : "La machine ne répond plus")), true), first ? FIRST_REPLY_TIMEOUT : REPLY_TIMEOUT);
       };
       arm();
       let stopSent = false;
@@ -161,6 +207,7 @@ export class FileClient {
           { ...op, xfer },
           (n, body, end) => {
             if (finished) return;
+            answered = true;
             arm();
             if (body?.error) return finish(() => reject(new FileError(String(body.error), body.code)));
             if (typeof body.name === "string") name = body.name;

@@ -2182,6 +2182,23 @@ html.dark .term.broadcasting {
   font-size: 13px;
   pointer-events: none;
 }
+.inline-error {
+  padding: 8px 10px;
+  border: 1px solid var(--danger, #dc2626);
+  border-radius: 8px;
+  color: var(--danger, #dc2626);
+  background: color-mix(in srgb, var(--danger, #dc2626) 8%, transparent);
+  font-size: 13px;
+  white-space: pre-line;
+}
+.inline-error .codebox {
+  color: var(--text, inherit);
+}
+.inline-error details {
+  margin-top: 4px;
+  color: var(--text-2, inherit);
+  font-size: 12px;
+}
 .term-files {
   position: absolute;
   top: 6px;

@@ -612,7 +612,7 @@ ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder dep
   // What the server relays and keeps: neither the blob nor the log nor the database holds an address or a name in clear.
   const relayed = Buffer.from(r.body.d, "base64").toString("latin1");
   const dbText = [DB, `${DB}-wal`, `${dirname(DB)}/server.log`].filter((p) => existsSync(p)).map((p) => readFileSync(p).toString("latin1")).join("\n");
-  ok(![relayed, dbText].some((t) => t.includes("127.0.0.1/8") || t.includes('"name":"lo"') || t.includes('"ifaces"')), "sonde « ifaces » : ni adresse ni nom d'interface en clair côté serveur (blob relayé, base, journal)");
+  ok(![relayed, dbText].some((t) => t.includes("127.0.0.1/8") || t.includes('"name":"lo"') || t.includes('"kind":"ifaces"')), "sonde « ifaces » : ni adresse ni nom d'interface en clair côté serveur (blob relayé, base, journal)");
   await new Promise((r) => setTimeout(r, 2100));
   const old = await probe(alice, ["127.0.0.1"]);
   const oldRes = old.status === 200 ? await c.unboxJson<{ r?: Record<string, unknown>; ifaces?: unknown }>(mAlice.auth, old.body.d, c.AAD.probeRes(old.rid)) : null;
@@ -903,10 +903,15 @@ site.close();
     keyForAgent: await c.box(pm!.auth, pk.raw, c.AAD.termAgent(pt)),
     encLabel: await c.boxText(nowKeyB, "vm-tp", c.AAD.termLabel(B, pt)),
   });
-  await sp.next((m) => m.t === "term" && m.terminal.id === pt && m.terminal.status === "running", 8000);
+  const runningMsg = await sp.next((m) => m.t === "term" && m.terminal.id === pt && m.terminal.status === "running", 8000);
   await subscribe(sp, pt);
   await sendInput(sp, pk, pt, "pairtab", "echo PAIRED_$((5*5))\n");
   ok((await termOutput(sp, pk, pt, "PAIRED_25")).includes("PAIRED_25"), "un shell s'ouvre sur la machine appairée");
+  // The hello carries the agent's version and features: plain metadata, in the machine list and in the terminal's state.
+  const mine = (await as(alice, () => api("GET", "/machines"))).body.machines.find((m: any) => m.id === pm!.id);
+  ok(Array.isArray(mine?.agentCaps) && ["files", "capture", "ifaces", "jupyter", "probe", "schema"].every((k) => mine.agentCaps.includes(k)) && typeof mine.agentVersion === "string", "le hello de l'agent annonce sa version et ses fonctions (liste des machines)");
+  const tinfo = runningMsg.terminal;
+  ok(tinfo.agentCaps.includes("capture") && typeof tinfo.agentVersion === "string" && !("hostname" in tinfo), "l'état d'un terminal porte les fonctions de l'agent, sans autre métadonnée de la machine");
   paired.kill();
   sp.ws.close();
   // Removing the machine hands back the command that removes its agent from the machine itself.
@@ -915,6 +920,8 @@ site.close();
   ok(del.status === 200 && /^curl .*\/uninstall\.sh \| sh$/.test(del.body.uninstall ?? ""), "suppression d'une machine : commande de désinstallation de l'agent fournie");
   const script = await (await realFetch(`${BASE}/uninstall.sh`)).text();
   ok(script.startsWith("#!/bin/sh") && script.includes(".config/excalibash") && script.includes("systemctl --user disable"), "/uninstall.sh retire le service, le programme et la configuration");
+  const upd = await (await realFetch(`${BASE}/update.sh`)).text();
+  ok(upd.startsWith("#!/bin/sh") && upd.includes("excalibash-agent-$OS-$ARCH") && upd.includes("systemctl --user restart") && !/rm -rf|--token|EXCALIBASH_KEY|agent\.env/.test(upd), "/update.sh remplace le programme et relance le service, sans toucher à l'identité ni contenir de secret");
 }
 
 // Active sessions: list, revoke one (cuts its websocket), isolation between users, coarse metadata only.

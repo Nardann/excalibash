@@ -29,6 +29,9 @@ export type RawMachine = {
   hostname: string | null;
   os: string | null;
   arch: string | null;
+  /** What the agent announced: its version and features (empty: an agent from before the list existed). */
+  agentVersion: string | null;
+  agentCaps: string[];
   lastSeen: number | null;
   online: boolean;
   shareBoards: boolean;
@@ -43,6 +46,9 @@ export type RawSharedMachine = {
   hostname: string | null;
   os: string | null;
   arch: string | null;
+  /** What the agent announced: its version and features (empty: an agent from before the list existed). */
+  agentVersion: string | null;
+  agentCaps: string[];
   lastSeen: number | null;
   online: boolean;
 };
@@ -55,6 +61,9 @@ export type TerminalInfo = {
   boardId: string;
   machineId: string;
   machineOwnerId: string | null;
+  /** The machine's agent: version and features, for the features that need a recent one. */
+  agentVersion: string | null;
+  agentCaps: string[];
   status: "starting" | "running" | "exited" | "offline";
   exitCode: number | null;
   cols: number;
