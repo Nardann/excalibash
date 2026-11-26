@@ -259,6 +259,7 @@ try {
   await A.page.keyboard.type("# ligne alice");
   await until("texte d'Alice", async () => (await textOf(A.page)).includes("# ligne alice"));
   ok((await activeTool(A.page)) === "toolbar-selection", "taper dans Monaco ne change pas l'outil Excalidraw");
+  ok((await A.page.locator(".excalidraw-container").evaluate((el) => el.scrollTop)) === 0, "donner le focus à une fenêtre qui déborde du canvas ne fait pas défiler le tableau");
 
   await B.page.goto(boardUrl);
   const dockB = B.page.getByRole("complementary", { name: "Fenêtres du tableau" });
