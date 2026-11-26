@@ -35,6 +35,9 @@ export function initTls(): void {
   if (tls.pin) console.log(`[tls] épingle (curl --pinnedpubkey, agent --pin) : ${tls.pin}`);
 }
 
+/** Whether this instance serves HTTPS itself (browsers then never reach it over plain HTTP). */
+export const tlsOn = (): boolean => tls !== null;
+
 /** What /api/config tells the browser. */
 export function tlsInfo(req: IncomingMessage): { selfSigned: boolean; pin: string | null } | null {
   return tls && { selfSigned: tls.selfSigned, pin: pinFor(req) };
@@ -55,6 +58,9 @@ export function certificatePem(): string | null {
 }
 
 // ---- self-signed certificate ---------------------------------------------------------
+
+/** Names this instance answers to on its own: the machine, its addresses, PUBLIC_URL, PROXY_URL, TLS_SANS. */
+export const knownHostnames = (): string[] => wantedSans();
 
 function wantedSans(): string[] {
   const names = new Set(["localhost", "127.0.0.1", "::1", hostname().toLowerCase()]);

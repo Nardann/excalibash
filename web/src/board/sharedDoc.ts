@@ -2,9 +2,12 @@
 // The server only ever sees ciphertext (box under the board key, AAD bound to board, doc and epoch).
 // Bound to the editors (Monaco, notebooks) by later code: this module is the transport.
 import * as Y from "yjs";
-import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
+import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import { AAD, box, randomId, unbox, type SymKey } from "../crypto.ts";
 import type { DocHandler } from "./collab.ts";
+
+const AW_IDS_PER_SOCKET = 2;
+const AW_MAX_PEERS = 64;
 
 /** What a shared document needs from a BoardSession (BoardSession implements it). */
 export interface DocHost {
@@ -16,7 +19,7 @@ export interface DocHost {
   readonly you: { name: string; color: string } | null;
   docSend(msg: object): boolean;
   docRegister(doc: string, handler: DocHandler): () => void;
-  on(event: "peers", fn: () => void): () => void;
+  on(event: "peers", fn: (peers?: { id: string }[]) => void): () => void;
 }
 
 export type SharedDoc = {
@@ -67,6 +70,8 @@ class Shared {
   /** An update failed to authenticate: never compact (it would erase what we could not read). */
   private tainted = false;
   private destroyed = false;
+  /** Which socket (server-stamped `from`) first showed each awareness client id. */
+  private awOwner = new Map<number, string>();
   /** Outgoing frames are encrypted and sent in order. */
   private chain: Promise<void> = Promise.resolve();
 
@@ -84,7 +89,12 @@ class Shared {
       this.awarenessTimer ??= setTimeout(() => this.flushAwareness(), AWARENESS_DELAY);
     });
     // Someone joined or left: let them see our cursor without waiting for the next heartbeat.
-    this.offPeers = host.on("peers", () => {
+    this.offPeers = host.on("peers", (peers) => {
+      // A socket that left (a reload, a reconnection) frees the presence ids it held.
+      if (peers) {
+        const here = new Set(peers.map((p) => p.id));
+        for (const [id, from] of this.awOwner) if (!here.has(from)) this.awOwner.delete(id);
+      }
       if (this.live) {
         this.awarenessDirty = true;
         this.awarenessTimer ??= setTimeout(() => this.flushAwareness(), AWARENESS_DELAY);
@@ -147,7 +157,9 @@ class Shared {
       case "doc.aw": {
         if (typeof msg.d !== "string") return;
         try {
+          const before = new Map([...this.awareness.meta].map(([id, m]) => [id, m.clock]));
           applyAwarenessUpdate(this.awareness, await unbox(this.host.key, msg.d, this.aadAw()), REMOTE);
+          this.checkAwareness(before, typeof msg.from === "string" ? msg.from : "");
         } catch {
           /* unauthenticated or malformed awareness is ignored */
         }
@@ -173,6 +185,27 @@ class Shared {
         return;
     }
   }
+
+  /**
+   * Presence comes from anyone holding the board key, viewers included. A socket may only speak for
+   * the few client ids it showed first (no impersonating someone else's cursor or running cell), and
+   * the number of peers is bounded (thousands of fake ones would freeze every editor).
+   */
+  private checkAwareness(before: Map<number, number>, from: string): void {
+    const drop: number[] = [];
+    for (const [id, m] of this.awareness.meta) {
+      // Only the ids this update touched (new, or a newer clock).
+      if (id === this.awareness.clientID || before.get(id) === m.clock) continue;
+      const owner = this.awOwner.get(id);
+      if (owner === undefined) {
+        const mine = [...this.awOwner.values()].filter((o) => o === from).length;
+        if (!from || mine >= AW_IDS_PER_SOCKET || this.awOwner.size >= AW_MAX_PEERS) drop.push(id);
+        else this.awOwner.set(id, from);
+      } else if (owner !== from) drop.push(id);
+    }
+    if (drop.length) removeAwarenessStates(this.awareness, drop.filter((id) => this.awareness.getStates().has(id)), REMOTE);
+  }
+
 
   private async onState(msg: any) {
     const ups: { d: string; seq: number }[] = Array.isArray(msg.ups) ? msg.ups : [];

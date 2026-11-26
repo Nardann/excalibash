@@ -11,7 +11,10 @@ import (
 	"testing"
 )
 
-const testConfirm = "ABCD2345"
+const testConfirm = "ABCD234W" // valid check letter, see TestConfirmCode
+
+// Check letter of 7KQ4FDX, the same vector as in web/src/crypto.ts tests.
+const confirmVector = "5"
 
 func init() { newConfirmCode = func() string { return testConfirm } }
 
@@ -130,8 +133,16 @@ func TestPairingRejectsBareAuth(t *testing.T) {
 }
 
 func TestConfirmCode(t *testing.T) {
-	c := randomConfirmCode()
-	if len(c) != confirmLen || strings.Trim(c, confirmAlphabet) != "" {
-		t.Fatalf("bad confirmation code %q", c)
+	for i := 0; i < 200; i++ {
+		c := randomConfirmCode()
+		if len(c) != confirmLen || strings.Trim(c, confirmAlphabet) != "" || confirmCheck(c[:7]) != c[7] {
+			t.Fatalf("bad confirmation code %q", c)
+		}
+	}
+	if got := string(confirmCheck("ABCD234")); got != testConfirm[7:] {
+		t.Fatalf("check letter of ABCD234 = %s, testConfirm has %s", got, testConfirm[7:])
+	}
+	if string(confirmCheck("7KQ4FDX")) != confirmVector {
+		t.Fatalf("check letter of 7KQ4FDX = %c", confirmCheck("7KQ4FDX"))
 	}
 }
