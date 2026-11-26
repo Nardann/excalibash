@@ -7,7 +7,7 @@ import { disconnectMachine, dropMachine, dropMachineTerminalsWhere, isMachineOnl
 import { dropMachineTunnels, dropMachineTunnelsWhere } from "../tunnels.ts";
 import { notify } from "../notify.ts";
 import { probeRefusal, relayProbe } from "../probes.ts";
-import { HttpError, blob, pid, publicUrl } from "../http.ts";
+import { HttpError, blob, mailLink, pid, publicUrl } from "../http.ts";
 import { pinFor } from "../tls.ts";
 
 export const machinesApi = Router();
@@ -170,7 +170,7 @@ machinesApi.put("/:id/shares/:userId", (req, res) => {
     notify(req, [target.id], "itemShared", `Excalibash : ${req.user!.name} t'a partagé une machine`, () => ({
       title: `${req.user!.name} t'a partagé une machine`,
       lines: [`**${req.user!.name}** te permet d'ouvrir des shells et des sites sur une de ses machines, depuis tes tableaux.`],
-      button: { label: "Voir mes machines", url: `${publicUrl(req)}/machines` },
+      button: mailLink(req, "/machines", "Voir mes machines"),
       note: "Son nom est chiffré : seul ton navigateur peut le lire, c'est pourquoi il n'apparaît pas ici.",
     }));
   }

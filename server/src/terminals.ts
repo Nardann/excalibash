@@ -332,9 +332,9 @@ export function disconnectMachine(machineId: string): void {
 // ---- Agent connections -------------------------------------------------------
 
 export function authenticateAgent(req: IncomingMessage): string | undefined {
-  const url = new URL(req.url ?? "/", "http://x");
+  // Header only: a token in the URL would end up in reverse proxy logs.
   const header = req.headers.authorization ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : (url.searchParams.get("token") ?? "");
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return undefined;
   const row = db
     .prepare("SELECT m.id FROM machines m JOIN users u ON u.id = m.owner_id WHERE m.token_hash = ? AND u.suspended = 0")

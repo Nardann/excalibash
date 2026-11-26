@@ -1,5 +1,7 @@
 import type { Request } from "express";
 import { config } from "./config.ts";
+import { knownHostnames } from "./tls.ts";
+import type { MailLink } from "./mailTemplate.ts";
 
 export class HttpError extends Error {
   status: number;
@@ -22,4 +24,22 @@ export const pid = (req: Request, name = "id"): string => String(req.params[name
 export function publicUrl(req: Request): string {
   if (config.publicUrl) return config.publicUrl.replace(/\/$/, "");
   return `${req.protocol}://${req.get("host")}`;
+}
+
+let warnedHost = false;
+
+/**
+ * A link for an email sent to someone else. Without PUBLIC_URL the address comes from the Host
+ * header, which the sender controls: only a name this instance knows as its own is used, otherwise
+ * the email goes without the link (a forged Host would send the recipient elsewhere).
+ */
+export function mailLink(req: Request, path: string, label: string): MailLink | undefined {
+  if (config.publicUrl) return { label, url: config.publicUrl.replace(/\/$/, "") + path };
+  const host = req.hostname?.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host && knownHostnames().includes(host)) return { label, url: publicUrl(req) + path };
+  if (!warnedHost) {
+    warnedHost = true;
+    console.warn(`[mail] hôte « ${host} » inconnu : liens retirés des emails. Définir PUBLIC_URL.`);
+  }
+  return undefined;
 }

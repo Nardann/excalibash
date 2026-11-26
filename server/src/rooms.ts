@@ -41,9 +41,20 @@ type Client = {
   /** Awareness rate limit: token bucket. */
   awTokens: number;
   awAt: number;
+  /** General rate limit: token bucket. */
+  msgTokens: number;
+  msgAt: number;
+  /** Set once the socket is being closed (rights changed, keys rotated): its messages are ignored. */
+  gone?: boolean;
 };
 
 const AWARENESS_RATE = 10; // messages per second per socket
+// Every message: a generous bucket (cursors, typing, pastes) that still stops a flood.
+const MESSAGE_RATE = 300; // per second per socket
+const MESSAGE_BURST = 3000;
+// Images of a board (encrypted, base64): beyond this, new ones are refused.
+const MAX_FILES = 2000;
+const MAX_FILES_BYTES = 512 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS = 64;
 const COMPACT_RETRY = 5000;
 
@@ -110,7 +121,7 @@ class Room implements BoardRoom {
   }
 
   join(ws: WebSocket, user: User, role: Role, session?: string): void {
-    const client: Client = { id: newId(6), user, role, session, docs: new Set(), awTokens: AWARENESS_RATE, awAt: Date.now() };
+    const client: Client = { id: newId(6), user, role, session, docs: new Set(), awTokens: AWARENESS_RATE, awAt: Date.now(), msgTokens: MESSAGE_BURST, msgAt: Date.now() };
     this.clients.set(ws, client);
     ws.send(
       JSON.stringify({
@@ -138,6 +149,13 @@ class Room implements BoardRoom {
       }
       // `null`, a number or a string parse fine, and `msg.t` would then throw out of the handler.
       if (!msg || typeof msg !== "object") return;
+      // A closing socket may keep sending until the close handshake ends: nothing it says counts.
+      if (client.gone) return;
+      const now = Date.now();
+      client.msgTokens = Math.min(MESSAGE_BURST, client.msgTokens + ((now - client.msgAt) / 1000) * MESSAGE_RATE);
+      client.msgAt = now;
+      if (client.msgTokens < 1) return this.drop(ws, client, 1008, "trop de messages");
+      client.msgTokens--;
       try {
         this.onMessage(ws, client, msg);
       } catch (e) {
@@ -152,8 +170,8 @@ class Room implements BoardRoom {
       this.broadcast(JSON.stringify({ t: "peer.leave", id: client.id }));
       if (this.clients.size === 0) {
         this.flush();
-        // The work session is over: keep its end state in the history.
-        this.history.capture(this.epoch, this.snapshot(), true);
+        // The work session is over: keep its end state in the history (not if the keys changed meanwhile).
+        if (this.current()) this.history.capture(this.epoch, this.snapshot(), true);
         if (rooms.get(this.boardId) === this) rooms.delete(this.boardId);
       }
     });
@@ -189,8 +207,16 @@ class Room implements BoardRoom {
         if (msg.epoch !== this.epoch) return ws.send(JSON.stringify({ t: "rekey" }));
         if (!msg.files || typeof msg.files !== "object") return;
         const added: Record<string, string> = {};
+        let count = Object.keys(this.files).length;
+        let bytes = Object.values(this.files).reduce((n, c) => n + c.length, 0);
         for (const [id, c] of Object.entries(msg.files)) {
           if (this.files[id] || id.length > 128 || !str(c, 32 * 1024 * 1024)) continue;
+          if (count + 1 > MAX_FILES || bytes + (c as string).length > MAX_FILES_BYTES) {
+            deny("Ce tableau a atteint sa limite d'images");
+            break;
+          }
+          count++;
+          bytes += (c as string).length;
           this.files[id] = c;
           added[id] = c;
         }
@@ -381,10 +407,20 @@ class Room implements BoardRoom {
     this.saveTimer = setTimeout(() => this.flush(), SAVE_DELAY);
   }
 
+  /** Whether the board is still under the keys this room was opened with. */
+  private current(): boolean {
+    return getItem(this.boardId)?.key_epoch === this.epoch;
+  }
+
   flush(): void {
     if (!this.saveTimer && !this.dirtyFiles) return;
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
+    // Content under older keys must never overwrite what a rotation re-encrypted.
+    if (!this.current()) {
+      this.dirtyFiles = false;
+      return;
+    }
     const elements = JSON.stringify(this.snapshot());
     if (this.dirtyFiles) {
       db.prepare("UPDATE boards SET elements = ?, files = ? WHERE id = ?").run(elements, JSON.stringify(this.files), this.boardId);
@@ -401,13 +437,20 @@ class Room implements BoardRoom {
     return this.order.map((id) => this.elements.get(id)!);
   }
 
+  /** Closes a socket for good: its messages stop counting now, and it is cut if it lingers. */
+  private drop(ws: WebSocket, c: Client, code: number, reason: string): void {
+    c.gone = true;
+    ws.close(code, reason);
+    setTimeout(() => ws.terminate(), 2000).unref();
+  }
+
   kick(userId: string, code: number, reason: string): void {
-    for (const [ws, c] of this.clients) if (c.user.id === userId) ws.close(code, reason);
+    for (const [ws, c] of this.clients) if (c.user.id === userId) this.drop(ws, c, code, reason);
   }
 
   /** Closes the sockets opened with one session (token hash). */
   kickSession(session: string, code: number, reason: string): void {
-    for (const [ws, c] of this.clients) if (c.session === session) ws.close(code, reason);
+    for (const [ws, c] of this.clients) if (c.session === session) this.drop(ws, c, code, reason);
   }
 
   /** Disconnects everyone; pending edits are dropped when `discard` (content was replaced). */
@@ -418,7 +461,7 @@ class Room implements BoardRoom {
       this.dirtyFiles = false;
       this.history.discard();
     }
-    for (const ws of this.clients.keys()) ws.close(code, reason);
+    for (const [ws, c] of this.clients) this.drop(ws, c, code, reason);
     if (rooms.get(this.boardId) === this) rooms.delete(this.boardId);
   }
 }

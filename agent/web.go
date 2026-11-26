@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -138,7 +139,7 @@ func (w *webHub) open(msg message) {
 	if old != nil {
 		old.transport.CloseIdleConnections()
 	}
-	log.Printf("web %s: tunnel to %s", msg.ID, target)
+	log.Printf("web %s: tunnel to %s", msg.ID, target.Redacted())
 }
 
 func (w *webHub) close(id string) {
@@ -235,6 +236,16 @@ func (w *webHub) request(msg message, out *outbox) {
 	w.reply(t, msg, out, w.forward(t, req))
 }
 
+// underTarget joins a request path to the tunnel's target path. The path is cleaned first, so
+// "/../admin" stays under the target ("/app/admin") instead of leaving it.
+func underTarget(prefix, p string) string {
+	clean := path.Clean("/" + p)
+	if strings.HasSuffix(p, "/") && clean != "/" {
+		clean += "/"
+	}
+	return strings.TrimSuffix(prefix, "/") + clean
+}
+
 // reply seals a response under the tunnel key and queues it.
 func (w *webHub) reply(t *tunnel, msg message, out *outbox, res httpRes) {
 	plain, _ := json.Marshal(res)
@@ -262,7 +273,7 @@ func (w *webHub) forward(t *tunnel, r httpReq) httpRes {
 	if err != nil {
 		return fail(400, "chemin invalide")
 	}
-	dest.Path = strings.TrimSuffix(t.target.Path, "/") + ref.Path
+	dest.Path = underTarget(t.target.Path, ref.Path)
 	dest.RawQuery = ref.RawQuery
 	method := strings.ToUpper(r.M)
 	if method == "" {

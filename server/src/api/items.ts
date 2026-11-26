@@ -5,7 +5,7 @@ import { atLeast, getItem, isTrashed, roleOn, subtree, visibleItems, type ItemRo
 import { activeTerminalCount, dropBoardTerminals, dropTerminals, rekeyTerminal, terminalsOfBoards } from "../terminals.ts";
 import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
-import { HttpError, blob, pid, publicUrl } from "../http.ts";
+import { HttpError, blob, mailLink, pid } from "../http.ts";
 import { purgeHistory } from "../history.ts";
 import { MAX_DOC_BYTES, isDocId, listDocs, replaceDocs, type RotatedDoc } from "../docs.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
@@ -209,7 +209,7 @@ itemsApi.delete("/items/:id", (req, res) => {
   notify(req, recipients, "itemDeleted", `Excalibash : ${what} a été ${permanent ? "supprimé" : "mis à la corbeille"}`, (self) => ({
     title: permanent ? `${what[0].toUpperCase()}${what.slice(1)} a été supprimé` : `${what[0].toUpperCase()}${what.slice(1)} est dans la corbeille`,
     lines: [self ? `Tu as ${done} ${what}.` : `**${req.user!.name}** a ${done} ${what} auquel tu as accès.`],
-    button: permanent ? undefined : { label: "Ouvrir Excalibash", url: `${publicUrl(req)}/` },
+    button: permanent ? undefined : mailLink(req, "/", "Ouvrir Excalibash"),
     note: permanent
       ? "La suppression est définitive : le contenu chiffré a été effacé du serveur."
       : "Tant qu'il est dans la corbeille, son propriétaire peut encore le restaurer.",
@@ -327,7 +327,7 @@ itemsApi.put("/items/:id/grants/:userId", (req, res) => {
         `**${req.user!.name}** t'a donné accès à ${kindLabel(item.kind)} en ${role === "editor" ? "**modification**" : "**lecture seule**"}.`,
         "Tu le trouves dans « Partagés avec moi ».",
       ],
-      button: { label: "Voir mes partages", url: `${publicUrl(req)}/shared` },
+      button: mailLink(req, "/shared", "Voir mes partages"),
       note: "Son nom est chiffré : seul ton navigateur peut le lire, c'est pourquoi il n'apparaît pas ici.",
     }));
   }
@@ -356,7 +356,7 @@ itemsApi.post("/items/:id/transfer", (req, res) => {
   notify(req, [to], "itemTransferred", `Excalibash : ${req.user!.name} t'a donné ${kindLabel(item.kind)}`, () => ({
     title: `${req.user!.name} t'a donné ${kindLabel(item.kind)}`,
     lines: [`**${req.user!.name}** t'a transféré ${kindLabel(item.kind)} : tu en es maintenant **propriétaire**.`, "Il est rangé dans « Mes fichiers »."],
-    button: { label: "Ouvrir mes fichiers", url: `${publicUrl(req)}/` },
+    button: mailLink(req, "/", "Ouvrir mes fichiers"),
   }));
   res.json({ ok: true });
 });

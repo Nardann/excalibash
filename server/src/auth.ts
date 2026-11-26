@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import type { Request, Response, NextFunction } from "express";
 import { db, serverSecret } from "./db.ts";
 import { config } from "./config.ts";
+import { tlsOn } from "./tls.ts";
 
 export type User = {
   id: string;
@@ -33,6 +34,19 @@ export type UserRow = {
 };
 
 export const COOKIE = "eb_session";
+/**
+ * Over HTTPS the session cookie carries the __Host- prefix: the browser then only accepts it
+ * Secure, for this exact host and path /. The tunnel origin (same host, another port, so
+ * "same-site") can neither set one to log someone in as another account nor overwrite it.
+ */
+export const SECURE_COOKIE = "__Host-eb_session";
+
+/** When HTTPS is certain, a cookie without the prefix (one any same-site page could set) is ignored. */
+const strictCookies = () => config.cookieSecure || tlsOn();
+
+function sessionToken(header: string | undefined): string | undefined {
+  return readCookie(header, SECURE_COOKIE) ?? (strictCookies() ? undefined : readCookie(header, COOKIE));
+}
 
 const COLORS = ["#4f46e5", "#e11d48", "#059669", "#d97706", "#0891b2", "#7c3aed", "#db2777", "#65a30d"];
 
@@ -140,17 +154,18 @@ export function createSession(req: Request, res: Response, userId: string): void
     "INSERT INTO sessions (token_hash, user_id, expires_at, public_id, created_at, last_used_at, user_agent_label, ip_prefix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(sha256(token), userId, expires, randomBytes(8).toString("hex"), now, now, uaLabel(req.headers["user-agent"]), ipPrefix(req.ip));
   used.set(sha256(token), now);
-  res.cookie(COOKIE, token, {
+  const secure = config.cookieSecure || req.secure;
+  res.cookie(secure ? SECURE_COOKIE : COOKIE, token, {
     httpOnly: true,
     sameSite: "strict",
-    secure: config.cookieSecure || req.secure,
+    secure,
     expires: new Date(expires),
     path: "/",
   });
 }
 
 export function currentSessionHash(req: IncomingMessage): string | undefined {
-  const token = readCookie(req.headers.cookie, COOKIE);
+  const token = sessionToken(req.headers.cookie);
   return token ? sha256(token) : undefined;
 }
 
@@ -158,6 +173,7 @@ export function destroySession(req: Request, res: Response): void {
   const hash = currentSessionHash(req);
   if (hash) db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hash);
   res.clearCookie(COOKIE, { path: "/" });
+  res.clearCookie(SECURE_COOKIE, { path: "/", secure: true });
 }
 
 export function readCookie(header: string | undefined, name: string): string | undefined {

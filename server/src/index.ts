@@ -55,6 +55,21 @@ app.use((req, res, next) => {
   });
   // Public links are for the people they were given to, not for search engines.
   if (req.path.startsWith("/v/")) res.set("X-Robots-Tag", "noindex, nofollow");
+  if (req.secure) res.set("Strict-Transport-Security", "max-age=31536000");
+  next();
+});
+
+// The API answers with personal data: never in a cache. Changes must come from this origin's own
+// pages: SameSite=Strict lets the tunnel origin (same site, another port) send the cookie, so a
+// browser that says where a request comes from (Sec-Fetch-Site) is checked. Agents and the MCP
+// client send no such header.
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  const site = req.get("sec-fetch-site");
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && site && site !== "same-origin" && site !== "none") {
+    res.status(403).json({ error: "Requête refusée : elle ne vient pas d'Excalibash" });
+    return;
+  }
   next();
 });
 

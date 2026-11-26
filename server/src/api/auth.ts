@@ -20,7 +20,7 @@ import {
   verifySecret,
   burnVerify,
 } from "../auth.ts";
-import { HttpError, blob, publicUrl, str } from "../http.ts";
+import { HttpError, blob, mailLink, str } from "../http.ts";
 import { config } from "../config.ts";
 import { emailEnabled, sendVerificationCode, verificationRequired } from "../mailer.ts";
 import { notify } from "../notify.ts";
@@ -236,7 +236,7 @@ authApi.post("/login", (req, res) => {
   notify(req, [row.id], "newLogin", "Excalibash : nouvelle connexion à ton compte", () => ({
     title: "Nouvelle connexion à ton compte",
     lines: [`Quelqu'un vient de se connecter à ton compte Excalibash le **${when}**, depuis l'adresse **${req.ip}**.`],
-    button: { label: "Changer mon mot de passe", url: `${publicUrl(req)}/account` },
+    button: mailLink(req, "/account", "Changer mon mot de passe"),
     note: "Si c'est toi, tu n'as rien à faire. Sinon, change ton mot de passe tout de suite : les autres appareils seront déconnectés.",
   }));
   res.json({ user: toUser(row), keys: { publicKey: row.public_key, encPrivateKey: row.enc_private_key } });
@@ -350,7 +350,9 @@ authApi.get("/lookup", (req, res) => {
   });
   if (q.includes("@")) {
     const row = findUserByEmail(q);
-    if (!row || (row.id !== me && !row.findable_email && !shareSomething(me, row.id))) throw new HttpError(404, "Aucun compte trouvé");
+    // An unverified account may use someone else's address; a suspended one can't receive anything.
+    const usable = row && (row.id === me || (flags(row.id).email_verified && !flags(row.id).suspended));
+    if (!row || !usable || (row.id !== me && !row.findable_email && !shareSomething(me, row.id))) throw new HttpError(404, "Aucun compte trouvé");
     res.json({ users: [out(row)] });
     return;
   }

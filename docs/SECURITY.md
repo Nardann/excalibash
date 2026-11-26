@@ -11,7 +11,8 @@ les dates (dont la dernière activité de chaque compte), les liens publics d'un
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
-et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
+et versions des éléments (dont l'empreinte SHA-1 de chaque image), qui est connecté, les dimensions et le rythme
+d'activité des terminaux, le nom d'hôte, l'OS et l'architecture annoncés par chaque agent. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
@@ -379,9 +380,12 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
     risques résiduels) ;
   - l'origine proxy n'a pas de session : une requête vers un tunnel inconnu est refusée avant que
     son corps soit lu ;
-  - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port). Le cookie
-    de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
-    d'hôte distinct reste préférable.
+  - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port), et
+    sont « same-site ». Le cookie de session est `HttpOnly` et `SameSite=Strict` ; en HTTPS il s'appelle
+    `__Host-eb_session`, que le navigateur n'accepte que `Secure`, pour cet hôte exact : une page de l'origine proxy ne
+    peut ni le poser (pour connecter quelqu'un à un autre compte) ni l'écraser. L'API refuse toute modification dont
+    l'en-tête `Sec-Fetch-Site` n'est pas `same-origin`, et exige du JSON. En production, un nom d'hôte distinct reste
+    préférable.
 
 ## État des câbles (ping)
 
@@ -440,8 +444,9 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
 - **Retrait** : retirer une personne, retirer un lien, désactiver l'option, changer un rôle, mettre le tableau à la
   corbeille, le donner ou renouveler ses clés ferme les shells et les sites ouverts par ceux qui perdent l'accès. Une rotation des clés d'un tableau supprime ses liens (ils étaient chiffrés sous l'ancienne
   clé) ; ses terminaux sont rafraîchis par quiconque détient `machineAuth` en propre (propriétaire ou partage direct).
-- Le serveur voit qui a accès à quelle machine et à quels tableaux elle est liée. Il ne voit ni la clé, ni le nom de la
-  machine.
+- Le serveur voit qui a accès à quelle machine et à quels tableaux elle est liée. Il ne voit ni la clé, ni le nom donné
+  à la machine dans Excalibash (chiffré). Il voit en revanche ce que l'agent annonce en clair : le nom d'hôte du système,
+  l'OS et l'architecture (et le nom d'hôte, à l'appairage).
 - **Limite** : `machineAuth` ne change pas quand on retire un accès. Quelqu'un qui l'a reçue et qui s'entendrait avec
   le serveur pourrait encore ouvrir des sessions ; le serveur seul ne le peut pas. Pour une coupure complète, supprimer
   la machine et l'appairer de nouveau (nouvelle clé).
@@ -602,5 +607,15 @@ Un tableau a 20 liens au plus.
   une page d'un autre tunnel ouvert dans ce navigateur, puis lire son contenu (même origine). Parade :
   n'ouvrir que des sites de confiance, ou un profil de navigateur dédié. Une origine par tunnel
   (sous-domaines) supprimerait ce risque.
-- **Quotas** : il n'y a pas de quota de stockage par compte. Avec les inscriptions ouvertes, un
-  compte peut remplir le disque ; les inscriptions sur invitation évitent ce risque.
+- **Quotas** : il n'y a pas de quota de stockage par compte. Un tableau est limité à 2000 images
+  (512 Mo chiffrés) et chaque socket à 300 messages par seconde, mais avec les inscriptions ouvertes,
+  un compte peut encore remplir le disque en créant des tableaux ; les inscriptions sur invitation
+  évitent ce risque.
+- **Rejeu d'une ancienne clé de terminal ou de tunnel** : `keyForAgent` (`eb:term:<id>`, `eb:web:<id>`)
+  ne porte ni époque ni compteur. Un serveur complice d'une personne qui a perdu l'accès peut renvoyer
+  à l'agent une ancienne clé qu'elle connaît encore. Pour une coupure complète, supprimer la machine et
+  l'appairer de nouveau.
+- **Images reconnaissables** : l'identifiant d'une image est l'empreinte SHA-1 de son contenu (choix
+  d'Excalidraw), en clair. Le serveur peut tester si un tableau contient une image qu'il connaît déjà.
+- **Coffre ramené en arrière** : le serveur peut resservir une ancienne version du coffre (clés épinglées)
+  ou n'en servir aucune ; un contact épinglé redevient alors « nouveau », sans alerte.

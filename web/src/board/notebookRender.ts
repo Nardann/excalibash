@@ -111,6 +111,19 @@ export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({
 const IMAGE_MIMES = ["image/png", "image/jpeg", "image/gif"] as const;
 
 /**
+ * Removes every <meta> tag. Repeated until nothing changes: one pass over "<me<meta>ta …>" would
+ * leave a whole "<meta …>" behind. An unclosed one at the end goes too (the closing tags we add
+ * after the body would otherwise end it).
+ */
+export function stripMeta(html: string): string {
+  for (;;) {
+    const next = html.replace(/<meta\b[^>]*(>|$)/gi, "");
+    if (next === html) return html;
+    html = next;
+  }
+}
+
+/**
  * The document inside a sandboxed frame. The sandbox attribute (empty) is what protects; the CSP meta
  * is a second wall (no script, no network, only data: images) and the page can't loosen it.
  */
@@ -119,7 +132,7 @@ export function frameDoc(body: string, dark: boolean): string {
   // CSP doesn't govern <meta http-equiv="refresh">: an output could otherwise send every viewer's
   // frame to an outside URL on its own (leaking their IP). Notebook content gets no <meta> at all,
   // and links can't navigate the frame either: <base> sends them to a new window, which the sandbox refuses.
-  body = body.replace(/<meta\b[^>]*>/gi, "");
+  body = stripMeta(body);
   return (
     `<!doctype html><html><head><meta charset="utf-8"><base target="_blank">` +
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">` +

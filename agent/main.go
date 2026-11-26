@@ -47,6 +47,12 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	// Arguments are visible to every local user (ps, /proc/<pid>/cmdline) and stay in shell history.
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "token" || f.Name == "key" {
+			log.Printf("attention : --%s se voit dans la liste des processus ; préfère EXCALIBASH_%s, --key-file ou --pair", f.Name, strings.ToUpper(f.Name))
+		}
+	})
 	if *keyFile != "" {
 		b, err := os.ReadFile(*keyFile)
 		if err != nil {
@@ -122,6 +128,11 @@ func main() {
 	mgr := newManagerWithAuth(auth)
 	cfg := config{endpoint: endpoint, token: *token, name: *name, insecure: *insecure, pin: pin}
 	log.Printf("excalibash-agent %s → %s", version, endpoint)
+	if *insecure {
+		log.Printf("attention : --insecure, le certificat du serveur n'est pas vérifié (le jeton de la machine peut être intercepté)")
+	} else if strings.HasPrefix(endpoint, "ws://") {
+		log.Printf("attention : connexion en clair (ws://), le jeton de la machine peut être intercepté ; le contenu reste chiffré de bout en bout")
+	}
 	if pin != "" {
 		log.Printf("server key pinned: %s", pin)
 	}

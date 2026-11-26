@@ -1020,6 +1020,7 @@ site.close();
   ok(lb.text.includes("Tableau confidentiel") && lb.text.includes(B), "MCP : lister_tableaux déchiffre les noms localement");
   const board = await m1.call("lire_tableau", { tableau: "Tableau confidentiel" });
   ok(!board.isError && board.text.includes("Tableau confidentiel"), "MCP : lire_tableau accepte le nom exact");
+  ok(lb.text.startsWith("[Contenu écrit par des tiers") && board.text.startsWith("[Contenu écrit par des tiers"), "MCP : noms et textes de tableau marqués comme non fiables");
   const lt = await m1.call("lister_terminaux", { tableau: B });
   ok(lt.text.includes(tid2) && lt.text.includes("shell"), "MCP : lister_terminaux");
   const rd = await m1.call("lire_terminal", { tableau: B, terminal: tid2, lignes: 50 });

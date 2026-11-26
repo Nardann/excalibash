@@ -94,12 +94,31 @@ func loadConfig(path string) (savedConfig, error) {
 }
 
 func saveConfig(path string, c savedConfig) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// MkdirAll leaves an existing directory as it was.
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
+	// A fresh file: WriteFile would keep the mode of a leftover .tmp, or follow a symlink planted there.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
