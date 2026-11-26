@@ -517,8 +517,12 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
   }, [people]);
 
   // The kernel session of the notebook, shared by everybody through the document.
-  const kernelTerm = meta.kernelTerm ?? null;
-  const term = kernelTerm ? session.terminals.get(kernelTerm) : undefined;
+  // Any editor can write kernelTerm: only a terminal that is a Jupyter kernel session counts, never a
+  // shell (cells would be typed into it as JSON lines, and the shell would expand $(…) in them).
+  const named = meta.kernelTerm ?? null;
+  const namedTerm = named ? session.terminals.get(named) : undefined;
+  const kernelTerm = named && (!namedTerm || namedTerm.label.startsWith("Noyau Jupyter ")) ? named : null;
+  const term = kernelTerm ? namedTerm : undefined;
   const termAlive = !!term && (term.status === "running" || term.status === "starting");
   const termGone = !!kernelTerm && (term ? !termAlive : session.state === "online");
   const runnerRef = useRef<NotebookRunner | null>(null);

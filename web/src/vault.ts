@@ -205,9 +205,11 @@ export async function machineShares(id: string) {
  * it), name and public key, sealed to their public key. Their key is checked against the one
  * pinned at earlier shares, as for boards.
  */
-export async function shareMachine(user: User, keys: KeyPair, m: Machine, target: { id: string; email?: string; publicKey: string }, verifiedChange = false) {
-  if (!verifiedChange && (await checkContact(user, keys, target.id, target.email, target.publicKey)) === "changed") {
-    throw new Error("La clé de cette personne a changé depuis votre dernier partage : vérifie son empreinte avant de continuer.");
+/** `existing`: already shared with them (rename), so their key must already be pinned. */
+export async function shareMachine(user: User, keys: KeyPair, m: Machine, target: { id: string; email?: string; publicKey: string }, verifiedChange = false, existing = false) {
+  const check = verifiedChange ? "match" : await checkContact(user, keys, target.id, target.email, target.publicKey);
+  if (check === "changed" || (existing && check === "new")) {
+    throw new Error("La clé de cette personne a changé ou n'est pas connue de ce navigateur : vérifie son empreinte avant de continuer.");
   }
   const sealed = await seal(fromB64(target.publicKey), utf8(JSON.stringify(machineKeys(m))), AAD.machineShare(m.id));
   await api.put(`/machines/${m.id}/shares/${target.id}`, { sealed });

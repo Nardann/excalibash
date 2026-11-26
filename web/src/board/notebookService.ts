@@ -28,6 +28,8 @@ export type ServiceEnv = {
   watchTerminals(fn: () => void): () => void;
   /** True when the kernel session `term` is known to be over (exited, or removed from an online board). */
   terminalOver(term: string): boolean;
+  /** True when `term` is known and is not a Jupyter kernel session (a shell, ssh…). */
+  notKernel?(term: string): boolean;
   /** Calls `fn` once when the board session is closed. */
   onClose(fn: () => void): () => void;
 };
@@ -44,6 +46,10 @@ export function sessionEnv(s: BoardSession): ServiceEnv {
     terminalOver(term) {
       const t = s.terminals.get(term);
       return t ? !(t.status === "running" || t.status === "starting") : s.state === "online";
+    },
+    notKernel(term) {
+      const t = s.terminals.get(term);
+      return !!t && !t.label.startsWith("Noyau Jupyter ");
     },
     onClose: (fn) => s.onDispose(fn),
   };
@@ -98,7 +104,10 @@ class Service<R extends ExecRunner = ExecRunner> {
     const meta = metaOf(this.doc.ydoc);
     const follow = () => {
       if (this.disposed) return;
-      const term = kind.termOf(this.doc.ydoc);
+      // Any editor can write the kernel id in the document: never follow one that is a shell (cells
+      // would be typed into it as JSON lines, and the shell would expand $(…) in them).
+      const named = kind.termOf(this.doc.ydoc);
+      const term = named && env.notKernel?.(named) ? null : named;
       this.runner.attach(term);
       if (term && env.terminalOver(term)) this.runner.terminalGone();
     };

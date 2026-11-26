@@ -206,7 +206,7 @@ func (w *webHub) wsOpen(msg message, out *outbox) {
 	w.mu.Unlock()
 
 	dest := *t.target
-	dest.Path = strings.TrimSuffix(t.target.Path, "/") + ref.Path
+	dest.Path = underTarget(t.target.Path, ref.Path)
 	dest.RawQuery = ref.RawQuery
 	header := http.Header{"Origin": {t.target.Scheme + "://" + t.target.Host}}
 	if spec.Cookie != "" {

@@ -11,7 +11,8 @@ les dates (dont la dernière activité de chaque compte), les liens publics d'un
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
-et versions des éléments, qui est connecté, les dimensions et le rythme d'activité des terminaux. **Il ne voit jamais** : les noms de
+et versions des éléments (dont l'empreinte SHA-1 de chaque image), qui est connecté, les dimensions et le rythme
+d'activité des terminaux, le nom d'hôte, l'OS et l'architecture annoncés par chaque agent. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
@@ -261,9 +262,9 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   - le serveur crée un rendez-vous de 10 minutes, à usage unique, avec un code de 6 caractères ;
   - l'agent **génère sa propre paire X25519 sur la machine** et dépose sa clé publique ;
   - le navigateur du propriétaire affiche l'empreinte de cette clé, que l'humain compare avec celle affichée par la machine ;
-  - la machine affiche aussi un **code de confirmation** de 8 caractères (≈ 40 bits), que l'humain recopie dans le navigateur ; il ne passe jamais par le serveur ;
-  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé, suivi d'une étiquette `HMAC-SHA256(confirmation, machineAuth ‖ agentPub)` (`seal(agentPub, machineAuth ‖ tag, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
-  - le sceau seul est anonyme : le serveur connaît la clé publique de l'agent et le code, il pourrait donc sceller un `machineAuth` de son choix. Sans le code de confirmation, son étiquette est fausse et l'agent annule l'appairage. Il n'a qu'un essai par appairage ;
+  - la machine affiche aussi un **code de confirmation** de 8 caractères (7 aléatoires, ≈ 34 bits, et une lettre de contrôle qui fait repérer une faute de frappe dans le navigateur), que l'humain recopie dans le navigateur ; il ne passe jamais par le serveur ;
+  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé, suivi d'une étiquette `HMAC-SHA256(Argon2id(confirmation, sel = agentPub), machineAuth ‖ agentPub)` (`seal(agentPub, machineAuth ‖ tag, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
+  - le sceau seul est anonyme : le serveur connaît la clé publique de l'agent et le code, il pourrait donc sceller un `machineAuth` de son choix. Sans le code de confirmation, son étiquette est fausse et l'agent annule l'appairage. Il n'a qu'un essai par appairage. Les deux vérifications vont ensemble : un serveur qui substituerait sa clé (empreinte non comparée) obtiendrait une étiquette, mais l'Argon2id (64 Mio, 3 passes) rend la recherche du code hors ligne impraticable dans les 10 minutes de l'appairage ;
   - un serveur qui substituerait sa propre clé ferait apparaître une empreinte différente de celle de l'écran de la machine. Deviner un code n'apporte rien d'autre que ce même risque : le dépôt de clé est limité en débit, et un code n'accepte qu'une seule machine.
 - Chaque terminal a une clé `K_t` générée par le navigateur **de qui l'ouvre**, qui doit détenir `machineAuth` (le propriétaire de la machine, ou une personne à qui il l'a partagée).
   Le serveur stocke :
@@ -416,9 +417,12 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
     risques résiduels) ;
   - l'origine proxy n'a pas de session : une requête vers un tunnel inconnu est refusée avant que
     son corps soit lu ;
-  - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port). Le cookie
-    de session est `HttpOnly` et `SameSite=Strict`, et l'API exige du JSON, ce qui bloque le CSRF. En production, un nom
-    d'hôte distinct reste préférable.
+  - en local, `localhost:6767` et `localhost:6768` partagent leurs cookies (les cookies ne dépendent pas du port), et
+    sont « same-site ». Le cookie de session est `HttpOnly` et `SameSite=Strict` ; en HTTPS il s'appelle
+    `__Host-eb_session`, que le navigateur n'accepte que `Secure`, pour cet hôte exact : une page de l'origine proxy ne
+    peut ni le poser (pour connecter quelqu'un à un autre compte) ni l'écraser. L'API refuse toute modification dont
+    l'en-tête `Sec-Fetch-Site` n'est pas `same-origin`, et exige du JSON. En production, un nom d'hôte distinct reste
+    préférable.
 
 ## État des câbles (ping)
 
@@ -477,8 +481,9 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
 - **Retrait** : retirer une personne, retirer un lien, désactiver l'option, changer un rôle, mettre le tableau à la
   corbeille, le donner ou renouveler ses clés ferme les shells et les sites ouverts par ceux qui perdent l'accès. Une rotation des clés d'un tableau supprime ses liens (ils étaient chiffrés sous l'ancienne
   clé) ; ses terminaux sont rafraîchis par quiconque détient `machineAuth` en propre (propriétaire ou partage direct).
-- Le serveur voit qui a accès à quelle machine et à quels tableaux elle est liée. Il ne voit ni la clé, ni le nom de la
-  machine.
+- Le serveur voit qui a accès à quelle machine et à quels tableaux elle est liée. Il ne voit ni la clé, ni le nom donné
+  à la machine dans Excalibash (chiffré). Il voit en revanche ce que l'agent annonce en clair : le nom d'hôte du système,
+  l'OS et l'architecture (et le nom d'hôte, à l'appairage).
 - **Limite** : `machineAuth` ne change pas quand on retire un accès. Quelqu'un qui l'a reçue et qui s'entendrait avec
   le serveur pourrait encore ouvrir des sessions ; le serveur seul ne le peut pas. Pour une coupure complète, supprimer
   la machine et l'appairer de nouveau (nouvelle clé).
@@ -639,5 +644,27 @@ Un tableau a 20 liens au plus.
   une page d'un autre tunnel ouvert dans ce navigateur, puis lire son contenu (même origine). Parade :
   n'ouvrir que des sites de confiance, ou un profil de navigateur dédié. Une origine par tunnel
   (sous-domaines) supprimerait ce risque.
-- **Quotas** : il n'y a pas de quota de stockage par compte. Avec les inscriptions ouvertes, un
-  compte peut remplir le disque ; les inscriptions sur invitation évitent ce risque.
+- **Quotas** : il n'y a pas de quota de stockage par compte. Un tableau est limité à 2000 images
+  (512 Mo chiffrés) et chaque socket à 300 messages par seconde, mais avec les inscriptions ouvertes,
+  un compte peut encore remplir le disque en créant des tableaux ; les inscriptions sur invitation
+  évitent ce risque.
+- **Rejeu d'une ancienne clé de terminal ou de tunnel** : `keyForAgent` (`eb:term:<id>`, `eb:web:<id>`)
+  ne porte ni époque ni compteur. Un serveur complice d'une personne qui a perdu l'accès peut renvoyer
+  à l'agent une ancienne clé qu'elle connaît encore. Pour une coupure complète, supprimer la machine et
+  l'appairer de nouveau.
+- **Images reconnaissables** : l'identifiant d'une image est l'empreinte SHA-1 de son contenu (choix
+  d'Excalidraw), en clair. Le serveur peut tester si un tableau contient une image qu'il connaît déjà.
+- **Frappes supprimées** : les entrées d'un terminal sont numérotées (`k`) et l'agent refuse un numéro déjà vu,
+  mais pas un trou : le serveur peut retirer une trame (une touche, un morceau de collage) sans que l'agent le voie.
+  Un compteur contigu par terminal est prévu avec la mise à jour du protocole de l'agent (époque de `keyForAgent`).
+- **Élément racine** : la clé d'un élément à la racine vient d'un accès scellé de façon anonyme à son propriétaire.
+  Le serveur peut en remplacer un par une clé de son choix : l'élément paraît alors vide, et ce qui y serait écrit
+  ensuite lui serait lisible. Pour un élément dans un dossier, la clé venant du dossier parent l'emporte sur un accès
+  qui la contredirait. Le serveur peut aussi glisser dans une rotation un contact déjà épinglé ailleurs.
+- **Origine des tunnels** : l'adresse de l'origine proxy vient de `/api/config`. Un serveur qui en donnerait une autre
+  recevrait la clé du tunnel. L'identifiant d'un tunnel ne change pas quand sa clé est renouvelée : qui le connaît
+  peut encore envoyer du bruit (sans clé) jusqu'à la machine.
+- **Verrouillage d'un compte** : 8 tentatives de connexion par minute et par email, quelle que soit l'adresse.
+  Un inconnu peut empêcher quelqu'un de se connecter tant qu'il continue.
+- **Coffre ramené en arrière** : le serveur peut resservir une ancienne version du coffre (clés épinglées)
+  ou n'en servir aucune ; un contact épinglé redevient alors « nouveau », sans alerte.

@@ -53,8 +53,15 @@ export async function decryptTree(user: User, keys: KeyPair, items: RawItem[], g
       const parent = it.parentId && raw.has(it.parentId) ? await resolve(it.parentId) : null;
       let key: SymKey | null = null;
       try {
-        if (grant) key = await unsealKey(keys, grant.wrappedKey, AAD.grant(id, user.id));
-        else if (parent?.key && it.keyWrap) key = await unwrapKey(parent.key, it.keyWrap, AAD.wrap(id, it.parentId!));
+        // An editor can move an item and write its wrap: a bad one must not hide a valid grant.
+        const wrapped = parent?.key && it.keyWrap ? await unwrapKey(parent.key, it.keyWrap, AAD.wrap(id, it.parentId!)).catch(() => null) : null;
+        // A grant is sealed anonymously: the server could add one under a key of its own. When the
+        // parent's wrap (which the server can't forge) also gives the key, both must agree.
+        const granted = grant ? await unsealKey(keys, grant.wrappedKey, AAD.grant(id, user.id)).catch(() => null) : null;
+        if (granted && wrapped && !sameBytes(granted.raw, wrapped.raw)) {
+          console.warn("[excalibash] clé d'accès contredite par celle du dossier parent : ignorée", id);
+          key = wrapped;
+        } else key = wrapped ?? granted;
       } catch {
         key = null;
       }
@@ -278,13 +285,19 @@ export async function fetchPreview(key: SymKey, boardId: string): Promise<string
 
 export type Member = { userId: string; role: Role; name: string; email: string; publicKey: string; color: string };
 
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
 /**
  * Seals the item key for someone. A key that differs from the one pinned for that person
  * (or that email) is refused unless the user explicitly verified the new fingerprint.
+ * `existing`: the person already has access (role change), so their key must already be pinned.
  */
-export async function shareItem(ctx: Ctx, id: string, target: { id: string; email: string; publicKey: string }, role: Role, verifiedChange = false) {
-  if (!verifiedChange && (await checkContact(ctx.user, ctx.keys, target.id, target.email, target.publicKey)) === "changed") {
-    throw new Error(`La clé de ${target.email} a changé depuis votre dernier partage : vérifie son empreinte avant de continuer.`);
+export async function shareItem(ctx: Ctx, id: string, target: { id: string; email: string; publicKey: string }, role: Role, verifiedChange = false, existing = false) {
+  const check = verifiedChange ? "match" : await checkContact(ctx.user, ctx.keys, target.id, target.email, target.publicKey);
+  if (check === "changed" || (existing && check === "new")) {
+    throw new Error(`La clé de ${target.email} a changé ou n'est pas connue de ce navigateur : vérifie son empreinte avant de continuer.`);
   }
   const wrappedKey = await sealKey(fromB64(target.publicKey), keyOf(ctx, id), AAD.grant(id, target.id));
   await api.put(`/items/${id}/grants/${target.id}`, { role, wrappedKey });
