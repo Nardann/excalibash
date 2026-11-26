@@ -31,7 +31,7 @@ import { MonacoBinding } from "y-monaco";
 import type * as Monaco from "monaco-editor";
 import { monaco } from "./monacoEnv.ts";
 import type { BoardSession } from "./collab.ts";
-import { openSharedDoc, type SharedDoc } from "./sharedDoc.ts";
+import type { SharedDoc } from "./sharedDoc.ts";
 import { cursorStyleSheet, isDirty, safeColor, safeLabel, sha256Hex } from "./codeDoc.ts";
 import { openMachineFile, pickLocalShell, saveMachineFile } from "./machineFiles.ts";
 import {
@@ -63,7 +63,8 @@ import {
   type NotebookMeta,
 } from "./notebookDoc.ts";
 import { classifyOutputs, frameHeight, markdownFrame, parseAnsi, type RenderItem } from "./notebookRender.ts";
-import { NotebookRunner, type TermPort } from "./notebookRunner.ts";
+import type { NotebookRunner } from "./notebookRunner.ts";
+import { acquireNotebook, sessionEnv } from "./notebookService.ts";
 
 /** What the window needs from the app (handed in by the board page: this chunk must not import the UI kit, see BoardPage). */
 export type NotebookHost = {
@@ -122,15 +123,21 @@ function useMarkdown(): ((md: string) => string) | undefined {
   return fn;
 }
 
-/** The document handle of this window: opened with it, released with it. */
+/**
+ * The notebook service of this window (document + kernel runner, see notebookService.ts): joined with the
+ * window, released with it. The service itself outlives the window while a run is in flight.
+ */
 function useDoc(session: BoardSession, docId: string, toast: (t: string) => void) {
   const [doc, setDoc] = useState<SharedDoc | null>(null);
+  const [runner, setRunner] = useState<NotebookRunner | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    const d = openSharedDoc(session, docId);
+    const h = acquireNotebook(session, sessionEnv(session), docId);
+    const d = h.doc;
     setDoc(d);
+    setRunner(h.runner);
     setReady(false);
     const off = d.onError((m) => live && setError(m));
     d.synced.then(async () => {
@@ -153,10 +160,10 @@ function useDoc(session: BoardSession, docId: string, toast: (t: string) => void
     return () => {
       live = false;
       off();
-      d.destroy();
+      h.release();
     };
   }, [session, docId, toast]);
-  return { doc, ready, error };
+  return { doc, runner, ready, error };
 }
 
 // ---- outputs ----------------------------------------------------------------------------------------------------------
@@ -448,7 +455,7 @@ const NotebookCell = memo(function NotebookCell(p: CellProps) {
 
 export default function NotebookEmbed({ host, session, docId, nodeId, active, shells, title, onHide, onRemove }: Props) {
   const { theme, confirm: confirmDialog, toast } = host;
-  const { doc, ready, error } = useDoc(session, docId, toast);
+  const { doc, runner, ready, error } = useDoc(session, docId, toast);
   const rootRef = useRef<HTMLDivElement>(null);
   const [meta, setMeta] = useState<NotebookMeta>(() => ({ name: "sans-titre.ipynb", language: "python", nbformatMinor: 5 }));
   const [cellMaps, setCellMaps] = useState<{ id: string; map: Cell }[]>([]);
@@ -551,32 +558,15 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
   const termAlive = !!term && (term.status === "running" || term.status === "starting");
   const termGone = !!kernelTerm && (term ? !termAlive : session.state === "online");
   const runnerRef = useRef<NotebookRunner | null>(null);
+  runnerRef.current = runner;
+  // The runner belongs to the service (it follows the kernel session and the outputs even when this window is
+  // hidden): the window only mirrors its status.
   useEffect(() => {
-    if (!doc || !ready) return;
-    const port: TermPort = {
-      subscribe: (t, l) => session.subscribeTerminal(t, l),
-      input: (t, data) => session.terminalInput(t, data),
-    };
-    const r = new NotebookRunner(doc.ydoc, port, { awareness: doc.awareness, canEdit: !readOnly });
-    runnerRef.current = r;
-    const sync = () => setKStatus({ status: r.status, fatal: r.fatal });
-    const off = r.on(sync);
+    if (!runner) return;
+    const sync = () => setKStatus({ status: runner.status, fatal: runner.fatal });
     sync();
-    return () => {
-      off();
-      r.destroy();
-      runnerRef.current = null;
-    };
-  }, [doc, ready, readOnly, session]);
-  useEffect(() => {
-    const r = runnerRef.current;
-    if (!r || !ready) return;
-    r.attach(kernelTerm);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kernelTerm, ready, doc, readOnly, session]);
-  useEffect(() => {
-    if (termGone) runnerRef.current?.terminalGone();
-  }, [termGone, kernelTerm]);
+    return runner.on(sync);
+  }, [runner]);
 
   // May this user start a kernel on the node's machine? (Holding its machine key, like for a remote session.)
   const shellKey = shells.join();

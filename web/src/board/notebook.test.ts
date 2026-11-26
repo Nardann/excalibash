@@ -26,6 +26,8 @@ import {
 } from "./notebookDoc.ts";
 import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDoc, frameHeight, parseAnsi, stripAnsi, markdownFrame } from "./notebookRender.ts";
 import { NotebookRunner } from "./notebookRunner.ts";
+import { acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
+import { newSymKey } from "../crypto.ts";
 import { LineSplitter } from "./kernelProtocol.ts";
 import { MAX_NOTEBOOKS, nodeDataOf } from "./nodeData.ts";
 
@@ -489,6 +491,115 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   const tooLong = rg.run(ids(d4)[0]);
   ok(!tooLong.ok && /trop long/.test((tooLong as any).reason) && !findCell(d4, ids(d4)[0])!.running, "noyau : un code de plus de 1 Mio est refusé avant de marquer la cellule en cours");
   rg.destroy();
+}
+
+// 7. The notebook service: the runner outlives the window
+{
+  const enc = new TextEncoder();
+  const key = await newSymKey();
+  const handlers = new Map<string, any>();
+  const host = {
+    boardId: "board",
+    key,
+    canEdit: true,
+    currentEpoch: 1,
+    you: { name: "Alice", color: "#336699" },
+    docSend(m: any) {
+      if (m.t === "doc.sub") queueMicrotask(() => handlers.get(m.doc)?.onMessage({ t: "doc.state", ups: [] }));
+      return true;
+    },
+    docRegister(doc: string, h: any) {
+      handlers.set(doc, h);
+      queueMicrotask(() => h.onOpen());
+      return () => handlers.delete(doc);
+    },
+    on: () => () => {},
+  };
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  const listeners = new Set<L>();
+  const sent: string[] = [];
+  const emit = (ev: object) => {
+    const b = enc.encode(JSON.stringify(ev) + "\n");
+    for (const l of listeners) l.onData(b);
+  };
+  let over = false;
+  let watcher: (() => void) | undefined;
+  let closeBoard: (() => void) | undefined;
+  const env: ServiceEnv = {
+    port: {
+      subscribe: (_t, l) => (listeners.add(l), () => listeners.delete(l)),
+      input: (_t, d) => void sent.push(new TextDecoder().decode(d)),
+    },
+    watchTerminals: (fn) => ((watcher = fn), () => (watcher = undefined)),
+    terminalOver: () => over,
+    onClose: (fn) => ((closeBoard = fn), () => (closeBoard = undefined)),
+  };
+  const TERM = "K".repeat(22);
+  const docId = "S".repeat(22);
+
+  const win = acquireNotebook(host, env, docId, { idleMs: 200 });
+  await win.doc.synced;
+  initBlankNotebook(win.doc.ydoc);
+  const cell = ids(win.doc.ydoc)[0];
+  findCell(win.doc.ydoc, cell)!.source.insert(0, "print(1)");
+  setKernelTerm(win.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  ok(win.runner.term === TERM, "service : le runner suit la session de noyau du document, sans fenêtre pour le lui dire");
+  const run = win.runner.run(cell);
+  ok(run.ok && sent.length === 1, "service : la cellule part au noyau");
+  const execId = run.ok ? run.execId : "";
+
+  // The window is hidden in the middle of the run: its handle goes away, the service stays.
+  const again = acquireNotebook(host, env, docId, { idleMs: 200 });
+  ok(again.runner === win.runner && again.doc === win.doc, "service : une seconde fenêtre rejoint le même runner et le même document");
+  win.release();
+  again.release();
+  await nap(260);
+  ok(hasNotebookService(host, docId) && !win.disposed, "service : sans fenêtre mais avec une exécution en cours, il reste en vie");
+  emit({ ev: "stream", id: execId, name: "stdout", text: "1\n" });
+  emit({ ev: "done", id: execId, count: 1, status: "ok" });
+  await nap(200);
+  const got = findCell(win.doc.ydoc, cell)!;
+  ok(got.outputs[0]?.text === "1\n" && got.executionCount === 1 && !got.running, "service : les sorties arrivent dans le document alors que plus aucune fenêtre n'est ouverte");
+  await nap(450);
+  ok(!hasNotebookService(host, docId) && win.disposed && !handlers.has(docId) && listeners.size === 0, "service : plus d'exécution ni de fenêtre depuis un moment → libéré (document et noyau)");
+
+  // A window shown again during the grace period finds the service warm; a later one starts a new one.
+  const w2 = acquireNotebook(host, env, docId, { idleMs: 150 });
+  w2.release();
+  await nap(60);
+  const w3 = acquireNotebook(host, env, docId, { idleMs: 150 });
+  ok(w3.runner === w2.runner && !w3.disposed, "service : rouvrir la fenêtre avant l'échéance retrouve le même service");
+  w3.release();
+  await nap(300);
+  ok(w3.disposed, "service : …et il disparaît une fois l'échéance passée");
+
+  // Document deleted: the service goes away even with a window open.
+  const w4 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  await w4.doc.synced;
+  handlers.get(docId).onMessage({ t: "doc.gone", doc: docId });
+  ok(w4.disposed && !hasNotebookService(host, docId), "service : document supprimé → runner et abonnement libérés");
+  w4.release();
+
+  // Board closed.
+  const w5 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  closeBoard?.();
+  ok(w5.disposed && listeners.size === 0, "service : tableau fermé → tout est libéré");
+  w5.release();
+
+  // The kernel session ends while a run is in flight: the service (not a window) ends it with an error.
+  const w6 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  await w6.doc.synced;
+  initBlankNotebook(w6.doc.ydoc);
+  const c6 = ids(w6.doc.ydoc)[0];
+  setKernelTerm(w6.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  ok(w6.runner.run(c6).ok, "service : exécution lancée");
+  w6.release();
+  over = true;
+  watcher?.();
+  ok(!findCell(w6.doc.ydoc, c6)!.running && findCell(w6.doc.ydoc, c6)!.outputs.at(-1)!.output_type === "error", "service : la session de noyau disparaît fenêtre masquée → l'exécution se termine par une erreur");
+  closeBoard?.();
 }
 
 if (failures) {

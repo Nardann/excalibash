@@ -29,6 +29,8 @@ export type SharedDoc = {
   readonly synced: Promise<void>;
   /** Server refusals and rejected frames (e.g. "document trop gros"). Returns an unsubscribe function. */
   onError(fn: (message: string) => void): () => void;
+  /** Called when the document was deleted for good (`doc.gone`). Returns an unsubscribe function. */
+  onGone(fn: () => void): () => void;
   /** Releases this handle; the last one leaves the document (awareness removed, unsubscribed). */
   destroy(): void;
 };
@@ -52,6 +54,7 @@ class Shared {
   private unregister: () => void;
   private offPeers: () => void;
   private errors = new Set<(m: string) => void>();
+  private goneListeners = new Set<() => void>();
   /** The state of the server was received for the current socket: local updates may go out. */
   private live = false;
   /** The document was deleted (window closed or node removed by an editor): nothing more is sent. */
@@ -100,6 +103,11 @@ class Shared {
   onError(fn: (m: string) => void) {
     this.errors.add(fn);
     return () => this.errors.delete(fn);
+  }
+
+  onGone(fn: () => void) {
+    this.goneListeners.add(fn);
+    return () => this.goneListeners.delete(fn);
   }
 
   private fail(message: string) {
@@ -160,6 +168,7 @@ class Shared {
         clearTimeout(this.updateTimer);
         this.updateTimer = undefined;
         this.fail("Ce document a été supprimé");
+        for (const fn of [...this.goneListeners]) fn();
         return;
       case "doc.compact":
         return this.compact();
@@ -311,6 +320,14 @@ export function openSharedDoc(session: DocHost, docId: string): SharedDoc {
     synced: s.synced,
     onError(fn) {
       const off = s.onError(fn);
+      unsubs.add(off);
+      return () => {
+        off();
+        unsubs.delete(off);
+      };
+    },
+    onGone(fn) {
+      const off = s.onGone(fn);
       unsubs.add(off);
       return () => {
         off();

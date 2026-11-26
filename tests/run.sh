@@ -47,5 +47,5 @@ node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/bo
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/schemaCheck.test.ts
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/kernelProtocol.test.ts
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/code.test.ts
-node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/notebook.test.ts
+node --disable-warning=ExperimentalWarning --experimental-transform-types web/src/board/notebook.test.ts
 TLS_PORT=${TLS_PORT:-6791} TLS_PROXY_PORT=${TLS_PROXY_PORT:-6792} node --disable-warning=ExperimentalWarning tests/tls.mts

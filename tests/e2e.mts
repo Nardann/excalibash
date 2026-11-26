@@ -20,6 +20,7 @@ import * as codeDoc from "../web/src/board/codeDoc.ts";
 import * as mf from "../web/src/board/machineFiles.ts";
 import * as nbDoc from "../web/src/board/notebookDoc.ts";
 import { NotebookRunner } from "../web/src/board/notebookRunner.ts";
+import * as nbSvc from "../web/src/board/notebookService.ts";
 import { LineSplitter, parseEvent } from "../web/src/board/kernelProtocol.ts";
 import { FileClient } from "../web/src/board/fileTransfer.ts";
 import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
@@ -1778,6 +1779,29 @@ site.close();
     const bad = nbDoc.insertCell(na.ydoc, { type: "code", source: "1/0", at: "end" });
     runA.run(bad);
     ok(await until(() => nbDoc.findCell(na.ydoc, bad)?.outputs.some((o) => o.output_type === "error" && o.ename === "ZeroDivisionError") === true && !nbDoc.findCell(na.ydoc, bad)!.running, 40000), "notebook : une exception arrive comme sortie d'erreur (ZeroDivisionError)");
+
+    // The runner belongs to the board session, not to the window: hide the window in the middle of a run and
+    // the outputs keep coming (real kernel, real encrypted terminal stream).
+    const svcDocId = sd.newDocId();
+    const svcEnv: nbSvc.ServiceEnv = { port: kernelPort(sAl, kk, "nb-svc"), watchTerminals: () => () => {}, terminalOver: () => false, onClose: () => () => {} };
+    const svcWin = nbSvc.acquireNotebook(hA3.host, svcEnv, svcDocId, { idleMs: 1500 });
+    const svcBob = sd.openSharedDoc(hB3.host, svcDocId);
+    await Promise.all([svcWin.doc.synced, svcBob.synced]);
+    nbDoc.initBlankNotebook(svcWin.doc.ydoc, "svc.ipynb");
+    nbDoc.setKernelTerm(svcWin.doc.ydoc, kid);
+    const svcCell = nbDoc.cellViews(svcWin.doc.ydoc)[0].id;
+    nbDoc.findCell(svcWin.doc.ydoc, svcCell)!.source.insert(0, "import time\nfor i in range(3):\n    print('tick', i, flush=True)\n    time.sleep(0.4)\nprint('fin')");
+    const svcRun = svcWin.runner.run(svcCell);
+    svcWin.release(); // the window is hidden right after the click
+    ok(svcRun.ok && nbSvc.hasNotebookService(hA3.host, svcDocId), "notebook : fenêtre masquée en pleine exécution, le service du tableau garde le runner");
+    const svcDone = await until(() => {
+      const v = nbDoc.findCell(svcBob.ydoc, svcCell);
+      return !!v && !v.running && v.outputs.map((o) => String(o.text ?? "")).join("").includes("fin");
+    }, 40000);
+    const svcOut = nbDoc.findCell(svcBob.ydoc, svcCell)?.outputs.map((o) => String(o.text ?? "")).join("") ?? "";
+    ok(svcDone && svcOut === "tick 0\ntick 1\ntick 2\nfin\n", `notebook : les sorties d'une exécution lancée puis masquée arrivent toutes dans le document (${JSON.stringify(svcOut)})`);
+    ok(await until(() => !nbSvc.hasNotebookService(hA3.host, svcDocId), 8000), "notebook : sans fenêtre ni exécution, le service se libère tout seul");
+    svcBob.destroy();
 
     // Save the .ipynb on the machine through the sealed file channel.
     const nbText = nbDoc.exportIpynb(na.ydoc);
