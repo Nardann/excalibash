@@ -17,6 +17,7 @@ export function FilesPanel({
   onDownload,
   onUpload,
   onClose,
+  keep,
 }: {
   client: FileClient;
   busy: boolean;
@@ -24,6 +25,8 @@ export function FilesPanel({
   /** Without it, the panel only browses (no upload button). */
   onUpload?: (files: File[], dir: string) => void;
   onClose: () => void;
+  /** Lists only the entries it accepts (folders should pass, to stay navigable). */
+  keep?: (e: Entry) => boolean;
 }) {
   const [path, setPath] = useState<string | undefined>(undefined);
   const [listing, setListing] = useState<Listing | null>(null);
@@ -87,8 +90,8 @@ export function FilesPanel({
       </div>
       <div className="term-files-list">
         {error && <div className="term-files-empty">{error}</div>}
-        {listing && !listing.entries.length && <div className="term-files-empty">Dossier vide</div>}
-        {listing?.entries.map((e) => (
+        {listing && !listing.entries.filter((e) => !keep || keep(e)).length && <div className="term-files-empty">Dossier vide</div>}
+        {listing?.entries.filter((e) => !keep || keep(e)).map((e) => (
           <button key={e.name} className="term-files-row" title={e.dir ? "Ouvrir le dossier" : onUpload ? "Télécharger" : "Ouvrir ce fichier"} disabled={busy && !e.dir} onClick={() => open(e)}>
             {e.dir ? <Folder size={14} /> : <FileIcon size={14} />}
             <span className="n">{e.name}</span>

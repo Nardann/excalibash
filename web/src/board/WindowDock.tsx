@@ -1,7 +1,7 @@
 // Side dock: every machine icon of the board with its shells and sites, so a hidden window opens
 // (or an open one comes to the front) in one click, without hunting for its icon on the canvas.
 import { useState, useSyncExternalStore } from "react";
-import { Cable, ChevronRight, FileCode2, FilePlus2, FolderOpen, Globe, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Plus, Power, Radio, TerminalSquare } from "lucide-react";
+import { Cable, ChevronRight, FileCode2, FilePlus2, FolderOpen, Globe, Maximize2, Minimize2, NotebookPen, NotebookText, PanelRightClose, PanelRightOpen, Plus, Power, Radio, TerminalSquare } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog } from "../components/ui.tsx";
 import { clearBroadcast, liveTargets, useBroadcastGroup } from "./broadcast.ts";
@@ -15,12 +15,13 @@ export type DockGroup = {
   shells: DockItem[];
   webs: DockItem[];
   codes: DockItem[];
+  notebooks: DockItem[];
   remote?: boolean;
   /** An SSH device: other devices can be reached by bouncing through it. */
   bounce?: boolean;
   machineName?: string;
 };
-type Kind = "terminal" | "web" | "code";
+type Kind = "terminal" | "web" | "code" | "notebook";
 
 const COLLAPSED_KEY = "eb-dock-collapsed";
 
@@ -38,13 +39,19 @@ export function WindowDock(p: {
   onNewCode: (nodeId: string) => void;
   /** File picker on the machine (needs a running local shell). */
   onOpenCode: (nodeId: string) => void;
-  /** Stops a shell, closes a site's tunnel or removes a code file (after confirmation, done here). */
+  /** A new blank notebook on this machine's icon. */
+  onNewNotebook: (nodeId: string) => void;
+  /** .ipynb picker on the machine (needs a running local shell). */
+  onOpenNotebook: (nodeId: string) => void;
+  /** Stops a shell, closes a site's tunnel or removes a code file or notebook (after confirmation, done here). */
   onKill: (nodeId: string, kind: Kind, id: string) => void;
 }) {
   const kill = async (nodeId: string, kind: Kind, id: string, name: string) => {
     const ok = await confirmDialog(
-      kind === "code"
-        ? { title: "Retirer ce fichier du schéma ?", text: `${name} disparaît du schéma. Le fichier sur la machine n'est pas touché.`, confirm: "Retirer", danger: true }
+      kind === "notebook"
+        ? { title: "Retirer ce notebook du schéma ?", text: `${name} disparaît du schéma pour tout le monde, avec son noyau. Le fichier sur la machine n'est pas touché.`, confirm: "Retirer", danger: true }
+        : kind === "code"
+        ? { title: "Retirer ce fichier du schéma ?", text: `${name} disparaît du schéma pour tout le monde, avec son document partagé. Le fichier sur la machine n'est pas touché.`, confirm: "Retirer", danger: true }
         : kind === "terminal"
         ? { title: `Fermer ${name} ?`, text: "Le shell et les programmes qui tournent dedans sont arrêtés, et le shell est retiré de la machine.", confirm: "Fermer", danger: true }
         : { title: "Fermer le tunnel ?", text: `La fenêtre et le tunnel vers ${name} sont supprimés.`, confirm: "Fermer", danger: true },
@@ -75,7 +82,7 @@ export function WindowDock(p: {
 
   const bcast = useBroadcastGroup();
   const bcastLive = bcast.size ? liveTargets(p.session).length : 0;
-  const hidden = p.groups.reduce((n, g) => n + [...g.shells, ...g.webs, ...g.codes].filter((i) => !i.open).length, 0);
+  const hidden = p.groups.reduce((n, g) => n + [...g.shells, ...g.webs, ...g.codes, ...g.notebooks].filter((i) => !i.open).length, 0);
 
   if (collapsed)
     return (
@@ -108,7 +115,7 @@ export function WindowDock(p: {
           const firstShell = g.shells[0] && p.session.terminals.get(g.shells[0].id);
           const name = g.title || firstShell?.label || g.machineName || "Machine";
           const isFolded = folded.has(g.nodeId);
-          const anyOpen = [...g.shells, ...g.webs, ...g.codes].some((i) => i.open);
+          const anyOpen = [...g.shells, ...g.webs, ...g.codes, ...g.notebooks].some((i) => i.open);
           const hasLocalShell = localShellIds(p.session, { shells: g.shells.map((sh) => ({ terminalId: sh.id })) }).length > 0;
           return (
             <section key={g.nodeId} className="dock-group">
@@ -145,6 +152,20 @@ export function WindowDock(p: {
                     onClick={() => p.onOpenCode(g.nodeId)}
                   >
                     <FolderOpen size={14} />
+                  </button>
+                )}
+                {!g.remote && (
+                  <button title="Nouveau notebook" onClick={() => p.onNewNotebook(g.nodeId)}>
+                    <NotebookPen size={14} />
+                  </button>
+                )}
+                {!g.remote && (
+                  <button
+                    title={hasLocalShell ? "Ouvrir un notebook de la machine…" : "Ouvrir un notebook de la machine (il faut un shell local en cours)"}
+                    disabled={!hasLocalShell}
+                    onClick={() => p.onOpenNotebook(g.nodeId)}
+                  >
+                    <NotebookText size={14} />
                   </button>
                 )}
                 {(!g.remote || g.bounce) && (
@@ -204,6 +225,19 @@ export function WindowDock(p: {
                       onHide={() => p.onHide("code", c.id)}
                       onKill={() => kill(g.nodeId, "code", c.id, `le fichier de code ${i + 1}`)}
                       killTitle="Retirer ce fichier du schéma"
+                    />
+                  ))}
+                  {g.notebooks.map((c, i) => (
+                    <DockRow
+                      key={c.id}
+                      open={c.open}
+                      icon={<NotebookText size={13} />}
+                      dot=""
+                      label={`Notebook ${i + 1}`}
+                      onOpen={() => p.onOpen(g.nodeId, "notebook", c.id)}
+                      onHide={() => p.onHide("notebook", c.id)}
+                      onKill={() => kill(g.nodeId, "notebook", c.id, `le notebook ${i + 1}`)}
+                      killTitle="Retirer ce notebook du schéma"
                     />
                   ))}
                 </ul>

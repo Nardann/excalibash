@@ -30,8 +30,8 @@ export function pickLocalShell(session: BoardSession, node: Pick<NodeData, "shel
 export type OpenedFile = { text: string; sha: string; size: number };
 
 /** Decodes bytes as UTF-8 text; refuses binary-looking files and big ones. */
-export async function decodeText(blob: Blob): Promise<string> {
-  if (blob.size > MAX_CODE_BYTES) throw new FileError(`Fichier trop volumineux pour l'éditeur (${MAX_CODE_BYTES / 1024 / 1024} Mio au maximum)`);
+export async function decodeText(blob: Blob, limit = MAX_CODE_BYTES): Promise<string> {
+  if (blob.size > limit) throw new FileError(`Fichier trop volumineux pour l'éditeur (${limit / 1024 / 1024} Mio au maximum)`);
   const bytes = new Uint8Array(await blob.arrayBuffer());
   if (bytes.includes(0)) throw new FileError("Ce fichier est binaire : il ne peut pas être ouvert dans l'éditeur");
   try {
@@ -46,9 +46,9 @@ export async function decodeText(blob: Blob): Promise<string> {
  * the SHA-256 of the text as the editor holds it (UTF-8 of the decoded text), so the editor's
  * dirty state and the conflict check compare like with like.
  */
-export async function openMachineFile(client: FileClient, path: string): Promise<OpenedFile> {
+export async function openMachineFile(client: FileClient, path: string, limit = MAX_CODE_BYTES): Promise<OpenedFile> {
   const { blob } = await client.download(path);
-  const text = await decodeText(blob);
+  const text = await decodeText(blob, limit);
   return { text, sha: await sha256Hex(text), size: blob.size };
 }
 
@@ -58,6 +58,8 @@ export type SaveOptions = {
   baseSha?: string;
   /** Asked before overwriting a file that changed on the machine, or that exists and was never ours. false cancels. */
   confirm: (reason: SaveReason) => Promise<boolean>;
+  /** Largest file, bytes (default: the code editor's limit). */
+  limit?: number;
 };
 
 /**
@@ -68,21 +70,22 @@ export type SaveOptions = {
  */
 export async function saveMachineFile(client: FileClient, path: string, text: string, o: SaveOptions): Promise<{ path: string; sha: string } | null> {
   const { dir, name } = splitPath(path);
+  const limit = o.limit ?? MAX_CODE_BYTES;
   const listing = await client.ls(dir || undefined);
   const entry = listing.entries.find((e) => e.name === name);
   if (entry?.dir) throw new FileError("C'est un dossier");
   if (entry) {
     let reason: SaveReason | null = null;
     if (o.baseSha === undefined) reason = entry.size === 0 ? null : "exists";
-    else if (entry.size > MAX_CODE_BYTES) reason = "changed";
+    else if (entry.size > limit) reason = "changed";
     else {
-      const current = await openMachineFile(client, path).catch(() => null);
+      const current = await openMachineFile(client, path, limit).catch(() => null);
       if (!current || current.sha !== o.baseSha) reason = "changed";
     }
     if (reason && !(await o.confirm(reason))) return null;
   }
   const bytes = new TextEncoder().encode(text);
-  if (bytes.length > MAX_CODE_BYTES) throw new FileError("Document trop volumineux pour être enregistré");
+  if (bytes.length > limit) throw new FileError("Document trop volumineux pour être enregistré");
   const final = await client.upload(new File([bytes], name), { ...(dir ? { dir } : {}), overwrite: true });
   return { path: final, sha: await sha256Hex(text) };
 }

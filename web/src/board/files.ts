@@ -12,6 +12,8 @@ export async function renderPreview(elements: readonly any[], files: Record<stri
     .filter((e) => !e.isDeleted)
     .flatMap((e): any[] => {
       if (e.customData?.node) return nodePreview(e);
+      if (e.customData?.notebookId)
+        return [{ ...e, type: "rectangle", link: null, backgroundColor: "#fafafa", fillStyle: "solid", strokeColor: "#f97316", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       if (e.customData?.codeId)
         return [{ ...e, type: "rectangle", link: null, backgroundColor: "#1e1e1e", fillStyle: "solid", strokeColor: "#3b82f6", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       if (e.customData?.webId)
@@ -39,7 +41,7 @@ export async function savePreview(boardId: string, key: SymKey, epoch: number, e
 /** Node tiles stay as drawings (title, icon) but lose their shells, sites, machine and remote links. */
 function stripNodeRefs<T extends { customData?: Record<string, any> }>(e: T): T {
   if (!e.customData?.node) return e;
-  const { shells: _s, webs: _w, codes: _c, machineId: _m, machineName: _n, remote: _r, ...rest } = e.customData;
+  const { shells: _s, webs: _w, codes: _c, notebooks: _nb, machineId: _m, machineName: _n, remote: _r, ...rest } = e.customData;
   return { ...e, customData: rest };
 }
 

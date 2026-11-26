@@ -399,7 +399,7 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
           <button
             title="Retirer ce fichier de la machine"
             onClick={async () => {
-              if (await confirmDialog({ title: "Retirer ce fichier du schéma ?", text: `« ${label} » disparaît du schéma. Le fichier sur la machine n'est pas touché.`, confirm: "Retirer", danger: true })) onRemove();
+              if (await confirmDialog({ title: "Retirer ce fichier du schéma ?", text: `« ${label} » disparaît du schéma pour tout le monde, avec son document partagé. Le fichier sur la machine n'est pas touché.`, confirm: "Retirer", danger: true })) onRemove();
             }}
           >
             <Power size={14} />
