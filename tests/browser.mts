@@ -458,6 +458,272 @@ try {
   ok((await P.page.locator(".xterm, .monaco-editor, .nb-cells, .term").count()) === 0, "la vue publique ne contient aucun terminal, éditeur ni notebook");
   ok((await P.page.locator(".App-toolbar").count()) === 0, "la vue publique n'a pas la barre d'outils de dessin (lecture seule)");
   await noConsoleErrors("diffusion, historique et vue publique : aucune erreur console");
+
+  // ---- 8. Fichiers, câble, capture, configuration, schéma, export ----
+  block("8. Fichiers, capture sur un câble, configuration, vérification du schéma, export");
+  await A.page.goto(boardUrl);
+  await A.page.locator(".excalidraw canvas").first().waitFor();
+  const dock8 = A.page.getByRole("complementary", { name: "Fenêtres du tableau" });
+  await dock8.waitFor({ timeout: 30000 });
+
+  // 8a. File panel: drop a file on a shell window, list it, download it.
+  // Only the first shell open: windows overlapping it would take its clicks.
+  if (await dock8.getByTitle("Tout masquer").first().isVisible().catch(() => false)) await dock8.getByTitle("Tout masquer").first().click();
+  await dock8.locator(".dock-main", { hasText: "Shell 1" }).click();
+  const shell8 = A.page.locator(".term:not(.code):has(.xterm)").first();
+  await shell8.locator(".xterm").waitFor({ timeout: 30000 });
+  await until("shell prêt", async () => (await shell8.locator(".xterm-rows").innerText()).trim().length > 0, 20000);
+  await shell8.evaluate((el) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["contenu-déposé-ß"], "depose.txt", { type: "text/plain" }));
+    for (const t of ["dragenter", "dragover", "drop"]) el.dispatchEvent(new DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+  const dropped = join(agentHome, "depose.txt");
+  await until("fichier déposé sur la machine", () => existsSync(dropped), 20000);
+  ok(readFileSync(dropped, "utf8") === "contenu-déposé-ß", "glisser-déposer d'un fichier sur la fenêtre d'un shell l'envoie dans le dossier du shell");
+  const filesBtn = (shell: ReturnType<Page["locator"]>) => shell.locator("button[title^='Fichiers']");
+  /** A window that is not active sits under the canvas: a click in its shell area activates it, then its header buttons answer. */
+  const pressFiles = async (shell: ReturnType<Page["locator"]>) => {
+    await until("bouton Fichiers cliquable", async () => {
+      await shell.locator(".xterm").click({ force: true, position: { x: 120, y: 120 } });
+      return filesBtn(shell).click({ timeout: 1500 }).then(() => true, () => false);
+    });
+  };
+  await pressFiles(shell8);
+  const panel8 = shell8.locator(".term-files");
+  const row8 = panel8.locator(".term-files-row", { hasText: "depose.txt" });
+  await row8.waitFor({ timeout: 20000 });
+  ok(true, "le panneau Fichiers liste le fichier envoyé");
+  const dl8 = A.page.waitForEvent("download", { timeout: 30000 });
+  await row8.click();
+  const file8 = await dl8;
+  const p8 = join(DATA, "depose-dl.txt");
+  await file8.saveAs(p8);
+  ok(file8.suggestedFilename() === "depose.txt" && readFileSync(p8, "utf8") === "contenu-déposé-ß", "un clic sur le fichier le télécharge, octets identiques");
+  await pressFiles(shell8);
+  await noConsoleErrors("fichiers : aucune erreur console");
+
+  // 8b. A cable from the machine icon to a rectangle, then the data of its end.
+  await dock8.getByTitle("Tout masquer").first().click();
+  const tile8 = A.page.locator(".excalidraw__embeddable-container").filter({ hasText: "vm-tp" }).first();
+  await tile8.waitFor({ timeout: 15000 });
+  const tb = (await tile8.boundingBox())!;
+  const rx = tb.x + 380 < 1100 ? tb.x + 380 : tb.x - 380;
+  const ry = tb.y + 120;
+  await A.page.locator('[data-testid="toolbar-rectangle"]').click({ force: true });
+  await A.page.mouse.move(rx, ry);
+  await A.page.mouse.down();
+  await A.page.mouse.move(rx + 140, ry + 90, { steps: 6 });
+  await A.page.mouse.up();
+  await A.page.keyboard.press("Escape");
+  await A.page.getByRole("button", { name: "Câble", exact: true }).click();
+  await A.page.mouse.move(tb.x + tb.width / 2, tb.y + tb.height / 2);
+  await A.page.mouse.down();
+  await A.page.mouse.move(rx + 70, ry + 45, { steps: 12 });
+  await A.page.mouse.up();
+  // The cable runs from the icon's center to the rectangle's: its middle is a safe place to click.
+  const cableMid = { x: (tb.x + tb.width / 2 + rx + 70) / 2, y: (tb.y + tb.height / 2 + ry + 45) / 2 };
+  const intBtn = A.page.locator("button.cable-int");
+  const selectCable = async () => {
+    await until("extrémités du câble visibles", async () => {
+      if ((await intBtn.count()) > 0) return true;
+      await A.page.keyboard.press("Escape");
+      await A.page.mouse.click(cableMid.x, cableMid.y);
+      return (await intBtn.count()) > 0;
+    });
+  };
+  await selectCable();
+  ok((await intBtn.count()) >= 2, "un câble relie l'icône de la machine au rectangle (« Câble » de l'en-tête)");
+  const openEnd = async () => {
+    await selectCable();
+    await intBtn.first().click({ force: true });
+    const d = A.page.locator(".modal[role=dialog]");
+    await d.waitFor({ timeout: 10000 });
+    return d;
+  };
+  let end = await openEnd();
+  await end.getByLabel("Interface", { exact: true }).fill("lo");
+  await end.getByLabel("Adresse IP").fill("127.0.0.1/8");
+  await end.getByRole("button", { name: "Enregistrer" }).click();
+  await end.waitFor({ state: "detached" });
+
+  // 8c. « Générer la config » from the cabled node.
+  await A.page.keyboard.press("Escape");
+  await tile8.click({ position: { x: 12, y: 12 }, force: true });
+  await A.page.locator(".term-float button[title^='Générer la config']").first().click();
+  const cfg = A.page.locator(".modal[role=dialog]");
+  await cfg.getByRole("heading", { name: /Générer la config/ }).waitFor();
+  await cfg.locator("select").first().selectOption({ label: "Linux ip (iproute2)" });
+  const linuxCfg = await cfg.locator("textarea").inputValue();
+  ok(/ip addr add 127\.0\.0\.1\/8 dev lo/.test(linuxCfg), `la config Linux contient ip addr add 127.0.0.1/8 dev lo (${linuxCfg.split("\n").find((l) => l.includes("addr")) ?? "?"})`);
+  await cfg.locator("select").first().selectOption({ label: "Cisco IOS · routeur" });
+  const iosCfg = await cfg.locator("textarea").inputValue();
+  ok(/interface \S*lo\S*/i.test(iosCfg) && /ip address 127\.0\.0\.1 255\.0\.0\.0/.test(iosCfg), "la config Cisco IOS contient l'interface et « ip address 127.0.0.1 255.0.0.0 »");
+  await cfg.getByRole("button", { name: "Fermer" }).first().click();
+
+  // 8d. « Vérifier le schéma »: lo + 127.0.0.1/8 matches the machine, a wrong address does not, the fix repairs the drawing.
+  const schemaBtn = A.page.getByTitle(/^Vérifier le schéma/);
+  await schemaBtn.waitFor({ timeout: 15000 });
+  await schemaBtn.click();
+  const schemaPanel = A.page.getByRole("complementary", { name: "Vérification du schéma" });
+  await until("schéma conforme", async () => /Le schéma correspond aux machines/.test(await schemaPanel.innerText()), 30000);
+  ok(true, "Vérifier le schéma : lo + 127.0.0.1/8 correspond à la machine, aucun écart");
+  // A drawn address the machine does not have is reported (no automatic fix: which one is right is the user's call).
+  end = await openEnd();
+  await end.getByLabel("Adresse IP").fill("127.0.0.9/8");
+  await end.getByRole("button", { name: "Enregistrer" }).click();
+  await end.waitFor({ state: "detached" });
+  await sleep(2300); // the server paces probes: one per machine every 2 s
+  await schemaPanel.getByTitle("Revérifier").click();
+  await until("écart signalé", async () => /127\.0\.0\.9\/8 absente/.test(await schemaPanel.innerText()), 30000);
+  ok((await A.page.locator(".schema-badge").count()) >= 1, "une adresse dessinée que la machine n'a pas : écart signalé dans le panneau et badge sur le câble");
+  // A wrong prefix has a fix: « Corriger le schéma » puts the machine's.
+  end = await openEnd();
+  await end.getByLabel("Adresse IP").fill("127.0.0.1/16");
+  await end.getByRole("button", { name: "Enregistrer" }).click();
+  await end.waitFor({ state: "detached" });
+  await sleep(2300);
+  await schemaPanel.getByTitle("Revérifier").click();
+  const fixBtn = schemaPanel.getByRole("button", { name: /Corriger le schéma/ }).first();
+  await fixBtn.waitFor({ timeout: 30000 });
+  ok(/préfixe différent/.test(await schemaPanel.innerText()), "un mauvais préfixe donne un écart, avec « Corriger le schéma » proposé");
+  await sleep(2300);
+  await fixBtn.click();
+  await until("schéma corrigé", async () => /Le schéma correspond aux machines/.test(await schemaPanel.innerText()), 30000);
+  ok(true, "« Corriger le schéma » remet le préfixe réel et la vérification est de nouveau au vert");
+  await schemaPanel.getByTitle("Fermer").click();
+  end = await openEnd();
+  ok((await end.getByLabel("Adresse IP").inputValue()) === "127.0.0.1/8", "l'adresse du câble a bien été corrigée dans le dessin");
+  await end.locator(".modal-actions").getByRole("button", { name: "Annuler" }).click();
+
+  // 8e. Containerlab export.
+  await A.page.getByTitle(/^Exporter le schéma/).click();
+  const dlc = A.page.waitForEvent("download", { timeout: 20000 });
+  await A.page.getByRole("button", { name: /Topologie Containerlab/ }).click();
+  const clab = await dlc;
+  const clabPath = join(DATA, "topo.clab.yml");
+  await clab.saveAs(clabPath);
+  const yml = readFileSync(clabPath, "utf8");
+  ok(clab.suggestedFilename().endsWith(".clab.yml") && /vm-tp/.test(yml) && /nodes:/.test(yml) && /links:/.test(yml), `l'export Containerlab est un YAML qui nomme les nœuds (vm-tp) et les liens (${clab.suggestedFilename()})`);
+  await noConsoleErrors("câble, config, schéma, export : aucune erreur console");
+
+  // 8f. Capture on the cable end, with the modal closed during the capture.
+  const rootUser = process.getuid?.() === 0;
+  const hasTcpdump = existsSync("/usr/sbin/tcpdump") || existsSync("/usr/bin/tcpdump") || existsSync("/sbin/tcpdump");
+  end = await openEnd();
+  const cap = end.locator(".capture-box");
+  await cap.waitFor({ timeout: 10000 });
+  const ifaceSel = cap.getByRole("combobox", { name: "Interface à capturer" });
+  await ifaceSel.waitFor({ timeout: 20000 });
+  ok((await ifaceSel.inputValue()) === "lo", "le select d'interfaces propose celles de la machine et préselectionne celle du câble (lo)");
+  await end.getByLabel("Interface", { exact: true }).fill("eth9");
+  await cap.getByTestId("capture-iface-missing").waitFor();
+  ok(/eth9/.test(await cap.getByTestId("capture-iface-missing").innerText()), "une interface de câble inexistante est signalée : « l'interface du câble (eth9) n'existe pas sur la machine »");
+  await end.getByLabel("Interface", { exact: true }).fill("lo");
+  await until("lo de nouveau présélectionnée", async () => (await ifaceSel.inputValue()) === "lo");
+  await cap.getByLabel(/Durée/).fill("3");
+  const ping = spawn("ping", ["-i", "0.2", "-c", "40", "127.0.0.1"], { stdio: "ignore" });
+  children.push(ping);
+  const dlCap = A.page.waitForEvent("download", { timeout: 40000 }).catch((e) => e as Error);
+  await cap.getByRole("button", { name: /Capturer sur lo/ }).click();
+  if (rootUser && hasTcpdump) {
+    await cap.getByTestId("capture-running").waitFor({ timeout: 15000 });
+    await end.locator(".modal-actions").getByRole("button", { name: "Annuler" }).click(); // closes the window, the capture goes on
+    await end.waitFor({ state: "detached" });
+    const chip = A.page.getByTestId("capture-chip");
+    await chip.waitFor({ timeout: 10000 });
+    ok(/Capture lo/.test(await chip.innerText()), `un indicateur flottant montre la capture en cours après la fermeture de la fenêtre (« ${(await chip.innerText()).replace(/\s+/g, " ")} »)`);
+    const d = await dlCap;
+    if (d instanceof Error) throw new Error(`la capture n'a pas été téléchargée : ${d.message}`);
+    const pcapPath = join(DATA, "capture.pcap");
+    await d.saveAs(pcapPath);
+    const pc = readFileSync(pcapPath);
+    const magic = pc.subarray(0, 4).toString("hex");
+    const le = ["d4c3b2a1", "4d3cb2a1"].includes(magic);
+    ok(pc.length > 24 && (le || ["a1b2c3d4", "a1b23c4d"].includes(magic)), `la capture téléchargée est un pcap valide (${pc.length} octets, ${d.suggestedFilename()})`);
+    const u32 = (o: number) => (le ? pc.readUInt32LE(o) : pc.readUInt32BE(o));
+    const link = u32(20);
+    let icmp = 0;
+    for (let o = 24; o + 16 <= pc.length; ) {
+      const n = u32(o + 8);
+      const pkt = o + 16;
+      const ip = link === 1 ? pkt + 14 : link === 113 ? pkt + 16 : link === 0 || link === 108 ? pkt + 4 : -1;
+      if (ip >= 0 && ip + 20 <= pc.length && pc[ip] >> 4 === 4 && pc[ip + 9] === 1) icmp++;
+      o = pkt + n;
+    }
+    ok(icmp >= 4, `le pcap contient les paquets ICMP du ping de fond (${icmp} paquets)`);
+    await until("indicateur retiré à la fin", async () => (await A.page.getByTestId("capture-chip").count()) === 0, 15000);
+  } else {
+    // Not root (or no tcpdump): the panel must say why, inline, with the way out.
+    const msg = await cap.getByTestId("capture-error").innerText({ timeout: 20000 });
+    ok(hasTcpdump ? /setcap/.test(msg) : /tcpdump n'est pas installé/.test(msg), `capture refusée : le panneau l'explique (${msg.split("\n")[0].slice(0, 90)})`);
+    await end.locator(".modal-actions").getByRole("button", { name: "Annuler" }).click();
+  }
+  ping.kill();
+  await noConsoleErrors("capture : aucune erreur console");
+
+  // 8g. An agent that announces no capabilities (as before this feature) is refused with the update instructions.
+  await A.page.routeWebSocket(/\/ws\?board=/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      try {
+        const j = JSON.parse(String(m));
+        if (j.t === "init") for (const t of j.terminals ?? []) t.agentCaps = [];
+        if (j.t === "term" && j.terminal) j.terminal.agentCaps = [];
+        ws.send(JSON.stringify(j));
+      } catch {
+        ws.send(m);
+      }
+    });
+  });
+  await A.page.goto(boardUrl);
+  await A.page.locator(".excalidraw canvas").first().waitFor();
+  await A.page.locator(".excalidraw__embeddable-container").filter({ hasText: "vm-tp" }).first().waitFor({ timeout: 30000 });
+  const old8 = await (async () => {
+    await A.page.mouse.click(cableMid.x, cableMid.y);
+    await until("extrémités du câble visibles", () => intBtn.count().then((n) => n > 0));
+    await intBtn.first().click({ force: true });
+    const d = A.page.locator(".modal[role=dialog]");
+    await d.waitFor();
+    return d;
+  })();
+  const notice = old8.locator(".capture-box").getByTestId("agent-outdated");
+  await notice.waitFor({ timeout: 20000 });
+  const noticeText = await notice.innerText();
+  ok(/L'agent de vm-tp est trop ancien pour la capture réseau : mets-le à jour/.test(noticeText) && /\/update\.sh \| sh/.test(noticeText), "agent sans fonctions annoncées : la capture affiche « trop ancien » avec la commande de mise à jour");
+  await shot("agent-ancien-capture");
+  await old8.locator(".modal-actions").getByRole("button", { name: "Annuler" }).click();
+  await A.page.getByRole("complementary", { name: "Fenêtres du tableau" }).locator(".dock-main", { hasText: "Shell 1" }).click();
+  const shellOld = A.page.locator(".term:not(.code):has(.xterm)").first();
+  await pressFiles(shellOld);
+  const dlgOld = A.page.getByRole("dialog").filter({ hasText: "Agent à mettre à jour" });
+  await dlgOld.waitFor({ timeout: 20000 });
+  ok(/trop ancien pour le transfert de fichiers/.test(await dlgOld.innerText()), "le panneau Fichiers d'un agent trop ancien ouvre une explication avec la commande, sans attendre 70 s");
+  await dlgOld.getByRole("button", { name: "Fermer" }).click();
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+  await noConsoleErrors("agent ancien : aucune erreur console");
+
+  // 8h. The Machines page shows the agent's version, and the update action once the list says it lacks something.
+  await A.page.goto("/machines");
+  await A.page.getByTestId("agent-version").first().waitFor({ timeout: 20000 });
+  ok(/^Agent \S+/.test(await A.page.getByTestId("agent-version").first().innerText()) && (await A.page.getByText("à mettre à jour", { exact: true }).count()) === 0, "page Machines : la version de l'agent s'affiche, sans badge pour un agent à jour");
+  await A.page.route(/\/api\/machines$/, async (route) => {
+    const r = await route.fetch();
+    const j = await r.json();
+    for (const m of j.machines ?? []) m.agentCaps = [];
+    await route.fulfill({ response: r, json: j });
+  });
+  await A.page.goto("/machines");
+  await A.page.getByText("à mettre à jour", { exact: true }).first().waitFor({ timeout: 20000 });
+  await A.page.getByRole("button", { name: /Mettre à jour l'agent/ }).first().click();
+  const upd = A.page.locator(".modal[role=dialog]");
+  ok(/curl -fsSL \S+\/update\.sh \| sh/.test(await upd.innerText()), "agent sans fonctions annoncées : badge « à mettre à jour » et la commande de mise à jour de l'instance");
+  await shot("machines-mise-a-jour");
+  await upd.getByRole("button", { name: "Fermer" }).click();
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+  await noConsoleErrors("page Machines : aucune erreur console");
+
   await shot("fin");
 } catch (e) {
   console.log(`✘ ${(e as Error).message}`);
