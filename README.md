@@ -145,6 +145,15 @@ curl -fsSL https://excalibash.example.com/uninstall.sh | sh
 
 Pour un agent installé en root (service système), la lancer avec `sudo sh`.
 
+### Partager une machine
+
+Le bouton **Partager** d'une machine (aussi proposé juste après l'ajout) donne accès à la machine de deux façons :
+
+- **à des personnes** : elles peuvent y ouvrir des shells, des sessions Telnet / SSH et des sites depuis n'importe lequel de leurs tableaux. La machine apparaît dans leur page **Machines**, sous « Partagées avec moi » ;
+- **via les tableaux** (activé par défaut sur les nouvelles machines) : quand tu ouvres un shell ou un site sur ta machine dans un tableau partagé, les éditeurs de ce tableau peuvent l'utiliser depuis ce tableau. Le lien tombe quand la machine n'y a plus de session, ou quand on désactive l'option. Les machines ajoutées avant cette version gardent l'option désactivée.
+
+Les sessions ouvertes par quelqu'un tournent avec les droits du compte de l'agent. Retirer un accès ferme ses sessions ; pour une coupure complète (voir [docs/SECURITY.md](docs/SECURITY.md#partage-de-machines)), supprime la machine puis appaire-la de nouveau.
+
 ## Sécurité
 
 Le modèle de chiffrement, ce que le serveur voit et ses limites sont décrits dans [docs/SECURITY.md](docs/SECURITY.md). En bref :

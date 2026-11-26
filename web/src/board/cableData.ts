@@ -6,7 +6,16 @@ type El = ExcalidrawElement;
 /** One end of a cable: an element, or a whole group (library items are groups). */
 export type Anchor = { id?: string; group?: string; /** A group's members when it was attached: still there if it is ungrouped. */ ids?: string[] };
 /** What sits at one end of a cable: the item's interface, its address and its VLANs (all optional). */
-export type EndInfo = { iface?: string; ip?: string; vlans?: string; /** Label moved by hand (scene units). */ dx?: number; dy?: number };
+export type EndInfo = {
+  iface?: string;
+  ip?: string;
+  vlans?: string;
+  /** Address of the item in some of those VLANs (VLAN interface, SVI…), by VLAN number. */
+  vlanIps?: Record<string, string>;
+  /** Label moved by hand (scene units). */
+  dx?: number;
+  dy?: number;
+};
 /** `a` is the start of the cable (its first point), `b` its end. */
 export type CableData = { a: Anchor; b: Anchor; orphaned?: boolean; ends?: { a?: EndInfo; b?: EndInfo } };
 export type End = "a" | "b";
@@ -27,6 +36,8 @@ const anchorData = (v: any): Anchor | undefined => {
 function endData(v: any): EndInfo | undefined {
   if (!v || typeof v !== "object") return undefined;
   const e: EndInfo = { iface: s(v.iface)?.slice(0, 64), ip: s(v.ip)?.slice(0, 64), vlans: s(v.vlans)?.slice(0, 200) };
+  const vlanIps = vlanIpsData(v.vlanIps);
+  if (vlanIps && e.vlans) e.vlanIps = vlanIps;
   if (!e.iface && !e.ip && !e.vlans) return undefined;
   const dx = typeof v.dx === "number" && Number.isFinite(v.dx) ? v.dx : 0;
   const dy = typeof v.dy === "number" && Number.isFinite(v.dy) ? v.dy : 0;
@@ -34,6 +45,13 @@ function endData(v: any): EndInfo | undefined {
   const k = r > LABEL_RADIUS ? LABEL_RADIUS / r : 1;
   if (dx || dy) Object.assign(e, { dx: dx * k, dy: dy * k });
   return e;
+}
+const isVlan = (k: string) => /^\d{1,4}$/.test(k) && +k >= 1 && +k <= 4094;
+function vlanIpsData(v: any): Record<string, string> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, ip] of Object.entries(v).slice(0, 128)) if (isVlan(k) && s(ip)) out[k] = (ip as string).slice(0, 64);
+  return Object.keys(out).length ? out : undefined;
 }
 const normalizedCables = new WeakMap<object, CableData>();
 export const cableOf = (el: El | null | undefined): CableData | undefined => {
@@ -70,3 +88,15 @@ export function parseVlans(v: string): string | null {
 
 /** An IPv4 or IPv6 address, with an optional prefix length. */
 export const IP_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?:\/(?:3[0-2]|[12]?\d))?|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(?:%[\w.]+)?(?:\/(?:12[0-8]|1[01]\d|[1-9]?\d))?)$/;
+
+/**
+ * The VLAN lines of a cable end's label: the VLANs without an address together ("VLAN 20, 30-35"),
+ * then one line per VLAN with its address ("VLAN 10 10.0.10.1/24").
+ */
+export function vlanLines(i?: EndInfo): string[] {
+  if (!i?.vlans) return [];
+  const parts = (parseVlans(i.vlans) ?? i.vlans).split(",").map((p) => p.trim()).filter(Boolean);
+  const ips = i.vlanIps ?? {};
+  const plain = parts.filter((p) => !ips[p]);
+  return [...(plain.length ? [`VLAN ${plain.join(", ")}`] : []), ...parts.filter((p) => ips[p]).map((p) => `VLAN ${p} ${ips[p]}`)];
+}

@@ -1,8 +1,9 @@
 // What sits at each end of the cables (interface, IP, VLANs), drawn next to the ends, and the
 // small "int" button on the ends of the selected cable to fill it in.
 import { useState } from "react";
+import { Plus, X } from "lucide-react";
 import { Modal } from "../components/ui.tsx";
-import { IP_RE, LABEL_RADIUS, parseVlans, type End, type EndInfo } from "./cables.ts";
+import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, type End, type EndInfo } from "./cables.ts";
 import type { LinkState, LinkStates } from "./linkStatus.ts";
 
 const linkText = (ip: string, l: LinkState) =>
@@ -21,7 +22,7 @@ const labelBox = (lines: string[]): Box => ({ w: Math.max(...lines.map((l) => l.
 const BUTTON: Box = { w: 30, h: 20 };
 
 /** The lines of a cable end's label (interface, IP, VLANs), in display order. */
-export const labelLines = (i?: EndInfo) => [i?.iface, i?.ip, i?.vlans && `VLAN ${i.vlans}`].filter(Boolean) as string[];
+export const labelLines = (i?: EndInfo) => [i?.iface, i?.ip, ...vlanLines(i)].filter(Boolean) as string[];
 
 /**
  * A box beside the cable end, clear of the item and of the cable: on one side of the cable
@@ -145,7 +146,11 @@ export function CableOverlay({
                   ) : (
                     <span>{i!.ip}</span>
                   ))}
-                {i!.vlans && <span className="vlan">VLAN {i!.vlans}</span>}
+                {vlanLines(i).map((l) => (
+                  <span key={l} className="vlan">
+                    {l}
+                  </span>
+                ))}
               </div>
             )}
             {editable && m.selected && (
@@ -170,15 +175,42 @@ export function CableOverlay({
   );
 }
 
+/** One VLAN row of the form: a VLAN (or a range) and, for a single VLAN, its address. */
+type VlanRow = { vlan: string; ip: string };
+
+function rowsOf(info?: EndInfo): VlanRow[] {
+  const parts = info?.vlans ? (parseVlans(info.vlans) ?? info.vlans).split(",").map((p) => p.trim()).filter(Boolean) : [];
+  return parts.map((vlan) => ({ vlan, ip: info?.vlanIps?.[vlan] ?? "" }));
+}
+
+const isSingleVlan = (v: string) => /^\d{1,4}$/.test(v.trim());
+
 export function CableEndForm({ info, itemName, onSave, onClose }: { info?: EndInfo; itemName: string; onSave: (i: EndInfo) => void; onClose: () => void }) {
   const [iface, setIface] = useState(info?.iface ?? "");
   const [ip, setIp] = useState(info?.ip ?? "");
-  const [vlans, setVlans] = useState(info?.vlans ?? "");
+  const [rows, setRows] = useState<VlanRow[]>(() => rowsOf(info));
   const ipOk = !ip.trim() || IP_RE.test(ip.trim());
-  const vlansNorm = vlans.trim() ? parseVlans(vlans) : "";
-  const valid = ipOk && vlansNorm !== null;
+  const filled = rows.filter((r) => r.vlan.trim());
+  const rowError = (r: VlanRow) => {
+    if (!r.vlan.trim()) return r.ip.trim() ? "Indique le numéro du VLAN." : null;
+    const v = parseVlans(r.vlan);
+    if (v === null || v.includes(",")) return "Un VLAN de 1 à 4094, ou une plage (30-35).";
+    if (r.ip.trim() && !isSingleVlan(r.vlan)) return "Une adresse va sur un seul VLAN, pas sur une plage.";
+    if (r.ip.trim() && !IP_RE.test(r.ip.trim())) return "Adresse IPv4 ou IPv6, avec un préfixe facultatif (/24).";
+    return null;
+  };
+  const valid = ipOk && rows.every((r) => !rowError(r));
+  const setRow = (i: number, patch: Partial<VlanRow>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  const save = () => {
+    const vlans = filled.length ? (parseVlans(filled.map((r) => r.vlan).join(",")) ?? "") : "";
+    const vlanIps: Record<string, string> = {};
+    for (const r of filled) if (isSingleVlan(r.vlan) && r.ip.trim()) vlanIps[String(+r.vlan.trim())] = r.ip.trim();
+    onSave({ iface, ip, vlans, ...(Object.keys(vlanIps).length ? { vlanIps } : {}) });
+  };
+
   return (
-    <Modal onClose={onClose} width={440}>
+    <Modal onClose={onClose} width={480}>
       <h2 className="display">Extrémité du câble</h2>
       <p>
         Côté <b>{itemName}</b>. Tout est facultatif.
@@ -187,7 +219,7 @@ export function CableEndForm({ info, itemName, onSave, onClose }: { info?: EndIn
         style={{ display: "grid", gap: 12 }}
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onSave({ iface, ip, vlans: vlansNorm ?? "" });
+          if (valid) save();
         }}
       >
         <label className="field">
@@ -199,11 +231,43 @@ export function CableEndForm({ info, itemName, onSave, onClose }: { info?: EndIn
           <input className="input" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.1/24" maxLength={64} spellCheck={false} />
           {!ipOk && <span className="field-help">Adresse IPv4 ou IPv6, avec un préfixe facultatif (/24).</span>}
         </label>
-        <label className="field">
+        <div className="field">
           VLAN(s)
-          <input className="input" value={vlans} onChange={(e) => setVlans(e.target.value)} placeholder="10, 20, 30-35" maxLength={200} spellCheck={false} />
-          <span className="field-help">{vlansNorm === null ? "Numéros de 1 à 4094 séparés par des virgules, ou des plages (30-35)." : "Séparés par des virgules."}</span>
-        </label>
+          {rows.map((r, i) => {
+            const err = rowError(r);
+            return (
+              <div key={i} className="vlan-row">
+                <input
+                  className="input vlan-num"
+                  value={r.vlan}
+                  onChange={(e) => setRow(i, { vlan: e.target.value })}
+                  placeholder="10"
+                  aria-label={`VLAN ${i + 1}`}
+                  maxLength={9}
+                  spellCheck={false}
+                  autoFocus={!r.vlan && i === rows.length - 1}
+                />
+                <input
+                  className="input"
+                  value={r.ip}
+                  onChange={(e) => setRow(i, { ip: e.target.value })}
+                  placeholder={isSingleVlan(r.vlan) || !r.vlan.trim() ? "IP dans ce VLAN (facultatif)" : "pas d'IP sur une plage"}
+                  disabled={!!r.vlan.trim() && !isSingleVlan(r.vlan) && !r.ip}
+                  aria-label={`Adresse IP dans le VLAN ${r.vlan || i + 1}`}
+                  maxLength={64}
+                  spellCheck={false}
+                />
+                <button type="button" className="btn btn-sm btn-icon" title="Retirer ce VLAN" onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}>
+                  <X size={14} />
+                </button>
+                {err && <span className="field-help vlan-err">{err}</span>}
+              </div>
+            );
+          })}
+          <button type="button" className="btn btn-sm vlan-add" onClick={() => setRows((rs) => [...rs, { vlan: "", ip: "" }])}>
+            <Plus size={14} /> Ajouter un VLAN
+          </button>
+        </div>
         <div className="modal-actions">
           {(info?.iface || info?.ip || info?.vlans) && (
             <button type="button" className="btn" style={{ marginRight: "auto" }} onClick={() => onSave({})}>

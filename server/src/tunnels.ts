@@ -91,6 +91,11 @@ export function dropMachineTunnels(machineId: string): void {
   dropTunnels([...tunnels.values()].filter((t) => t.machineId === machineId).map((t) => t.id));
 }
 
+/** Closes the tunnels of a machine that match (access to the machine withdrawn). */
+export function dropMachineTunnelsWhere(machineId: string, pred: (t: { boardId: string; createdBy: string | null }) => boolean): void {
+  dropTunnels([...tunnels.values()].filter((t) => t.machineId === machineId && pred(t)).map((t) => t.id));
+}
+
 /** New keys after a rotation; the agent switches over and old keys stop working. */
 export function rekeyTunnel(id: string, keyForBoard: string, keyForAgent: string, encLabel: string): void {
   const t = tunnels.get(id);
