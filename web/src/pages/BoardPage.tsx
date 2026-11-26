@@ -4,11 +4,12 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, History, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, Globe, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
 import { HistoryPanel } from "../board/HistoryPanel.tsx";
+import { ConfigModal } from "../board/ConfigModal.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
@@ -24,6 +25,9 @@ import { FileClient } from "../board/fileTransfer.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
 import { PointTrash } from "../board/PointTrash.tsx";
 import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
+import { SchemaPanel, type SchemaReport } from "../board/SchemaPanel.tsx";
+import { applyFix, endMessages, type EndResult, type Finding } from "../board/schemaCheck.ts";
+import { planSchemaCheck, runSchemaCheck } from "../board/schemaRun.ts";
 import { exportDiagram, exportTopology, type TopologyFormat } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteHop, RemoteTarget } from "../api.ts";
@@ -147,6 +151,10 @@ function Editor({ node }: { node: Node }) {
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
+  /** « Générer la config » : the node (tile, shape or group) whose dialog is open. */
+  const [configNode, setConfigNode] = useState<string | null>(null);
+  /** The single selected shape / group that has cables, for its floating « Config » button. */
+  const [cfgSel, setCfgSel] = useState<{ key: string; left: number; top: number } | null>(null);
   const [customizing, setCustomizing] = useState<string | null>(null);
   /** Every machine icon with its shells and sites, for the side dock. */
   const [dock, setDock] = useState<DockGroup[]>([]);
@@ -167,6 +175,9 @@ function Editor({ node }: { node: Node }) {
   /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
   const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  /** "Vérifier le schéma": the last report (never stored in the scene), and whether there is anything to check. */
+  const [schema, setSchema] = useState<SchemaReport | null>(null);
+  const [schemaPossible, setSchemaPossible] = useState(false);
   // Display name of a machine icon, as drawn on the diagram (image and topology exports).
   const exportNameOf = (x: NonNullable<typeof excalidrawRef.current>) => (id: string) => {
     const nd = nodeDataOf(findEl(x, id));
@@ -593,6 +604,27 @@ function Editor({ node }: { node: Node }) {
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // A shape or group with cables (a tile has its own toolbar): same key as in the topology export.
+      let cfg: { key: string; left: number; top: number } | null = null;
+      if (selected.length && !nd && !appState.newElement && !appState.isResizing && !appState.isRotating) {
+        const sel = elements.filter((e) => appState.selectedElementIds[e.id] && !e.isDeleted);
+        const target = (e: ExcalidrawElement) => (e.type === "text" && e.containerId ? (elements.find((c) => c.id === e.containerId) ?? e) : e);
+        const first = sel[0] && target(sel[0]);
+        const group = first?.groupIds.at(-1);
+        const okSel = first && !cableOf(first) && !terminalIdOf(first) && !(first.customData as any)?.webId && sel.every((e) => (group ? e.groupIds.at(-1) === group : target(e).id === first.id));
+        if (okSel) {
+          const members = group ? elements.filter((e) => !e.isDeleted && e.groupIds.includes(group) && !cableOf(e)) : [first];
+          const tile = members.find((e) => nodeDataOf(e));
+          const key = tile ? tile.id : group ? `group:${group}` : first.id;
+          const hit = (a: { id?: string; group?: string }) => (a.group ? a.group === group : !!a.id && members.some((m) => m.id === a.id));
+          if (elements.some((e) => !e.isDeleted && cableOf(e) && (hit(cableOf(e)!.a) || hit(cableOf(e)!.b)))) {
+            const right = Math.max(...sel.map((e) => e.x + e.width));
+            const top = Math.min(...sel.map((e) => e.y));
+            cfg = { key, left: Math.round((right + appState.scrollX) * appState.zoom.value), top: Math.round((top + appState.scrollY) * appState.zoom.value) };
+          }
+        }
+      }
+      setCfgSel((prev) => (JSON.stringify(prev) === JSON.stringify(cfg) ? prev : cfg));
       // The window being used (active, or just selected) goes above the windows it overlaps.
       const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId);
       const activeEl = appState.activeEmbeddable?.state === "active" ? appState.activeEmbeddable.element : undefined;
@@ -669,6 +701,57 @@ function Editor({ node }: { node: Node }) {
     });
     if (toggle && !collapse) activate(x, elementId);
   }, []);
+
+  /** Probes the interfaces of every machine behind a cable end and compares them with the drawing. */
+  const runSchema = useCallback(async () => {
+    const x = excalidrawRef.current;
+    if (!x) return;
+    setSchema((prev) => ({ running: true, machines: prev?.machines ?? [], remote: prev?.remote ?? [] }));
+    try {
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      const plan = planSchemaCheck(x, (id) => liveMachineRef.current(id), inUse, exportNameOf(x));
+      const machines = plan.machines.size ? await listMachines(keys) : [];
+      const machinesChecked = await runSchemaCheck(plan, machines, node.id);
+      setSchema({ running: false, machines: machinesChecked, remote: plan.remote });
+    } catch (e) {
+      toast.error(e);
+      setSchema(null);
+    }
+  }, [keys, node.id, session]);
+
+  const schemaEndLabel = (cableId: string, end: "a" | "b") => {
+    const x = excalidrawRef.current;
+    const info = x && cableOf(x.getSceneElements().find((e) => e.id === cableId))?.ends?.[end];
+    return [info?.iface, info?.ip].filter(Boolean).join(" ") || "extrémité";
+  };
+
+  /** Quick fix from the panel: the drawing takes the real value (one undo step), then the check runs again. */
+  const fixSchema = (r: EndResult, f: Finding) => {
+    const x = excalidrawRef.current;
+    const info = x && cableOf(x.getSceneElements().find((e) => e.id === r.cableId))?.ends?.[r.end];
+    if (!x || !info || !f.fix) return;
+    setCableEnd(x, r.cableId, r.end, applyFix(info, f.fix.patch));
+    setTimeout(() => void runSchema(), 50);
+  };
+
+  /** Badges for the cable ends with a discrepancy. */
+  const schemaMarks = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const m of schema?.machines ?? []) for (const e of m.ends ?? []) if (e.findings.length) out[e.key] = endMessages(e);
+    return out;
+  }, [schema]);
+
+  // Whether "Vérifier le schéma" has anything to look at: a cable end with data on an icon backed by an agent machine.
+  useEffect(() => {
+    if (!excalidraw) return;
+    const tick = () => {
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      setSchemaPossible(planSchemaCheck(excalidraw, (id) => liveMachineRef.current(id), inUse, () => "").machines.size > 0);
+    };
+    const timer = setInterval(tick, 2000);
+    tick();
+    return () => clearInterval(timer);
+  }, [excalidraw, session]);
 
   // Live state of the cables: the IPs at their ends are pinged from the user's own machines at
   // the other ends (see board/linkStatus.ts), as soon as cables or IPs change, else every 10 s,
@@ -909,6 +992,16 @@ function Editor({ node }: { node: Node }) {
         <button className="btn btn-icon btn-sm" title="Exporter le schéma (image, topologie Containerlab, Mermaid, JSON)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
           <Download size={16} />
         </button>
+        {schemaPossible && (
+          <button
+            className={`btn btn-icon btn-sm ${schema ? "btn-primary" : ""}`}
+            aria-pressed={!!schema}
+            title="Vérifier le schéma : compare les interfaces et IP dessinées aux machines (agent requis)"
+            onClick={() => (schema ? setSchema(null) : void runSchema())}
+          >
+            <ListChecks size={16} />
+          </button>
+        )}
         <button className={`btn btn-icon btn-sm ${historyOpen ? "btn-primary" : ""}`} aria-pressed={historyOpen} title="Historique des versions" onClick={() => setHistoryOpen((o) => !o)}>
           <History size={16} />
         </button>
@@ -939,6 +1032,7 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        {schema && <SchemaPanel report={schema} editor={editor} labelOf={schemaEndLabel} onFix={fixSchema} onRecheck={() => void runSchema()} onClose={() => setSchema(null)} />}
         {historyOpen && <HistoryPanel boardId={node.id} boardKey={node.key!} api={excalidraw} editor={editor} onClose={() => setHistoryOpen(false)} />}
         {editor && dock.length > 0 && (
           <WindowDock
@@ -984,6 +1078,7 @@ function Editor({ node }: { node: Node }) {
           onEdit={(m) => setCableEdit({ cableId: m.cableId, end: m.end })}
           onMoveLabel={(m, dx, dy) => excalidrawRef.current && m.info && setCableEnd(excalidrawRef.current, m.cableId, m.end, { ...m.info, dx, dy })}
           links={links}
+          schema={schemaMarks}
           mids={cableMids}
         />
         {selTerm && editor && (
@@ -1038,6 +1133,9 @@ function Editor({ node }: { node: Node }) {
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
                   <Palette size={14} />
                 </button>
+                <button title="Générer la config de l'équipement (Cisco IOS, Linux, netplan) d'après ses câbles" onClick={() => setConfigNode(selTerm.id)}>
+                  <FileCode size={14} />
+                </button>
               </>
             ) : selTerm.kind === "window" ? (
               <button onClick={() => reduce(selTerm.id)} title="Masquer la fenêtre (le shell continue) — Alt+R ou double-clic sur la barre">
@@ -1054,6 +1152,13 @@ function Editor({ node }: { node: Node }) {
                 </button>
               </>
             )}
+          </div>
+        )}
+        {cfgSel && (
+          <div className="term-float" style={{ left: cfgSel.left, top: cfgSel.top }}>
+            <button title="Générer la config de cet élément d'après ses câbles (Cisco IOS, Linux, netplan)" onClick={() => setConfigNode(cfgSel.key)}>
+              <FileCode size={14} /> Config
+            </button>
           </div>
         )}
         {conn === "connecting" && <div className="board-overlay">Connexion et déchiffrement…</div>}
@@ -1112,6 +1217,7 @@ function Editor({ node }: { node: Node }) {
           }}
         />
       )}
+      {configNode && excalidrawRef.current && <ConfigModal session={session} api={excalidrawRef.current} nodeKey={configNode} nameOf={exportNameOf(excalidrawRef.current)} onClose={() => setConfigNode(null)} />}
       {nodeMenu && (
         <NodeMenu
           session={session}
