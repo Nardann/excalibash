@@ -1,7 +1,8 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import express, { type Request, type Response, type NextFunction } from "express";
-import { WebSocketServer } from "ws";
+import { isIPv6 } from "node:net";
+import { WebSocketServer, type WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { config } from "./config.ts";
@@ -44,6 +45,12 @@ const CSP = [
 const app = express();
 app.set("trust proxy", config.trustProxy);
 app.disable("x-powered-by");
+// Rate limits key on req.ip. One IPv6 subscriber usually holds a whole /64: counted as one address.
+app.use((req, _res, next) => {
+  const ip = req.ip;
+  if (ip && isIPv6(ip) && !/^::ffff:/i.test(ip)) Object.defineProperty(req, "ip", { value: ipv6Net64(ip) });
+  next();
+});
 app.use((req, res, next) => {
   res.set({
     "Content-Security-Policy": CSP.replace("__PROXY__", new URL(proxyUrl(req)).origin),
@@ -55,6 +62,21 @@ app.use((req, res, next) => {
   });
   // Public links are for the people they were given to, not for search engines.
   if (req.path.startsWith("/v/")) res.set("X-Robots-Tag", "noindex, nofollow");
+  if (req.secure) res.set("Strict-Transport-Security", "max-age=31536000");
+  next();
+});
+
+// The API answers with personal data: never in a cache. Changes must come from this origin's own
+// pages: SameSite=Strict lets the tunnel origin (same site, another port) send the cookie, so a
+// browser that says where a request comes from (Sec-Fetch-Site) is checked. Agents and the MCP
+// client send no such header.
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  const site = req.get("sec-fetch-site");
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && site && site !== "same-origin" && site !== "none") {
+    res.status(403).json({ error: "Requête refusée : elle ne vient pas d'Excalibash" });
+    return;
+  }
   next();
 });
 
@@ -71,8 +93,13 @@ app.get("/api/config", (req, res) => {
   });
 });
 // Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
-const small = express.json({ limit: "256kb" });
-const large = express.json({ limit: "200mb" });
+// Without a JSON content type, req.body stays undefined: routes read fields from it, so give them {}.
+const withBody = (req: Request, _res: Response, next: NextFunction) => {
+  req.body ??= {};
+  next();
+};
+const small = [express.json({ limit: "256kb" }), withBody];
+const large = [express.json({ limit: "200mb" }), withBody];
 app.use("/api/auth", small, authApi);
 app.use("/api/machines/pairings", small, pairingOwnerApi);
 app.use("/api/machines", small, machinesApi);
@@ -80,7 +107,7 @@ app.use("/api/pair", small, pairingAgentApi);
 app.use("/api/admin", small, adminApi);
 app.use("/api/account", small, accountApi);
 app.use("/api/public", publicApi);
-app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)(req, res, next), itemsApi);
+app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)[0]!(req, res, next), withBody, itemsApi);
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Introuvable" });
 });
@@ -91,6 +118,11 @@ app.use("/api", (err: any, _req: Request, res: Response, _next: NextFunction) =>
   }
   if (err?.type === "entity.too.large") {
     res.status(413).json({ error: "Contenu trop volumineux" });
+    return;
+  }
+  // Malformed JSON, a bad escape in the URL…: the client's fault, not worth a stack trace.
+  if (err?.status >= 400 && err?.status < 500) {
+    res.status(err.status).json({ error: "Requête invalide" });
     return;
   }
   console.error(err);
@@ -116,7 +148,7 @@ app.get("/uninstall.sh", (_req, res) => {
 });
 
 app.get("/install.sh", (req, res) => {
-  res.type("text/x-shellscript").send(installScript(publicUrl(req), pinFor(req)));
+  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(installScript(publicUrl(req), pinFor(req)));
 });
 
 app.get("/certificate.pem", (_req, res) => {
@@ -156,6 +188,16 @@ const boardWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1
 // Web tunnel responses (up to ~48 MB of body, base64) travel on the agent socket.
 const agentWss = new WebSocketServer({ noServer: true, maxPayload: 72 * 1024 * 1024 });
 
+/** Once a socket is upgraded, an error setting it up closes it as a WebSocket (no HTTP reply any more). */
+function onSocket(ws: WebSocket, setup: () => void): void {
+  try {
+    setup();
+  } catch (e) {
+    console.error("[ws]", e);
+    ws.close(1011, "erreur serveur");
+  }
+}
+
 function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
   const url = new URL(req.url ?? "/", "http://x");
   const reject = (code: number, text: string) => {
@@ -165,7 +207,7 @@ function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
   if (url.pathname === "/agent") {
     const machineId = authenticateAgent(req);
     if (!machineId) return reject(401, "Unauthorized");
-    agentWss.handleUpgrade(req, socket, head, (ws) => handleAgent(ws, machineId));
+    agentWss.handleUpgrade(req, socket, head, (ws) => onSocket(ws, () => handleAgent(ws, machineId)));
     return;
   }
 
@@ -184,11 +226,20 @@ function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const item = getItem(url.searchParams.get("board") ?? "");
     const role = item ? roleOn(user.id, item.id) : undefined;
     if (!item || item.kind !== "board" || !role || isTrashed(item.id)) return reject(403, "Forbidden");
-    boardWss.handleUpgrade(req, socket, head, (ws) => joinBoard(ws, user, item.id, role, currentSessionHash(req)));
+    boardWss.handleUpgrade(req, socket, head, (ws) => onSocket(ws, () => joinBoard(ws, user, item.id, role, currentSessionHash(req))));
     return;
   }
 
   reject(404, "Not Found");
+}
+
+/** "2001:db8:1:2:a:b:c:d" → "2001:db8:1:2::" (still an address, for ipPrefix and the logs). */
+function ipv6Net64(ip: string): string {
+  const [head, tail = ""] = ip.split("%")[0]!.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  const groups = ip.includes("::") ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t] : h;
+  return groups.slice(0, 4).join(":") + "::";
 }
 
 let shuttingDown = false;
@@ -205,6 +256,11 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 setInterval(pruneSessions, 3600_000).unref();
+
+// Last resort: one bad message or timer must not take every board, terminal and tunnel down with it.
+// Handlers catch what they expect; this only logs what slipped through.
+process.on("uncaughtException", (e) => console.error("[fatal évité]", e));
+process.on("unhandledRejection", (e) => console.error("[promesse rejetée]", e));
 
 const server = serve(app, config.port, "Excalibash", upgrade);
 const proxy = startProxy();

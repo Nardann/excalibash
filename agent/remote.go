@@ -83,6 +83,10 @@ func parseTarget(raw json.RawMessage) (*target, error) {
 		if err := h.validate(); err != nil {
 			return nil, err
 		}
+		// A jump host always checks its key: the hop is where an interception would sit unseen.
+		if h.HostKeyCheck == "off" {
+			return nil, badTarget("la vérification de clé d'hôte ne se désactive pas sur un rebond")
+		}
 	}
 	return &t, nil
 }

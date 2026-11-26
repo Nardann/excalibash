@@ -221,9 +221,22 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
     }
   };
 
+  /** The path this tab chose itself (saved to, or typed in « enregistrer sous »). */
+  const ownPath = useRef<string | null>(null);
+
   /** Writes the document to the machine; resolves true once it is saved. */
   const write = async (path: string): Promise<boolean> => {
     if (!doc || !shell) return false;
+    // The path is in the shared document: any editor can change it. Writing on our machine, under
+    // our name, to a path someone else picked asks first.
+    if (path !== ownPath.current) {
+      const ok = await confirmDialog({
+        title: "Enregistrer sur la machine ?",
+        text: `Le fichier sera écrit dans « ${path} » (chemin choisi par un participant du tableau).`,
+        confirm: "Enregistrer",
+      });
+      if (!ok) return false;
+    }
     const r = await saveMachineFile(shell.client, path, text(), {
       baseSha: path === meta.path ? meta.savedSha : undefined,
       confirm: (reason) =>
@@ -238,6 +251,7 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
         }),
     });
     if (!r) return false;
+    ownPath.current = r.path;
     markSaved(doc.ydoc, { path: r.path, sha: r.sha, by: session.you?.name });
     toast(`Enregistré : ${r.path}`);
     return true;
@@ -284,6 +298,7 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
   const submitSaveAs = (path: string) => {
     const p = path.trim();
     setSaveAs(null);
+    ownPath.current = p; // typed here: no need to ask again
     if (!p || /[\0]/.test(p) || p.endsWith("/")) return toast("Chemin invalide");
     void guard("save", async () => void (await write(p)));
   };
