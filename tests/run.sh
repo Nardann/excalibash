@@ -19,4 +19,5 @@ kill $SERVER 2>/dev/null || true
 
 # Export de topologie (fonctions pures, sans serveur).
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/topology.test.ts
+node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/configGen.test.ts
 TLS_PORT=${TLS_PORT:-6791} TLS_PROXY_PORT=${TLS_PROXY_PORT:-6792} node --disable-warning=ExperimentalWarning tests/tls.mts
