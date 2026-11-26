@@ -277,6 +277,18 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
 - Le serveur ne voit ni les adresses ni les résultats, et ne peut pas faire sonder quoi que ce soit : il ne
   détient pas `machineAuth`. Les résultats restent dans le navigateur de qui a demandé la sonde et ne sont pas
   partagés avec les autres membres du tableau.
+- **« Vérifier le schéma »** : la même requête de sonde peut porter `kind: "ifaces"` (absent = ping, comme avant). L'agent
+  répond alors `box(machineAuth, {ifaces}, "eb:probe-res:<rid>")` avec, pour chaque interface (au plus 256, 64 adresses
+  chacune), son nom, ses drapeaux up/running, son MTU, sa MAC et ses adresses `IP/préfixe`, lus par `net.Interfaces()` :
+  aucune commande n'est lancée. Même chemin que le ping : horodatage, `rid` à usage unique, `machineAuth`, une sonde à la fois
+  par machine. Cette réponse révèle la configuration réseau de la machine (noms, adresses, MAC) à qui peut déjà la sonder
+  (propriétaire, partage direct, ou membre du tableau si la machine y est partagée), pas plus que ce que ces personnes
+  obtiendraient avec un shell sur elle ; le serveur n'en voit rien. Il ne limite que la taille de la requête (8 ko, minuscule) ;
+  la réponse, bornée par les plafonds de l'agent (de l'ordre de quelques ko, au pire quelques centaines de ko), passe par le
+  même relais sans plafond propre au-delà de celui du WebSocket de l'agent. Le navigateur la compare au schéma ; le résultat
+  reste éphémère, n'est pas écrit dans le tableau et n'est pas partagé. Un ancien agent ignore `kind` et répond au format ping :
+  le navigateur le détecte (champ `ifaces` absent) et demande de mettre l'agent à jour. Le seul effet sur le tableau est la
+  correction rapide d'une extrémité, faite par l'éditeur à la main (annulable).
 - La machine mémorisée par une icône est une donnée du tableau, que tout éditeur peut écrire. Elle n'est retenue
   que si cette machine a un terminal ou un tunnel ouvert sur ce tableau, d'après le serveur. Un éditeur ne peut
   donc pas faire envoyer des pings depuis la machine d'un autre en trafiquant une icône.
