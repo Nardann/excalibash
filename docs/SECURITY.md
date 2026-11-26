@@ -206,13 +206,18 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
   membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
   du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
+- **Migration de l'ordre des cellules** : un ancien notebook (sans `order`) se lit tel quel, dans l'ordre de stockage ; la
+  première modification de structure par un éditeur (insérer, déplacer, supprimer) écrit l'ordre. L'opération est idempotente
+  et sans copie de cellule ; deux éditeurs qui la font en même temps laissent des identifiants répétés, ignorés à la
+  lecture et supprimés ensuite par les éditeurs. L'export `.ipynb` est identique.
 - **Suppression définitive** : quand une fenêtre de code ou de notebook est retirée pour de bon (icône supprimée, ou fenêtre
   « retirée », pas seulement masquée), l'éditeur qui l'a fait envoie `doc.del {doc}`. Le serveur applique les mêmes
   contrôles que `doc.up` (éditeur, génération de clés courante ; il n'exige pas d'être abonné puisque la fenêtre est
   déjà fermée), supprime les lignes de ce document, pour ce tableau seulement, et prévient les abonnés (`doc.gone {doc}`,
   qui cessent d'envoyer). Annuler la suppression d'une icône (Ctrl+Z) la ramène avec un document vide.
 - **Notebooks** : un document de notebook est un `Y.Array` de cellules (`Y.Text` du source, sorties au format nbformat 4,
-  compteur d'exécution) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
+  compteur d'exécution), un `Y.Array` `order` d'identifiants (l'ordre d'affichage : déplacer une cellule ne touche
+  que lui, jamais la cellule, donc une frappe simultanée n'est pas perdue) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
   le code, ni les sorties, ni les images, ni le nom du fichier. Une sortie trop grosse pour une mise à jour
   (256 Kio) est remplacée par une note, un flux est plafonné à 1 Mio et un total à 3 Mio par cellule. Le fichier `.ipynb`
   lui-même est lu et écrit par le canal de fichiers du shell local, comme pour le code (même contrôle de modification).
@@ -338,6 +343,10 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   éditeur qui voit une cellule « en cours » dont l'identifiant n'est dans la présence de personne depuis 5 s la termine
   (compteur du `done` vu, ou noyau au repos) ; les sorties produites après le départ de l'exécuteur ne sont pas conservées.
   Les clients MCP qui savent écrire dans un terminal peuvent aussi parler à ce noyau, comme à n'importe quel shell.
+- **L'exécuteur survit à la fenêtre.** L'exécution d'un notebook (abonnement au flux du noyau, écriture des sorties,
+  reprise des exécuteurs disparus) appartient à un objet par tableau et par notebook, pas à la fenêtre : masquer la
+  fenêtre en pleine exécution ne perd plus rien. Il est libéré quand le document est supprimé, quand le tableau est
+  fermé, ou 60 s après la dernière exécution quand aucune fenêtre ne l'affiche. Rien ne change pour le serveur.
 
 ## Tunnels web
 

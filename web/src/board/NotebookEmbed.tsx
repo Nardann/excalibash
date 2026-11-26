@@ -39,6 +39,7 @@ import {
   NotebookFormatError,
   cellViews,
   cellsOf,
+  orderOf,
   clearOutputs,
   deleteCell,
   exportIpynb,
@@ -494,6 +495,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
     const ydoc = doc.ydoc;
     const mmap = metaOf(ydoc);
     const cells = cellsOf(ydoc);
+    const order = orderOf(ydoc);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let dupTimer: ReturnType<typeof setTimeout> | undefined;
     let gen = 0;
@@ -522,6 +524,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
     hash();
     mmap.observe(readM);
     cells.observe(readC);
+    order.observe(readC);
     ydoc.on("update", hash);
     const aw = doc.awareness;
     const readP = () => {
@@ -539,6 +542,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
       gen++;
       mmap.unobserve(readM);
       cells.unobserve(readC);
+      order.unobserve(readC);
       ydoc.off("update", hash);
       aw.off("change", readP);
     };

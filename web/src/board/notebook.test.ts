@@ -14,9 +14,12 @@ import {
   findCell,
   initBlankNotebook,
   insertCell,
+  newCellMap,
   kernelCwd,
   moveCell,
   newWriteState,
+  ensureOrder,
+  orderOf,
   parseIpynb,
   readMeta,
   removeDuplicates,
@@ -188,16 +191,18 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   // Move, and the duplicate left by two simultaneous moves.
   const c2 = insertCell(a, { type: "code", source: "2", at: "end" });
   const c3 = insertCell(a, { type: "code", source: "3", at: "end" });
-  ok(moveCell(a, c3, -1) && ids(b).join() === [first, c3, c2].join() && text(b, c3) === "3", "cellules : monter une cellule (copie fidèle, même identifiant)");
+  ok(moveCell(a, c3, -1) && ids(b).join() === [first, c3, c2].join() && text(b, c3) === "3", "cellules : monter une cellule (même cellule, même identifiant, seul l'ordre change)");
   ok(!moveCell(a, first, -1) && !moveCell(a, c2, 1), "cellules : on ne sort pas des bornes");
   offline();
   moveCell(a, c2, -1);
   moveCell(b, c2, -1);
   sync();
-  ok(ids(a).length === 3 && cellViews(a).length === 3, "cellules : deux déplacements simultanés laissent un doublon que la lecture ignore");
+  ok(ids(a).length === 3 && ids(a).join() === ids(b).join() && orderOf(a).length === 4, "cellules : deux déplacements simultanés laissent un identifiant en double dans l'ordre, que la lecture ignore");
   const removedA = removeDuplicates(a);
   const removedB = removeDuplicates(b);
-  ok(removedA === 1 && (removedB === 0 || removedB === 1) && a.getArray("cells").length === 3 && b.getArray("cells").length === 3, "cellules : le nettoyage des doublons converge (idempotent entre clients)");
+  ok(removedA === 1 && removedB <= 1 && orderOf(a).length === 3 && orderOf(b).length === 3 && ids(a).join() === ids(b).join(), "cellules : le nettoyage des doublons converge (idempotent entre clients)");
+  sync();
+  ok(orderOf(a).length === 3 && orderOf(b).length === 3 && a.getArray("cells").length === 3, "cellules : …et la cellule elle-même n'a jamais été dupliquée");
 
   // Type change drops outputs.
   const cc = ids(a)[0];
@@ -600,6 +605,106 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   watcher?.();
   ok(!findCell(w6.doc.ydoc, c6)!.running && findCell(w6.doc.ydoc, c6)!.outputs.at(-1)!.output_type === "error", "service : la session de noyau disparaît fenêtre masquée → l'exécution se termine par une erreur");
   closeBoard?.();
+}
+
+// 8. Stable cell identity: moving only touches the order
+{
+  // Typing in a cell while somebody moves it: nothing is lost, in both directions.
+  const { a, b, offline, sync } = pair();
+  initBlankNotebook(a);
+  const c1 = ids(a)[0];
+  const c2 = insertCell(a, { type: "code", source: "deux", at: "end" });
+  const c3 = insertCell(a, { type: "code", source: "trois", at: "end" });
+  offline();
+  moveCell(a, c1, 1);
+  findCell(b, c1)!.source.insert(0, "frappé pendant le déplacement ");
+  findCell(b, c1)!.source.insert(findCell(b, c1)!.source.length, " et la suite");
+  sync();
+  ok(ids(a).join() === [c2, c1, c3].join() && ids(b).join() === ids(a).join() && text(a, c1) === "frappé pendant le déplacement  et la suite" && text(b, c1) === text(a, c1), "déplacement : la frappe simultanée dans la cellule déplacée n'est pas perdue");
+  const mapBefore = findCell(a, c1)!.map;
+  moveCell(a, c1, 1);
+  ok(findCell(a, c1)!.map === mapBefore && a.getArray("cells").length === 3, "déplacement : la cellule est la même (même Y.Map), pas une copie");
+  offline();
+  moveCell(a, c3, -1);
+  findCell(b, c3)!.source.insert(5, "!");
+  findCell(a, c2)!.source.insert(0, "A:");
+  moveCell(b, c2, 1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && text(a, c3) === "trois!" && text(b, c2) === "A:deux", `déplacements croisés + frappes : tout converge (${ids(a).length} cellules)`);
+  // A move concurrent with the deletion of the same cell leaves no ghost.
+  offline();
+  deleteCell(a, c3);
+  moveCell(b, c3, -1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && !ids(a).includes(c3) && ids(a).length === 2, "déplacement : déplacer une cellule supprimée en même temps ne la ressuscite pas");
+  // Insert next to a cell that moves concurrently.
+  offline();
+  const neu = insertCell(a, { type: "markdown", source: "n", at: { after: c1 } });
+  moveCell(b, c1, -1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).includes(neu) && ids(a).length === 3, "déplacement : une insertion pendant un déplacement converge");
+  removeDuplicates(a);
+  removeDuplicates(b);
+  sync();
+  ok(orderOf(a).length === ids(a).length && orderOf(b).length === ids(b).length, "déplacement : le nettoyage ne laisse que les identifiants utiles");
+}
+
+// 9. Migration of documents written before "order" existed
+{
+  /** An old notebook: the cells in the "cells" array only, no order. */
+  const legacy = (n = 4) => {
+    const d = new Y.Doc();
+    d.transact(() => {
+      d.getMap("meta").set("name", "vieux.ipynb");
+      d.getMap("meta").set("nbformatMinor", 5);
+      d.getArray("cells").push(Array.from({ length: n }, (_, i) => newCellMap({ type: "code", source: `cellule ${i}`, id: `c${i}` })));
+    });
+    return d;
+  };
+  const d = legacy();
+  ok(orderOf(d).length === 0 && ids(d).join() === "c0,c1,c2,c3", "migration : un ancien document se lit sans conversion, dans l'ordre de stockage");
+  const before = exportIpynb(d);
+  ok(ensureOrder(d) && orderOf(d).toArray().join() === "c0,c1,c2,c3" && !ensureOrder(d), "migration : ensureOrder écrit l'ordre une fois (idempotent)");
+  ok(exportIpynb(d) === before, "migration : l'export .ipynb est identique avant et après");
+  const back = parseIpynb(before);
+  const d2 = new Y.Doc();
+  await fillNotebook(d2, back, { name: "r.ipynb", sha: "f".repeat(64), pause: noPause });
+  ok(JSON.stringify(JSON.parse(exportIpynb(d2)).cells) === JSON.stringify(JSON.parse(before).cells) && ids(d2).join() === "c0,c1,c2,c3" && orderOf(d2).length === 4, "migration : l'import .ipynb écrit cellules et ordre");
+
+  // First edit by an editor converts: a move on an old document.
+  const old = legacy();
+  const { a, b, offline, sync } = pair();
+  Y.applyUpdate(a, Y.encodeStateAsUpdate(old), "net");
+  Y.applyUpdate(b, Y.encodeStateAsUpdate(old), "net");
+  ok(orderOf(a).length === 0 && ids(a).length === 4, "migration : deux éditeurs ouvrent le même ancien document");
+  // Both convert at the same moment (one by moving, one by inserting), while a third edit types.
+  offline();
+  moveCell(a, "c3", -1);
+  const ins = insertCell(b, { type: "code", source: "nouvelle", at: { after: "c0" } });
+  findCell(b, "c2")!.source.insert(0, "# ");
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).length === 5 && new Set(ids(a)).size === 5, `migration : conversions simultanées, même liste partout (${ids(a).join()})`);
+  ok(text(a, "c2") === "# cellule 2" && text(b, "c2") === text(a, "c2") && a.getArray("cells").length === 5, "migration : aucune cellule copiée, la frappe simultanée est gardée");
+  const ra = removeDuplicates(a);
+  const rb = removeDuplicates(b);
+  sync();
+  ok(ra > 0 && rb <= ra && orderOf(a).length === 5 && orderOf(b).length === 5 && ids(a).join() === ids(b).join() && ids(a).includes(ins), "migration : le nettoyage supprime les identifiants répétés des deux conversions, identique des deux côtés");
+  const afterIds = ids(a).join();
+  removeDuplicates(a);
+  removeDuplicates(b);
+  sync();
+  ok(ids(a).join() === afterIds && ids(b).join() === afterIds, "migration : nettoyer à nouveau ne change plus rien");
+
+  // Cells the order does not mention (written by an older client) are shown after the known ones; deleting works.
+  const mixed = legacy(3);
+  ensureOrder(mixed);
+  mixed.getArray("cells").push([newCellMap({ type: "markdown", source: "tard", id: "late" })]);
+  ok(ids(mixed).join() === "c0,c1,c2,late", "migration : une cellule absente de l'ordre apparaît à la fin");
+  ok(moveCell(mixed, "late", -1) && ids(mixed).join() === "c0,c1,late,c2" && orderOf(mixed).length === 4, "migration : la déplacer l'inscrit dans l'ordre");
+  ok(deleteCell(mixed, "c1") && ids(mixed).join() === "c0,late,c2" && orderOf(mixed).length === 3, "migration : supprimer retire la cellule et son identifiant");
+  // An id that points to nothing and a non-string entry are ignored.
+  mixed.getArray("order").push(["fantôme", 42 as any]);
+  ok(ids(mixed).join() === "c0,late,c2", "migration : un identifiant sans cellule, ou qui n'est pas une chaîne, est ignoré");
 }
 
 if (failures) {
