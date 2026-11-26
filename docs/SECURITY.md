@@ -271,6 +271,28 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
 - L'option « Équipement ancien » n'ajoute des algorithmes faibles (`diffie-hellman-group1-sha1`,
   `ssh-rsa`, `ssh-dss`, CBC, `hmac-sha1`) qu'à la session qui la demande.
 
+## Noyau Jupyter (carnets collaboratifs)
+
+- Un troisième genre de session distante, `jupyter`, ne se connecte à aucun équipement : l'agent lance sur
+  la machine un pont Python (embarqué dans le binaire, `python3 -u -I -c`) qui pilote un noyau Jupyter
+  (`jupyter_client` + `ipykernel` du Python de la machine) et dialogue avec lui en lignes JSON sur
+  l'entrée et la sortie standard (tubes, sans terminal). Ces lignes circulent dans le même flux
+  chiffré qu'un terminal : même clé de terminal, mêmes trames, même anti-rejeu.
+- **Autorité : celle d'un shell local.** Le noyau exécute du code Python arbitraire avec les droits de
+  l'utilisateur de l'agent. La cible `{kind:"jupyter", cwd?, kernel?}` n'est donc acceptée que dans une clé
+  de terminal scellée sous `machineAuth` (AAD `eb:term:<id>`), comme les autres cibles distantes : seuls le
+  propriétaire de la machine et ceux à qui elle est partagée peuvent en créer une. Le serveur ne peut ni la
+  fabriquer, ni la modifier, ni lire le code, les résultats ou les images ; une rotation de clé ne change pas la
+  cible. Les données d'un tableau (que tout éditeur écrit) ne suffisent jamais à lancer un noyau.
+- Validation par l'agent : `cwd` absolu ou en `~/…` (512 octets au plus, sans NUL ni saut de ligne), `kernel`
+  limité à `[A-Za-z0-9._-]{1,64}` (défaut `python3`), aucun hôte, port, utilisateur ni rebond. Ces valeurs
+  sont passées comme arguments (jamais interprétées par un shell).
+- Tous les participants de la session partagent un seul noyau (état, variables, file d'exécution). Les
+  lignes d'entrée sont limitées à 2 Mio ; une sortie unique à 8 Mio et le total d'une exécution à 32 Mio
+  (le surplus est remplacé par un message). Le pont ne lance rien d'autre que ce que le noyau exécute.
+- À la fermeture de la session (ou du pont), le noyau est arrêté ; il ne survit pas à son pont. Le serveur ne
+  voit que la taille et le rythme des trames.
+
 ## Tunnels web
 
 - Le navigateur de qui ouvre le tunnel (propriétaire de la machine ou personne à qui elle est partagée) génère `K_w`. Il dépose `box(machineAuth, {k: K_w, url, insecure}, "eb:web:<id>")`

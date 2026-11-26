@@ -129,9 +129,17 @@ export type WebTarget = { url: string; insecure: boolean; machine: string; hostH
 
 /** A device the agent connects to instead of starting a local shell (sealed for the agent only). */
 export type RemoteTarget = {
-  kind: "telnet" | "ssh" | "raw";
+  /**
+   * "jupyter" runs a Jupyter kernel on the machine itself (same authority as a local shell) and speaks the
+   * JSON-lines protocol of board/kernelProtocol.ts: it has no host or port (send "" and 0), only cwd / kernel.
+   */
+  kind: "telnet" | "ssh" | "raw" | "jupyter";
   host: string;
   port: number;
+  /** Jupyter only: absolute or "~/"-relative working directory (the agent's home when absent). */
+  cwd?: string;
+  /** Jupyter only: kernelspec name, "python3" when absent. */
+  kernel?: string;
   /** SSH only: empty means the agent asks "login as:" in the terminal. */
   user?: string;
   legacyKex?: boolean;
