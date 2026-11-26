@@ -8,7 +8,9 @@ COPY agent/go.mod agent/go.sum ./
 RUN go mod download
 COPY agent/ ./
 ARG VERSION=docker
-RUN make dist VERSION=${VERSION}
+# Public release key (docs/RELEASE.md): without it the agents cannot update themselves.
+ARG UPDATE_PUBKEY=
+RUN make dist VERSION=${VERSION} UPDATE_PUBKEY=${UPDATE_PUBKEY}
 
 # ---- Frontend -----------------------------------------------------------------
 FROM node:24-alpine AS web
