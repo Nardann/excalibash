@@ -310,6 +310,14 @@ try {
     return l.includes("Z") ? l.indexOf("Z") : false;
   });
   ok(Math.abs(idx - line1.length / 2) <= 2, `zoom ${await zoomOf(A.page)} % : le clic dans Monaco place le curseur sous le pointeur (caractère ${idx} sur ${line1.length})`);
+
+  // The editor follows the app theme.
+  const monacoDark = () => A.page.locator(".monaco-editor").first().evaluate((el) => el.classList.contains("vs-dark"));
+  const appDark = () => A.page.evaluate(() => document.documentElement.classList.contains("dark"));
+  const wasDark = await appDark();
+  await A.page.getByRole("button", { name: /^Thème (sombre|clair)$/ }).click();
+  await until("thème de Monaco", async () => (await appDark()) !== wasDark && (await monacoDark()) === (await appDark()));
+  ok((await monacoDark()) === (await appDark()), "Monaco suit le thème de l'application (clair / sombre)");
   await noConsoleErrors("fenêtre de code : aucune erreur console (Alice et Bob)");
 
   // ---- 6. Notebook ----
