@@ -30,7 +30,8 @@ import {
 import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDoc, frameHeight, parseAnsi, stripAnsi, markdownFrame } from "./notebookRender.ts";
 import { NotebookRunner } from "./notebookRunner.ts";
 import { acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
-import { newSymKey } from "../crypto.ts";
+import { AAD, box, newSymKey, unbox } from "../crypto.ts";
+import { copyDocState, sceneDocIds, sealDoc, type StoredDoc } from "./docCrypto.ts";
 import { LineSplitter } from "./kernelProtocol.ts";
 import { MAX_NOTEBOOKS, nodeDataOf } from "./nodeData.ts";
 
@@ -705,6 +706,56 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   // An id that points to nothing and a non-string entry are ignored.
   mixed.getArray("order").push(["fantôme", 42 as any]);
   ok(ids(mixed).join() === "c0,late,c2", "migration : un identifiant sans cellule, ou qui n'est pas une chaîne, est ignoré");
+}
+
+// 10. Duplicating a board: documents re-sealed under the new board's key
+{
+  const oldKey = await newSymKey();
+  const newKey = await newSymKey();
+  const SRC = "src-board";
+  const DST = "dst-board";
+  const doc = "D".repeat(22);
+  // A notebook with a live kernel session and a running cell, stored as a snapshot plus two updates.
+  const y = new Y.Doc();
+  const ups: Uint8Array[] = [];
+  y.on("update", (u: Uint8Array) => ups.push(u));
+  initBlankNotebook(y, "orig.ipynb");
+  const cell = ids(y)[0];
+  findCell(y, cell)!.source.insert(0, "print('é😀')");
+  setKernelTerm(y, "K".repeat(22));
+  beginRun(y, cell, "exec:1");
+  const stored: StoredDoc = {
+    doc,
+    epoch: 3,
+    snap: await box(oldKey, ups[0], AAD.doc(SRC, doc, 3)),
+    snapSeq: 1,
+    seq: 3,
+    ups: await Promise.all(ups.slice(1).map(async (u, i) => ({ seq: i + 2, d: await box(oldKey, u, AAD.doc(SRC, doc, 3)) }))),
+  };
+  const copied = await copyDocState(stored, { boardId: SRC, key: oldKey });
+  const c = new Y.Doc();
+  Y.applyUpdate(c, copied.state);
+  ok(copied.doc === doc && findCell(c, cell)!.source.toString() === "print('é😀')" && readMeta(c.getMap("meta")).name === "orig.ipynb", "duplication : le document est relu avec l'ancienne clé, même identifiant, même contenu");
+  ok(readMeta(c.getMap("meta")).kernelTerm === undefined && !c.getMap("meta").has("kernelTerm") && !findCell(c, cell)!.running, "duplication : la session de noyau et les cellules « en cours » ne sont pas copiées");
+  ok(readMeta(y.getMap("meta")).kernelTerm === "K".repeat(22) && !!findCell(y, cell)!.running, "duplication : l'original n'est pas touché");
+  const sealed = await sealDoc(copied.doc, copied.state, { boardId: DST, key: newKey, epoch: 0 });
+  const reopened = new Y.Doc();
+  Y.applyUpdate(reopened, await unbox(newKey, sealed.d, AAD.doc(DST, doc, 0)));
+  ok(findCell(reopened, cell)!.source.toString() === "print('é😀')", "duplication : la copie se lit avec la clé, le tableau et l'epoch du nouveau tableau");
+  const fails = async (f: () => Promise<unknown>) => f().then(() => false, () => true);
+  ok(
+    (await fails(() => unbox(oldKey, sealed.d, AAD.doc(DST, doc, 0)))) && (await fails(() => unbox(newKey, sealed.d, AAD.doc(SRC, doc, 0)))) && (await fails(() => unbox(newKey, sealed.d, AAD.doc(DST, doc, 1)))),
+    "duplication : l'ancienne clé ne lit pas la copie, et elle ne se rejoue ni dans l'ancien tableau ni à un autre epoch",
+  );
+  const bad: StoredDoc = { ...stored, ups: [...stored.ups, { seq: 9, d: await box(newKey, ups[1], AAD.doc(SRC, doc, 3)) }] };
+  ok(await fails(() => copyDocState(bad, { boardId: SRC, key: oldKey })), "duplication : une mise à jour qui ne s'authentifie pas interrompt la copie");
+  const mk = (customData: unknown, isDeleted = false) => ({ customData, isDeleted });
+  const A = "A".repeat(22);
+  const B = "B".repeat(22);
+  ok(
+    sceneDocIds([mk({ node: true, codes: [{ docId: A }], notebooks: [{ docId: B }, { docId: "court" }, { docId: A }, null] }), mk({ node: true, codes: [{ docId: "C".repeat(22) }] }, true), mk({ codeId: "x" }), mk(undefined)]).join() === `${A},${B}`,
+    "duplication : les documents à copier sont ceux des icônes du schéma (valides, sans doublon, sans icône supprimée)",
+  );
 }
 
 if (failures) {

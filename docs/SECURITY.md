@@ -197,6 +197,16 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   le dernier `seq` de chacun n'ont pas bougé depuis la lecture (sinon 409 et le navigateur recommence, aucune modification
   n'est perdue). Les abonnés sont déconnectés par le code 4409 comme pour le reste du tableau.
 - La suppression définitive d'un tableau supprime ses documents.
+- **Duplication d'un tableau** : le navigateur de la personne qui duplique récupère les documents du tableau source
+  (`GET /api/items/:id/docs`, lecteur au moins), garde ceux que le schéma référence (icônes de code et de notebook),
+  les déchiffre avec la clé du tableau source, fusionne chaque document en un état, **efface les références vivantes**
+  (`meta.kernelTerm` : la session de noyau est un terminal du tableau source, dont la copie n'a pas la clé ; marques
+  « en cours ») et le chiffre en instantané sous la clé du **nouveau** tableau, son identifiant et l'epoch 0. Les `docId` restent
+  les mêmes (ils ne sont uniques que par tableau, le schéma copié n'a donc pas à être réécrit). Les instantanés partent dans
+  le corps de la création du tableau (`POST /api/items`, champ `board.docs`) : aucune route d'écriture de plus, la création
+  est atomique, et le serveur ne fait que valider les identifiants (22 caractères base64url, sans doublon), 64 documents
+  au plus et 4 Mio par instantané. Le serveur ne voit que des chiffrés ; l'ancienne clé ne lit pas la copie (clé, tableau et
+  epoch sont dans l'AAD). Un chiffré qui ne s'authentifie pas interrompt la copie.
 - **Fenêtres de code** : le document est un `Y.Text` (contenu) et un `Y.Map` (nom, langage, chemin sur la machine, empreinte
   SHA-256 du dernier état lu ou écrit), donc chiffré comme n'importe quel document : le serveur ne voit ni le code, ni le
   nom du fichier, ni son chemin. Monaco et ses workers sont servis par l'application elle-même (fichiers du même

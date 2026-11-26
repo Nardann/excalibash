@@ -1854,6 +1854,56 @@ site.close();
     sDel.send({ t: "doc.sub", doc: nbId });
     const reSub = await sDel.next((m) => m.t === "doc.state", 4000);
     ok(!reSub.snap && reSub.ups.length === 0, "documents : un document supprimé se réabonne vide");
+    // ---- Duplicating a board copies its documents (re-sealed under the copy's own key) ----
+    {
+      const dupNb = sd.newDocId();
+      const dupCode = sd.newDocId();
+      const nodeEl = { ...rect, id: "dupnode", customData: { node: true, shells: [], codes: [{ docId: dupCode, label: "demo.py" }], notebooks: [{ docId: dupNb }] } };
+      const SRC = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Source avec documents", { elements: [nodeEl], files: {} }));
+      const kSrc = await keyOf(alice, SRC);
+      const hSrc = docHost(alice, SRC, kSrc, "editor");
+      const dn = sd.openSharedDoc(hSrc.host, dupNb);
+      const dc = sd.openSharedDoc(hSrc.host, dupCode);
+      await Promise.all([dn.synced, dc.synced]);
+      nbDoc.initBlankNotebook(dn.ydoc, "copie.ipynb");
+      nbDoc.findCell(dn.ydoc, nbDoc.cellViews(dn.ydoc)[0].id)!.source.insert(0, "SECRET_DUP_CELL = 1");
+      nbDoc.setKernelTerm(dn.ydoc, kid);
+      codeDoc.initBlank(dc.ydoc, "copie.py");
+      dc.ydoc.getText("content").insert(0, "print('SECRET_DUP_CODE')\n");
+      await until(() => upRows(SRC, dupNb) > 0 && upRows(SRC, dupCode) > 0);
+      await nap(200);
+      const NEW = await as(alice, async () => lib.duplicateBoard(ctxOf(alice, await tree(alice)), SRC));
+      const kNew = await keyOf(alice, NEW);
+      const stored = (await as(alice, () => api("GET", `/items/${NEW}/docs`))).body as { doc: string; epoch: number; snap: string | null; snapSeq: number; seq: number; ups: any[] }[];
+      ok(stored.length === 2 && stored.map((d) => d.doc).sort().join() === [dupNb, dupCode].sort().join() && stored.every((d) => d.epoch === 0 && d.snap && d.ups.length === 0), "duplication : le tableau copié a ses deux documents (mêmes identifiants), chacun en un instantané");
+      const read = async (key: c.SymKey, board: string, d: (typeof stored)[number]) => {
+        const y = new Y.Doc();
+        Y.applyUpdate(y, await c.unbox(key, d.snap!, c.AAD.doc(board, d.doc, d.epoch)));
+        return y;
+      };
+      const copyNb = await read(kNew, NEW, stored.find((d) => d.doc === dupNb)!);
+      const copyCode = await read(kNew, NEW, stored.find((d) => d.doc === dupCode)!);
+      ok(nbDoc.cellViews(copyNb)[0].source.toString() === "SECRET_DUP_CELL = 1" && nbDoc.readMeta(copyNb.getMap("meta")).name === "copie.ipynb" && copyCode.getText("content").toString() === "print('SECRET_DUP_CODE')\n", "duplication : la copie se déchiffre avec la clé du nouveau tableau et garde le contenu");
+      ok(nbDoc.readMeta(copyNb.getMap("meta")).kernelTerm === undefined && nbDoc.kernelTermOf(dn.ydoc) === kid, "duplication : la référence à la session de noyau est effacée dans la copie, pas dans l'original");
+      const oldCantRead = await c.unbox(kSrc, stored[0].snap!, c.AAD.doc(NEW, stored[0].doc, 0)).then(() => false, () => true);
+      const crossBoard = await c.unbox(kNew, stored[0].snap!, c.AAD.doc(SRC, stored[0].doc, 0)).then(() => false, () => true);
+      ok(oldCantRead && crossBoard, "duplication : l'ancienne clé ne lit pas la copie, et le chiffré ne vaut que pour le nouveau tableau");
+      const rawDup = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+      ok(!rawDup.includes("SECRET_DUP_CELL") && !rawDup.includes("SECRET_DUP_CODE") && !rawDup.includes("copie.ipynb"), "duplication : rien en clair dans la base");
+      // The copy is a live board: its documents open and accept edits with the new key.
+      const hNew = docHost(alice, NEW, kNew, "editor");
+      const openedCopy = sd.openSharedDoc(hNew.host, dupCode);
+      await openedCopy.synced;
+      openedCopy.ydoc.getText("content").insert(0, "# édité dans la copie\n");
+      ok(openedCopy.ydoc.getText("content").toString().endsWith("SECRET_DUP_CODE')\n") && (await until(() => upRows(NEW, dupCode) > 0)), "duplication : le document copié s'ouvre sur le nouveau tableau et accepte des modifications");
+      ok(dc.ydoc.getText("content").toString() === "print('SECRET_DUP_CODE')\n", "duplication : l'original n'est pas modifié par la copie");
+      openedCopy.destroy();
+      dn.destroy();
+      dc.destroy();
+      hSrc.close();
+      hNew.close();
+    }
+
     sDel.ws.close();
     runA.destroy();
     runB.destroy();
