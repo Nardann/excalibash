@@ -18,6 +18,9 @@ import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 import * as sd from "../web/src/board/sharedDoc.ts";
 import * as codeDoc from "../web/src/board/codeDoc.ts";
 import * as mf from "../web/src/board/machineFiles.ts";
+import * as nbDoc from "../web/src/board/notebookDoc.ts";
+import { NotebookRunner } from "../web/src/board/notebookRunner.ts";
+import { LineSplitter, parseEvent } from "../web/src/board/kernelProtocol.ts";
 import { FileClient } from "../web/src/board/fileTransfer.ts";
 import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
 import { Awareness, encodeAwarenessUpdate } from "../web/node_modules/y-protocols/awareness.js";
@@ -1654,6 +1657,184 @@ site.close();
     const codeDump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
     const codeRaw = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
     ok(upRows(D, cdocId) > 0 && !codeDump.includes("salut") && !codeRaw.includes("salut") && !codeDump.includes("demo.py") && !codeRaw.includes("par Bob"), "code : aucun texte ni nom de fichier en clair dans la base");
+
+    // ---- Notebook: shared cells, ONE Jupyter kernel session on Alice's machine (real agent + real ipykernel) ----
+    const nbId = sd.newDocId();
+    const na = sd.openSharedDoc(hA3.host, nbId);
+    const nbBob = sd.openSharedDoc(hB3.host, nbId);
+    const bobErrors: string[] = [];
+    nbBob.onError((m) => bobErrors.push(m));
+    await Promise.all([na.synced, nbBob.synced]);
+    nbDoc.initBlankNotebook(na.ydoc, "demo.ipynb");
+    const first = nbDoc.cellViews(na.ydoc)[0].id;
+    nbDoc.findCell(na.ydoc, first)!.source.insert(0, "x = 41");
+    const second = nbDoc.insertCell(na.ydoc, { type: "code", source: "print(x + 1)", at: { after: first } });
+    const bobSees = await until(() => nbDoc.cellViews(nbBob.ydoc).length === 2 && nbDoc.findCell(nbBob.ydoc, second)?.source.toString() === "print(x + 1)" && nbDoc.readMeta(nbBob.ydoc.getMap("meta")).name === "demo.ipynb");
+    ok(bobSees, "notebook : Bob reçoit les cellules et le nom, chiffrés");
+
+    // Alice starts the kernel session on her machine: a "jupyter" target sealed under the machine key (like RemoteForm).
+    const sAl = boardSocket(alice, D);
+    const sBo = boardSocket(bob, D);
+    await Promise.all([sAl.open, sBo.open]);
+    await sAl.next((m) => m.t === "init");
+    const bobInit = await sBo.next((m) => m.t === "init");
+    const kid = c.randomId();
+    const kk = await c.newSymKey();
+    sAl.send({
+      t: "term.create", reqId: "nbk", id: kid, machineId: machine.id, cols: 80, rows: 24,
+      keyForBoard: await c.wrapKey(kA, kk, c.AAD.termKey(D, kid)),
+      keyForAgent: await c.boxJson(mAlice.auth, { k: c.toB64(kk.raw), target: { kind: "jupyter", host: "", port: 0 } }, c.AAD.termAgent(kid)),
+      encLabel: await c.boxText(kA, "Noyau Jupyter python3 via laptop-alice", c.AAD.termLabel(D, kid)),
+    });
+    const madeK = await sAl.next((m) => (m.t === "term.created" && m.reqId === "nbk") || (m.t === "error" && m.reqId === "nbk"), 10000);
+    ok(madeK.t === "term.created", `notebook : le noyau Jupyter démarre sur la machine (${madeK.message ?? "ok"})`);
+    nbDoc.setKernelTerm(na.ydoc, kid);
+    ok(await until(() => nbDoc.kernelTermOf(nbBob.ydoc) === kid), "notebook : l'identifiant de la session de noyau est partagé par le document");
+    // Bob gets the terminal key from the board like for any shared terminal.
+    const termForBob = await sBo.next((m) => m.t === "term" && m.terminal.id === kid, 8000).catch(() => null);
+    const bobTermInfo = termForBob?.terminal ?? bobInit.terminals?.find((t: any) => t.id === kid);
+    const kkBob = bobTermInfo ? await c.unwrapKey(kB, bobTermInfo.keyForBoard, c.AAD.termKey(D, kid)) : null;
+    ok(!!kkBob && c.toB64(kkBob.raw) === c.toB64(kk.raw), "notebook : Bob récupère la clé de la session de noyau par la clé du tableau");
+
+    /** What BoardSession offers a runner, over a raw socket: subscribe (replay then data, decrypted in order) and input. */
+    const kGens = new Map<string, string>();
+    function kernelPort(sock: ReturnType<typeof boardSocket>, key: c.SymKey, sender: string, taps: ((d: Uint8Array) => void)[] = []) {
+      const listeners = new Set<{ onReplay(d: Uint8Array): void; onData(d: Uint8Array): void }>();
+      let chain: Promise<void> = Promise.resolve();
+      let last = { gen: "", seq: -1 };
+      const take = (gen: string, seq: number) => {
+        if (last.gen === gen && seq <= last.seq) return false;
+        last = { gen, seq };
+        kGens.set(sender, gen);
+        return true;
+      };
+      sock.ws.on("message", (raw: any) => {
+        chain = chain.then(async () => {
+          const m = JSON.parse(raw.toString());
+          if (m.id !== kid) return;
+          if (m.t === "term.replay") {
+            const parts: Uint8Array[] = [];
+            for (const ch of m.chunks) if (take(ch.gen, ch.seq)) parts.push(await c.unbox(key, ch.d, c.AAD.termOut(kid, ch.gen, ch.seq)));
+            const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+            let o = 0;
+            for (const p of parts) (all.set(p, o), (o += p.length));
+            for (const l of listeners) l.onReplay(all);
+          } else if (m.t === "term.data" && take(m.gen, m.seq)) {
+            const d = await c.unbox(key, m.d, c.AAD.termOut(kid, m.gen, m.seq));
+            for (const t of taps) t(d);
+            for (const l of listeners) l.onData(d);
+          }
+        });
+      });
+      let out: Promise<void> = Promise.resolve();
+      return {
+        subscribe(term: string, l: any) {
+          listeners.add(l);
+          sock.send({ t: "term.sub", id: term });
+          return () => listeners.delete(l);
+        },
+        input(term: string, data: Uint8Array) {
+          out = out.then(async () => {
+            for (let i = 0; i < 400 && !kGens.has(sender); i++) await nap(25);
+            const k = ++counter;
+            const ts = Date.now();
+            sock.send({ t: "term.input", id: term, s: sender, k, ts, d: await c.box(key, data, c.AAD.termIn(term, kGens.get(sender)!, sender, k, ts)) });
+          });
+        },
+      };
+    }
+    // Bob also taps the raw stream: he must see the very same events as the executor.
+    const bobSplit = new LineSplitter();
+    const bobEvents: any[] = [];
+    const portA = kernelPort(sAl, kk, "nb-alice");
+    const portB = kernelPort(sBo, kkBob!, "nb-bob", [(d) => bobSplit.push(d).forEach((l) => { const e = parseEvent(l); if (e) bobEvents.push(e); })]);
+    const runA = new NotebookRunner(na.ydoc, portA, { awareness: na.awareness, canEdit: true });
+    const runB = new NotebookRunner(nbBob.ydoc, portB, { awareness: nbBob.awareness, canEdit: true });
+    runA.attach(kid);
+    runB.attach(kid);
+    const waitIdle = async (cell: string) => until(() => !nbDoc.findCell(na.ydoc, cell)?.running, 40000);
+
+    const r1 = runA.run(first);
+    ok(r1.ok && nbDoc.findCell(nbBob.ydoc, first) !== undefined && (await until(() => nbDoc.findCell(nbBob.ydoc, first)!.running === (r1.ok ? r1.execId : ""), 4000)), "notebook : Bob voit la cellule « en cours » dès que Alice la lance");
+    const done1 = await waitIdle(first);
+    ok(done1 && nbDoc.findCell(na.ydoc, first)!.executionCount === 1, `notebook : « x = 41 » s'exécute sur le noyau (${runA.fatal ?? runA.status})`);
+    const r2 = runA.run(second);
+    ok(r2.ok, "notebook : « print(x + 1) » est envoyé par la saisie chiffrée du terminal");
+    const done2 = await waitIdle(second);
+    const out2 = nbDoc.findCell(na.ydoc, second)!;
+    ok(done2 && out2.outputs.some((o) => o.output_type === "stream" && o.text === "42\n") && out2.executionCount === 2, "notebook : le noyau garde son état (x) : la sortie « 42 » est écrite par Alice");
+    const bobGot = await until(() => nbDoc.findCell(nbBob.ydoc, second)?.outputs.some((o) => o.output_type === "stream" && o.text === "42\n") === true && !nbDoc.findCell(nbBob.ydoc, second)!.running, 8000);
+    ok(bobGot && nbDoc.findCell(nbBob.ydoc, second)!.outputs.length === 1, "notebook : le document de Bob reçoit « 42 » (une seule fois : seul l'exécuteur écrit)");
+    const bobSaw = bobEvents.some((e) => e.ev === "stream" && e.id === (r2.ok ? r2.execId : "") && e.text === "42\n") && bobEvents.some((e) => e.ev === "done" && e.id === (r2.ok ? r2.execId : ""));
+    ok(bobSaw && runB.localRuns.length === 0, "notebook : Bob, abonné au même noyau, voit les mêmes événements (stream, done) sans rien écrire");
+    // Bob can run too (any editor): the kernel is shared, so the variable is there.
+    const third = nbDoc.insertCell(nbBob.ydoc, { type: "code", source: "print(x * 2)", at: "end" });
+    await until(() => nbDoc.findCell(na.ydoc, third) !== undefined);
+    const r3 = runB.run(third);
+    ok(r3.ok && (await until(() => nbDoc.findCell(na.ydoc, third)?.outputs.some((o) => o.text === "82\n") === true && !nbDoc.findCell(na.ydoc, third)!.running, 40000)), "notebook : Bob exécute à son tour dans le même noyau, Alice voit « 82 »");
+    // An error, rendered as data.
+    const bad = nbDoc.insertCell(na.ydoc, { type: "code", source: "1/0", at: "end" });
+    runA.run(bad);
+    ok(await until(() => nbDoc.findCell(na.ydoc, bad)?.outputs.some((o) => o.output_type === "error" && o.ename === "ZeroDivisionError") === true && !nbDoc.findCell(na.ydoc, bad)!.running, 40000), "notebook : une exception arrive comme sortie d'erreur (ZeroDivisionError)");
+
+    // Save the .ipynb on the machine through the sealed file channel.
+    const nbText = nbDoc.exportIpynb(na.ydoc);
+    const nbSaved = await mf.saveMachineFile(client, "demo.ipynb", nbText, { baseSha: undefined, confirm: confirm(true), limit: nbDoc.MAX_NOTEBOOK_BYTES });
+    nbDoc.markSaved(na.ydoc, { path: nbSaved!.path, sha: nbSaved!.sha, by: "Alice" });
+    const onDisk = JSON.parse(readFileSync(join(cwd, "demo.ipynb"), "utf8"));
+    const diskCell = onDisk.cells.find((x: any) => x.source.join("") === "print(x + 1)");
+    ok(onDisk.nbformat === 4 && onDisk.cells.length === 4 && diskCell?.outputs?.[0]?.text?.join("") === "42\n" && diskCell.execution_count === 2, "notebook : demo.ipynb est un nbformat 4 valide sur le disque, avec la sortie « 42 »");
+    const reopened = await mf.openMachineFile(client, "demo.ipynb", nbDoc.MAX_NOTEBOOK_BYTES);
+    const reParsed = nbDoc.parseIpynb(reopened.text);
+    ok(reopened.sha === nbSaved!.sha && reParsed.cells.length === 4 && reParsed.warnings.length === 0, "notebook : le fichier de la machine se relit et s'analyse sans réserve");
+
+    // Blind server: neither code nor outputs in clear in the database.
+    await until(() => upRows(D, nbId) > 0);
+    await nap(300);
+    const nbDump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+    const nbRaw = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+    const clearTexts = ["print(x + 1)", "print(x * 2)", "ZeroDivisionError", "x = 41", "demo.ipynb", "output_type", "42\\n", "82\\n"];
+    ok(upRows(D, nbId) > 0 && clearTexts.every((t) => !nbDump.includes(t) && !nbRaw.includes(t)), "notebook : ni le code, ni les sorties (42, 82, erreur), ni le nom du fichier en clair dans la base");
+
+    // The kernel session is closed with the notebook; the document is deleted for good (doc.del).
+    sAl.send({ t: "term.close", id: kid });
+    ok((await until(() => upRows(D, nbId) > 0)) && docsRows(D).some((r) => r.doc_id === nbId), "notebook : le document est bien stocké avant suppression");
+    // A viewer (Carol) and a wrong epoch can't delete; an editor can.
+    // (Carol was removed from this board by the rotation test above: she comes back as a viewer.)
+    await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+    // Re-sharing drops the board sockets: the two editors reconnect and resubscribe (the hosts do it on init).
+    hA3.reconnect();
+    hB3.reconnect();
+    const sCarol = boardSocket(carol, D);
+    await sCarol.open;
+    await sCarol.next((m) => m.t === "init");
+    sCarol.send({ t: "doc.del", doc: nbId, epoch: 0 });
+    const carolDel = await sCarol.next((m) => m.t === "doc.err" || m.t === "doc.gone" || m.t === "rekey", 4000).catch(() => null);
+    ok(carolDel?.t === "doc.err" && carolDel.error === "Lecture seule" && docsRows(D).some((r) => r.doc_id === nbId), "documents : un lecteur ne peut pas supprimer un document (« Lecture seule »)");
+    sCarol.ws.close();
+    const sDel = boardSocket(alice, D);
+    await sDel.open;
+    const delInit = await sDel.next((m) => m.t === "init");
+    sDel.send({ t: "doc.del", doc: nbId, epoch: delInit.epoch + 1 });
+    ok((await sDel.next((m) => m.t === "rekey" || m.t === "doc.gone", 4000).catch(() => ({ t: "?" }))).t === "rekey" && docsRows(D).some((r) => r.doc_id === nbId), "documents : un doc.del d'une autre génération de clés est refusé (rekey), rien n'est supprimé");
+    sDel.send({ t: "doc.del", doc: "not-a-doc-id", epoch: delInit.epoch });
+    ok((await sDel.next((m) => m.t === "doc.err", 4000).catch(() => ({ error: "?" }))).error === "identifiant de document invalide", "documents : doc.del valide l'identifiant");
+    const otherDocs = docsRows(D).filter((r) => r.doc_id !== nbId).length;
+    await nap(1200);
+    const wasGone = bobErrors.length;
+    sDel.send({ t: "doc.del", doc: nbId, epoch: delInit.epoch });
+    const goneBob = await until(() => bobErrors.length > wasGone && bobErrors.some((e) => /supprimé/.test(e)), 6000);
+    ok(goneBob && !docsRows(D).some((r) => r.doc_id === nbId) && upRows(D, nbId) === 0 && docsRows(D).filter((r) => r.doc_id !== nbId).length === otherDocs, "documents : doc.del supprime les lignes du document (et d'elles seules) et prévient les abonnés (doc.gone)");
+    sDel.send({ t: "doc.sub", doc: nbId });
+    const reSub = await sDel.next((m) => m.t === "doc.state", 4000);
+    ok(!reSub.snap && reSub.ups.length === 0, "documents : un document supprimé se réabonne vide");
+    sDel.ws.close();
+    runA.destroy();
+    runB.destroy();
+    na.destroy();
+    nbBob.destroy();
+    sAl.ws.close();
+    sBo.ws.close();
     sf.ws.close();
     ca.destroy();
     cb.destroy();

@@ -206,6 +206,28 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
   membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
   du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
+- **Suppression définitive** : quand une fenêtre de code ou de notebook est retirée pour de bon (icône supprimée, ou fenêtre
+  « retirée », pas seulement masquée), l'éditeur qui l'a fait envoie `doc.del {doc}`. Le serveur applique les mêmes
+  contrôles que `doc.up` (éditeur, génération de clés courante ; il n'exige pas d'être abonné puisque la fenêtre est
+  déjà fermée), supprime les lignes de ce document, pour ce tableau seulement, et prévient les abonnés (`doc.gone {doc}`,
+  qui cessent d'envoyer). Annuler la suppression d'une icône (Ctrl+Z) la ramène avec un document vide.
+- **Notebooks** : un document de notebook est un `Y.Array` de cellules (`Y.Text` du source, sorties au format nbformat 4,
+  compteur d'exécution) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
+  le code, ni les sorties, ni les images, ni le nom du fichier. Une sortie trop grosse pour une mise à jour
+  (256 Kio) est remplacée par une note, un flux est plafonné à 1 Mio et un total à 3 Mio par cellule. Le fichier `.ipynb`
+  lui-même est lu et écrit par le canal de fichiers du shell local, comme pour le code (même contrôle de modification).
+- **Affichage des sorties de notebook (modèle de rendu).** Les sorties sont des *données* écrites par le noyau, donc par
+  n'importe quel code que n'importe quel éditeur a lancé, et par tout éditeur à travers le document partagé. Elles ne
+  s'exécutent jamais dans l'origine de l'application : le texte, les flux et les tracebacks (codes ANSI convertis en
+  styles par une table fixe, ou retirés) deviennent des nœuds texte (jamais `innerHTML`) ; une image PNG, JPEG ou GIF
+  devient un `<img src="data:…">` après contrôle strict de l'alphabet base64 ; tout le reste (`text/html`, SVG,
+  Markdown, JavaScript) ne s'affiche que dans un `<iframe sandbox="" srcdoc="…">` : aucun script, aucune origine commune,
+  ni formulaire, ni fenêtre, ni navigation du haut. Le document du cadre porte en plus une CSP
+  (`default-src 'none'; img-src data:`) et hérite de celle de l'application ; le JavaScript d'une sortie n'est pas exécuté,
+  seulement affiché. Le Markdown des cellules est converti par `marked` (sans assainisseur : il n'en a pas besoin, son
+  résultat n'entre que dans un cadre isolé). Le texte affiché est plafonné (1 Mio, « sortie tronquée »). Les widgets
+  Jupyter ne sont pas pris en charge. Reste possible dans un cadre isolé : un lien ou une redirection `meta refresh` fait
+  charger une adresse (comme ouvrir un lien), sans rien lire de l'application.
 
 ## Machines et terminaux
 
@@ -301,6 +323,19 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   (le surplus est remplacé par un message). Le pont ne lance rien d'autre que ce que le noyau exécute.
 - À la fermeture de la session (ou du pont), le noyau est arrêté ; il ne survit pas à son pont. Le serveur ne
   voit que la taille et le rythme des trames.
+- **Notebooks : un noyau partagé, choix assumé.** Le notebook garde l'identifiant de la session de noyau dans son
+  document (`meta.kernelTerm`) : tous les participants utilisent le même noyau, comme ils se partagent un shell.
+  *Démarrer* un noyau exige `machineAuth` (la même condition que pour une session distante : le navigateur demande
+  d'abord confirmation) ; en revanche **tout éditeur du tableau peut ensuite exécuter du code dans ce noyau**, avec
+  les droits de l'agent de la machine, exactement comme un éditeur peut taper dans un shell local partagé. Les lecteurs
+  reçoivent les sorties (ils ont la clé) mais le serveur refuse leurs frappes. Écrire un autre identifiant dans
+  `meta.kernelTerm` ne donne rien de plus : la clé du terminal n'est donnée qu'aux membres du tableau, et le navigateur
+  ne ferme que des sessions dont le libellé est celui d'un noyau. Une cellule est exécutée par un seul client, celui de la personne
+  qui a cliqué (identifiant `<cellule>:<aléa>` gardé en mémoire locale) : lui seul écrit les sorties de cet identifiant dans
+  le document, les autres lisent le même flux et n'écrivent rien. Si l'exécuteur disparaît en cours de route, tout
+  éditeur qui voit une cellule « en cours » dont l'identifiant n'est dans la présence de personne depuis 5 s la termine
+  (compteur du `done` vu, ou noyau au repos) ; les sorties produites après le départ de l'exécuteur ne sont pas conservées.
+  Les clients MCP qui savent écrire dans un terminal peuvent aussi parler à ce noyau, comme à n'importe quel shell.
 
 ## Tunnels web
 
