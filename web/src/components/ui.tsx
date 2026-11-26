@@ -1,24 +1,142 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  CUSTOM_ID,
+  CUSTOM_KEY,
+  MODE_KEY,
+  SLOT_KEY,
+  applyTheme,
+  customTheme,
+  readCustom,
+  saveBootVars,
+  systemDark,
+  themeById,
+  type Base,
+  type CustomColors,
+  type Mode,
+  type ThemeDef,
+} from "../themes.ts";
 import { createPortal } from "react-dom";
 
 // ---- Theme ------------------------------------------------------------------------
+// One light theme and one dark theme, each chosen in "Mon compte" (built-in or custom); the
+// sun / moon button switches between the two, "auto" follows the system. See themes.ts.
 
-export type Theme = "light" | "dark";
+export type Theme = Base;
 
-const ThemeContext = createContext<{ theme: Theme; toggle: () => void }>({ theme: "light", toggle: () => {} });
+type ThemeCtx = {
+  /** Light or dark base of the theme shown (what Excalidraw and icons follow). */
+  theme: Theme;
+  /** The theme shown. */
+  current: ThemeDef;
+  mode: Mode;
+  setMode: (m: Mode) => void;
+  /** The theme chosen for each base (a theme id, or that base's custom one). */
+  slots: Record<Base, string>;
+  setSlot: (base: Base, id: string) => void;
+  /** Colors of the custom theme of each base. */
+  custom: Record<Base, CustomColors>;
+  setCustom: (base: Base, c: CustomColors) => void;
+  /** The theme for an id (built-in or custom). */
+  themeFor: (id: string) => ThemeDef | undefined;
+  /** Sun / moon button: from the light theme to the dark one, and back. */
+  toggle: () => void;
+};
+
+const ThemeContext = createContext<ThemeCtx>(null as unknown as ThemeCtx);
+
+const read = (key: string): string | null => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const write = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode */
+  }
+};
+
+function initialState() {
+  const raw = read(MODE_KEY);
+  // A theme id stored there by an earlier version: it becomes the theme of its base, shown.
+  const legacy = raw && raw !== "light" && raw !== "dark" && raw !== "auto" ? themeById(raw) : undefined;
+  const mode: Mode = raw === "light" || raw === "dark" ? raw : legacy ? legacy.base : "auto";
+  // Rewritten at once (mode and the theme of its base), so that boot.js agrees from the next
+  // load on and the first toggle does not lose the theme.
+  if (legacy) {
+    write(MODE_KEY, mode);
+    if (!read(SLOT_KEY[legacy.base])) write(SLOT_KEY[legacy.base], legacy.id);
+  }
+  const slot = (base: Base) => {
+    const v = read(SLOT_KEY[base]);
+    if (v === CUSTOM_ID[base] || (v && themeById(v)?.base === base)) return v;
+    return legacy?.base === base ? legacy.id : base;
+  };
+  const custom = (base: Base) => {
+    try {
+      return readCustom(JSON.parse(read(CUSTOM_KEY[base]) ?? "null"), base);
+    } catch {
+      return readCustom(null, base);
+    }
+  };
+  return { mode, slots: { light: slot("light"), dark: slot("dark") }, custom: { light: custom("light"), dark: custom("dark") } };
+}
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => (document.documentElement.classList.contains("dark") ? "dark" : "light"));
+  const [init] = useState(initialState);
+  const [mode, setModeState] = useState<Mode>(init.mode);
+  const [slots, setSlots] = useState(init.slots);
+  const [custom, setCustomState] = useState(init.custom);
+  const [sysDark, setSysDark] = useState(systemDark);
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
+    let mq: MediaQueryList;
     try {
-      localStorage.setItem("eb-theme", theme);
+      mq = matchMedia("(prefers-color-scheme: dark)");
     } catch {
-      /* private mode */
+      return;
     }
-  }, [theme]);
-  const toggle = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
-  return <ThemeContext.Provider value={{ theme, toggle }}>{children}</ThemeContext.Provider>;
+    const on = () => setSysDark(mq.matches);
+    // Safari before 14 only has addListener.
+    if (mq.addEventListener) mq.addEventListener("change", on);
+    else mq.addListener(on);
+    return () => (mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on));
+  }, []);
+
+  const themeFor = useCallback(
+    (id: string) => (id === CUSTOM_ID.light ? customTheme(custom.light, "light") : id === CUSTOM_ID.dark ? customTheme(custom.dark, "dark") : themeById(id)),
+    [custom],
+  );
+  const chosen = useMemo(
+    () => ({ light: themeFor(slots.light) ?? themeById("light")!, dark: themeFor(slots.dark) ?? themeById("dark")! }),
+    [slots, themeFor],
+  );
+  const base: Base = mode === "auto" ? (sysDark ? "dark" : "light") : mode;
+  const current = chosen[base];
+  useLayoutEffect(() => applyTheme(current), [current]);
+  useEffect(() => saveBootVars(chosen.light, chosen.dark), [chosen]);
+
+  const setMode = useCallback((m: Mode) => {
+    setModeState(m);
+    write(MODE_KEY, m);
+  }, []);
+  const setSlot = useCallback((b: Base, id: string) => {
+    setSlots((s) => ({ ...s, [b]: id }));
+    write(SLOT_KEY[b], id);
+  }, []);
+  const setCustom = useCallback((b: Base, c: CustomColors) => {
+    const v = readCustom(c, b);
+    setCustomState((s) => ({ ...s, [b]: v }));
+    write(CUSTOM_KEY[b], JSON.stringify(v));
+  }, []);
+  const toggle = useCallback(() => setMode(base === "dark" ? "light" : "dark"), [base, setMode]);
+  const value = useMemo(
+    () => ({ theme: base, current, mode, setMode, slots, setSlot, custom, setCustom, themeFor, toggle }),
+    [base, current, mode, setMode, slots, setSlot, custom, setCustom, themeFor, toggle],
+  );
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export const useTheme = () => useContext(ThemeContext);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Cable, ChevronDown, ChevronUp, Download, FolderOpen, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, Radio, RotateCcw, Search, TerminalSquare, X } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog, toast, useTheme } from "../components/ui.tsx";
+import type { TermColors } from "../themes.ts";
 import { iconUrl, type TileIcon } from "./personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "./TileCustomizer.tsx";
 import { CastRecorder, bufferToText, exportName, saveBlob } from "./termTools.ts";
@@ -16,29 +17,8 @@ import { clearBroadcast, fanOut, liveTargets, setBroadcast, toggleBroadcast, use
 
 const FONT = '"Cascadia Code", ui-monospace, Menlo, monospace';
 
-const THEME = {
-  background: "#0b1020",
-  foreground: "#e2e8f0",
-  cursor: "#a5b4fc",
-  cursorAccent: "#0b1020",
-  selectionBackground: "#4f46e580",
-  black: "#1e293b",
-  red: "#f43f5e",
-  green: "#10b981",
-  yellow: "#f59e0b",
-  blue: "#6366f1",
-  magenta: "#d946ef",
-  cyan: "#06b6d4",
-  white: "#e2e8f0",
-  brightBlack: "#64748b",
-  brightRed: "#fb7185",
-  brightGreen: "#34d399",
-  brightYellow: "#fbbf24",
-  brightBlue: "#818cf8",
-  brightMagenta: "#e879f9",
-  brightCyan: "#22d3ee",
-  brightWhite: "#f8fafc",
-};
+/** xterm colors of a theme (the cursor's text takes the background color). */
+const termTheme = (c: TermColors) => ({ ...c, cursorAccent: c.background });
 
 function useTerminalInfo(session: BoardSession, id: string) {
   return useSyncExternalStore(
@@ -97,6 +77,15 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  // Terminal colors follow the interface theme, also while the terminal is open.
+  const { current: uiTheme } = useTheme();
+  const themeRef = useRef(uiTheme);
+  themeRef.current = uiTheme;
+  // Before the first paint, so a light terminal never flashes the default dark background.
+  useLayoutEffect(() => {
+    if (termRef.current) termRef.current.options.theme = termTheme(uiTheme.term);
+    rootRef.current?.style.setProperty("--term-bg", uiTheme.term.background);
+  }, [uiTheme]);
   const activeRef = useRef(active);
   activeRef.current = active;
   const collapsedRef = useRef(collapsed);
@@ -129,7 +118,7 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
       fontFamily: FONT,
       fontSize: 13,
       lineHeight: 1.15,
-      theme: THEME,
+      theme: termTheme(themeRef.current.term),
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,
