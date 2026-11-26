@@ -266,8 +266,11 @@ export default function CodeEmbed({ host, session, docId, nodeId, active, shells
 
   // ---- running the file in a kernel (Python) ----------------------------------------------------------------
   const isPython = meta.language === "python";
-  const kernelTerm = meta.kernelTerm ?? null;
-  const kTerm = kernelTerm ? session.terminals.get(kernelTerm) : undefined;
+  // Only a Jupyter kernel session counts (notebookService refuses to run cells in anything else).
+  const named = meta.kernelTerm ?? null;
+  const namedTerm = named ? session.terminals.get(named) : undefined;
+  const kernelTerm = named && (!namedTerm || namedTerm.label.startsWith("Noyau Jupyter ")) ? named : null;
+  const kTerm = kernelTerm ? namedTerm : undefined;
   const termGone = !!kernelTerm && (kTerm ? !(kTerm.status === "running" || kTerm.status === "starting") : session.state === "online");
   const [kStatus, setKStatus] = useState<{ status: string; fatal: string | null }>({ status: "absent", fatal: null });
   const [panel, setPanel] = useState(true);
@@ -343,9 +346,22 @@ export default function CodeEmbed({ host, session, docId, nodeId, active, shells
     runner?.restart();
   };
 
+  /** The path this tab chose itself (saved to, or typed in « enregistrer sous »). */
+  const ownPath = useRef<string | null>(null);
+
   /** Writes the document to the machine; resolves true once it is saved. */
   const write = async (path: string): Promise<boolean> => {
     if (!doc || !shell) return false;
+    // The path is in the shared document: any editor can change it. Writing on our machine, under
+    // our name, to a path someone else picked asks first.
+    if (path !== ownPath.current) {
+      const ok = await confirmDialog({
+        title: "Enregistrer sur la machine ?",
+        text: `Le fichier sera écrit dans « ${path} » (chemin choisi par un participant du tableau).`,
+        confirm: "Enregistrer",
+      });
+      if (!ok) return false;
+    }
     const r = await saveMachineFile(shell.client, path, text(), {
       baseSha: path === meta.path ? meta.savedSha : undefined,
       confirm: (reason) =>
@@ -360,6 +376,7 @@ export default function CodeEmbed({ host, session, docId, nodeId, active, shells
         }),
     });
     if (!r) return false;
+    ownPath.current = r.path;
     markSaved(doc.ydoc, { path: r.path, sha: r.sha, by: session.you?.name });
     toast(`Enregistré : ${r.path}`);
     return true;
@@ -406,6 +423,7 @@ export default function CodeEmbed({ host, session, docId, nodeId, active, shells
   const submitSaveAs = (path: string) => {
     const p = path.trim();
     setSaveAs(null);
+    ownPath.current = p; // typed here: no need to ask again
     if (!p || /[\0]/.test(p) || p.endsWith("/")) return toast("Chemin invalide");
     void guard("save", async () => void (await write(p)));
   };

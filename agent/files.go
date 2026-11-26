@@ -556,7 +556,8 @@ func (h *fileHub) putStep(st *putState, c cwder, op fileOp) (body any, end, ok b
 // used so that a file created meanwhile is never replaced.
 func installPart(part, final string, overwrite bool) error {
 	if overwrite {
-		if info, err := os.Stat(final); err == nil {
+		// Lstat: a symlink planted at that name must not lend its target's mode (0666…) to our file.
+		if info, err := os.Lstat(final); err == nil && info.Mode().IsRegular() {
 			_ = os.Chmod(part, info.Mode().Perm())
 		}
 		return os.Rename(part, final)
