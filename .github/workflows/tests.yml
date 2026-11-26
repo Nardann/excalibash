@@ -54,8 +54,24 @@ jobs:
           npm run build
           npm run build:mcp
 
-      - name: Bout en bout
-        run: ./tests/run.sh
+      # Noyau Jupyter de la machine de test (notebooks) ; Chrome est préinstallé sur les images ubuntu de GitHub.
+      - name: Dépendances des tests
+        run: python3 -m pip install --user ipykernel jupyter_client
+
+      - name: Bout en bout (API puis navigateur réel)
+        env:
+          SHOTS_DIR: ${{ runner.temp }}/shots
+        run: |
+          export CHROME_PATH="$(command -v google-chrome)"
+          ./tests/run.sh
+
+      - name: Captures d'écran du navigateur (échec)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captures-navigateur
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: ignore
 
   docker:
     runs-on: ubuntu-latest
