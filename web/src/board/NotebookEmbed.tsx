@@ -66,6 +66,7 @@ import {
 import { classifyOutputs, frameHeight, markdownFrame, parseAnsi, type RenderItem } from "./notebookRender.ts";
 import type { NotebookRunner } from "./notebookRunner.ts";
 import { acquireNotebook, sessionEnv } from "./notebookService.ts";
+import { bindPythonKernel, type KernelQuery } from "./pyKernel.ts";
 
 /** What the window needs from the app (handed in by the board page: this chunk must not import the UI kit, see BoardPage). */
 export type NotebookHost = {
@@ -237,6 +238,8 @@ type CellApi = {
   move: (id: string, delta: -1 | 1) => void;
   setType: (id: string, type: CellType) => void;
   clear: (id: string) => void;
+  /** The kernel that answers completion and docstring requests, if there is one. */
+  kernel: () => KernelQuery | null;
 };
 
 type CellProps = {
@@ -334,7 +337,10 @@ const NotebookCell = memo(function NotebookCell(p: CellProps) {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => (type === "markdown" ? setEditing(false) : api.run(id)));
     if (type === "markdown") editor.addCommand(monaco.KeyCode.Escape, () => setEditing(false));
     if (type === "markdown" && editing) editor.focus();
+    // Completion and docstrings of a code cell come from the notebook's kernel (Ctrl+Espace, ".", Maj+Tab).
+    const unbind = type === "code" ? bindPythonKernel(editor, model, api.kernel) : undefined;
     return () => {
+      unbind?.();
       mountedRef.current = false;
       d1.dispose();
       d2.dispose();
@@ -648,6 +654,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
       move: (id, delta) => void moveCell(ydoc(), id, delta),
       setType: (id, type) => void setCellType(ydoc(), id, type),
       clear: (id) => void clearOutputs(ydoc(), id),
+      kernel: () => runnerRef.current,
     };
   }, [toast]);
 

@@ -1040,6 +1040,7 @@ function Editor({ node }: { node: Node }) {
               docId={codeId}
               active={active}
               shells={shells}
+              notebookDocs={(owner?.notebooks ?? []).map((n) => n.docId)}
               title={owner?.title?.split("\n")[0] ?? null}
               onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
               onLabel={editor && nid ? (n) => void setDocLabel(excalidrawRef.current!, "code", nid, codeId, n) : undefined}

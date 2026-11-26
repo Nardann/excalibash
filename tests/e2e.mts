@@ -1780,6 +1780,26 @@ site.close();
     runA.run(bad);
     ok(await until(() => nbDoc.findCell(na.ydoc, bad)?.outputs.some((o) => o.output_type === "error" && o.ename === "ZeroDivisionError") === true && !nbDoc.findCell(na.ydoc, bad)!.running, 40000), "notebook : une exception arrive comme sortie d'erreur (ZeroDivisionError)");
 
+    // Completion and docstrings go through the same encrypted terminal (complete / inspect ops of the bridge).
+    {
+      await until(() => runA.status === "idle", 20000);
+      const src = "import math\nmath.sq";
+      const comp = await runA.complete(src, src.length);
+      ok(!!comp && comp.matches.includes("sqrt") && comp.start === src.length - 2 && comp.end === src.length, `notebook : « complete » sur « import math / math.sq » renvoie « sqrt », par le terminal chiffré (${JSON.stringify(comp)})`);
+      const emojiSrc = "import math\nt = '😀é'\nmath.sq";
+      const comp2 = await runA.complete(emojiSrc, emojiSrc.length);
+      ok(!!comp2 && comp2.matches.includes("sqrt") && comp2.start === emojiSrc.length - 2, "notebook : la position part en points de code (emoji, accents) et revient en UTF-16");
+      const imp = nbDoc.insertCell(na.ydoc, { type: "code", source: "import math", at: "end" });
+      runA.run(imp);
+      await until(() => !nbDoc.findCell(na.ydoc, imp)?.running && nbDoc.findCell(na.ydoc, imp)?.executionCount != null, 40000);
+      await until(() => runA.status === "idle", 20000);
+      const doc = await runA.inspect("math.sqrt", "math.sqrt".length);
+      ok(!!doc && /sqrt/.test(doc) && doc.startsWith("```text\n") && !doc.includes("\u001b"), "notebook : « inspect » renvoie la documentation de math.sqrt, sans ANSI, en bloc de code");
+      ok((await runB.complete(src, src.length)) !== null, "notebook : Bob, éditeur, complète aussi sur le même noyau");
+      ok(nbDoc.findCell(na.ydoc, imp)!.outputs.length === 0 && !bobErrors.length, "notebook : une requête de complétion n'écrit rien dans le document");
+      nbDoc.deleteCell(na.ydoc, imp);
+    }
+
     // The runner belongs to the board session, not to the window: hide the window in the middle of a run and
     // the outputs keep coming (real kernel, real encrypted terminal stream).
     const svcDocId = sd.newDocId();

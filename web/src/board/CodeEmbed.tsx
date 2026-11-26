@@ -24,6 +24,8 @@ import {
   type CodeMeta,
 } from "./codeDoc.ts";
 import { openMachineFile, pickLocalShell, saveMachineFile, sendCommand } from "./machineFiles.ts";
+import { peekNotebookRunner } from "./notebookService.ts";
+import { bindPythonKernel } from "./pyKernel.ts";
 
 /** What the window needs from the app's UI kit, handed in by the board page (this chunk must not import it: see BoardPage). */
 export type CodeHost = {
@@ -39,6 +41,8 @@ type Props = {
   active: boolean;
   /** The node's shells, the ones whose window is open first: the file goes through the first running local one. */
   shells: string[];
+  /** The node's notebooks: a running kernel session of one of them answers completion in a Python file. */
+  notebookDocs?: string[];
   title?: string | null;
   onHide?: () => void;
   onRemove?: () => void;
@@ -88,7 +92,7 @@ function useDoc(session: BoardSession, docId: string) {
   return { doc, ready, error };
 }
 
-export default function CodeEmbed({ host, session, docId, active, shells, title, onHide, onRemove, onLabel }: Props) {
+export default function CodeEmbed({ host, session, docId, active, shells, notebookDocs, title, onHide, onRemove, onLabel }: Props) {
   const { doc, ready, error } = useDoc(session, docId);
   const { theme, confirm: confirmDialog, toast } = host;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -213,6 +217,16 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
     const model = editorRef.current?.getModel();
     if (model && model.getLanguageId() !== meta.language) monaco.editor.setModelLanguage(model, meta.language);
   }, [meta.language, ready]);
+
+  // Python files complete and show docstrings through a kernel session, when the node has one (Ctrl+Espace, ".", Maj+Tab).
+  const notebooksRef = useRef(notebookDocs ?? []);
+  notebooksRef.current = notebookDocs ?? [];
+  useEffect(() => {
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (!ed || !model || !ready || meta.language !== "python") return;
+    return bindPythonKernel(ed, model, () => peekNotebookRunner(session, notebooksRef.current));
+  }, [ready, doc, meta.language, session]);
 
   const dirty = sha !== null && isDirty(sha, meta.savedSha);
   const text = () => doc!.ydoc.getText("content").toString();

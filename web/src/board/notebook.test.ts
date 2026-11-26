@@ -31,6 +31,7 @@ import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDo
 import { NotebookRunner } from "./notebookRunner.ts";
 import { acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
 import { AAD, box, newSymKey, unbox } from "../crypto.ts";
+import { codePointsToUtf16, docMarkdown, mapComplete, utf16ToCodePoints, wordAt } from "./pyComplete.ts";
 import { copyDocState, sceneDocIds, sealDoc, type StoredDoc } from "./docCrypto.ts";
 import { LineSplitter } from "./kernelProtocol.ts";
 import { MAX_NOTEBOOKS, nodeDataOf } from "./nodeData.ts";
@@ -756,6 +757,78 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
     sceneDocIds([mk({ node: true, codes: [{ docId: A }], notebooks: [{ docId: B }, { docId: "court" }, { docId: A }, null] }), mk({ node: true, codes: [{ docId: "C".repeat(22) }] }, true), mk({ codeId: "x" }), mk(undefined)]).join() === `${A},${B}`,
     "duplication : les documents à copier sont ceux des icônes du schéma (valides, sans doublon, sans icône supprimée)",
   );
+}
+
+// 11. Completion and docstrings: offsets, mapping, requests
+{
+  const emoji = "x = '😀é'; 😀.na";
+  const at = emoji.length;
+  ok(utf16ToCodePoints("abc", 2) === 2 && utf16ToCodePoints("é😀é", 3) === 2 && utf16ToCodePoints("é😀é", 4) === 3, "complétion : UTF-16 → points de code (accents : 1, emoji : 2 unités UTF-16 mais 1 point)");
+  ok(utf16ToCodePoints("é😀é", 2) === 1 && utf16ToCodePoints("é😀é", 99) === 3 && utf16ToCodePoints("é😀é", -4) === 0, "complétion : un offset au milieu d'une paire de substitution ne compte pas l'emoji ; bornes");
+  ok(codePointsToUtf16("é😀é", 2) === 3 && codePointsToUtf16("é😀é", 3) === 4 && codePointsToUtf16("é😀é", 50) === 4 && codePointsToUtf16("😀", 1) === 2, "complétion : points de code → UTF-16");
+  ok(utf16ToCodePoints(emoji, at) === [...emoji].length && codePointsToUtf16(emoji, [...emoji].length) === at, "complétion : aller-retour sur un texte avec emoji et accents");
+  const code = "s = '😀'\nmath.sq";
+  const pos = code.length;
+  ok(JSON.stringify(mapComplete(code, pos, { matches: ["sqrt"], start: 13, end: 15 })) === JSON.stringify({ start: pos - 2, end: pos, matches: ["sqrt"] }), "complétion : début et fin du noyau (points de code) convertis en UTF-16 (l'emoji décale de 1)");
+  ok(mapComplete(code, pos, { matches: ["a", "a", "", 3 as any, "b\nc", "b"], start: 0, end: 0 })?.matches.join() === "a,b" && mapComplete(code, pos, { matches: [] }) === null && mapComplete(code, pos, { matches: "x" as any }) === null, "complétion : correspondances nettoyées (doublons, vides, non-chaînes, retours à la ligne), rien = null");
+  const wild = mapComplete(code, pos, { matches: ["q"], start: 999, end: 3 });
+  ok(wild!.start === pos && wild!.end === pos, "complétion : une plage qui n'entoure pas le curseur est ramenée au curseur");
+  ok(mapComplete("ab", 2, { matches: ["abc"] })!.start === 2, "complétion : sans bornes, au curseur");
+  ok(mapComplete("x", 1, { matches: Array.from({ length: 500 }, (_, i) => `m${i}`) })!.matches.length === 200, "complétion : 200 propositions au plus");
+  const md = docMarkdown("\u001b[1;31mSignature:\u001b[0m sqrt(x)\r\nDoc avec ``` et `code` <script>alert(1)</script> [lien](http://x)")!;
+  ok(md.startsWith("````text\n") && md.endsWith("\n````") && !md.includes("\u001b") && md.includes("<script>") && !md.includes("\r"), "docstring : ANSI retiré, bloc de code dont la clôture est plus longue que toute série de ` du texte (rien n'est interprété)");
+  ok(docMarkdown("x\n".repeat(10000))!.length < 8100 && docMarkdown("   ") === null && docMarkdown(null) === null && docMarkdown(42) === null, "docstring : plafonnée, vide ou pas du texte = rien");
+  ok(wordAt("a = math.sqrt(2)", 10)?.start === 9 && wordAt("a = math.sqrt(2)", 8)?.end === 8 && wordAt("a = (", 5) === null && wordAt("é😀x", 3) !== null, "docstring : le mot sous le curseur");
+
+  // Requests through a runner: what goes to the kernel, what comes back, what is never sent.
+  const dec = new TextDecoder();
+  const enc = new TextEncoder();
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  let listener: L | undefined;
+  const lines: any[] = [];
+  const reply = (ev: object) => listener!.onData(enc.encode(JSON.stringify(ev) + "\n"));
+  const port = {
+    subscribe: (_t: string, l: L) => ((listener = l), () => (listener = undefined)),
+    input: (_t: string, d: Uint8Array) => void lines.push(...dec.decode(d).split("\n").filter(Boolean).map((l) => JSON.parse(l))),
+  };
+  const run = new NotebookRunner(new Y.Doc(), port, { canEdit: true });
+  run.attach("Q".repeat(22));
+  reply({ ev: "status", state: "idle" });
+  const asked = run.complete(code, pos);
+  const req = lines.at(-1);
+  ok(req.op === "complete" && req.code === code && req.pos === [...code].length && typeof req.id === "string" && req.id.length <= 64, "complétion : la requête envoie le code et la position en points de code");
+  reply({ ev: "complete", id: "autre", matches: ["non"], start: 0, end: 0 });
+  reply({ ev: "complete", id: req.id, matches: ["sqrt", "sin"], start: 13, end: 15 });
+  const got = await asked;
+  ok(got?.matches.join() === "sqrt,sin" && got.start === pos - 2 && got.end === pos, "complétion : seule la réponse portant l'identifiant de la requête est prise, convertie en UTF-16");
+  const insp = run.inspect(code, pos);
+  const ireq = lines.at(-1);
+  reply({ ev: "inspect", id: ireq.id, found: true, data: { "text/plain": "\u001b[31mdoc\u001b[0m de sqrt" } });
+  ok((await insp) === "```text\ndoc de sqrt\n```", "docstring : la réponse devient un bloc Markdown, ANSI retiré");
+  const none = run.inspect(code, pos);
+  reply({ ev: "inspect", id: lines.at(-1).id, found: false, data: {} });
+  ok((await none) === null, "docstring : « introuvable » = rien");
+  const t0 = Date.now();
+  ok((await run.complete(code, pos, { timeoutMs: 120 })) === null && Date.now() - t0 < 1000, "complétion : sans réponse, rendue vide à l'échéance (3 s par défaut)");
+  const ac = new AbortController();
+  const before = lines.length;
+  const stale = run.complete(code, pos, { signal: ac.signal, timeoutMs: 5000 });
+  ac.abort();
+  ok((await stale) === null && lines.length === before + 1, "complétion : une requête abandonnée rend aussitôt (la réponse tardive est ignorée)");
+  reply({ ev: "complete", id: lines.at(-1).id, matches: ["tard"], start: 0, end: 0 });
+  reply({ ev: "status", state: "busy" });
+  const nb = lines.length;
+  ok((await run.complete(code, pos)) === null && (await run.inspect(code, pos)) === null && lines.length === nb && !run.canQuery, "complétion : noyau occupé, rien n'est envoyé (la requête attendrait derrière la cellule en cours)");
+  reply({ ev: "status", state: "idle" });
+  const viewer = new NotebookRunner(new Y.Doc(), port, { canEdit: false });
+  viewer.attach("Q".repeat(22));
+  const nv = lines.length;
+  ok((await viewer.complete(code, pos)) === null && lines.length === nv && !viewer.canQuery, "complétion : un lecteur ne peut pas taper dans la session, donc rien n'est envoyé");
+  const pend = run.complete(code, pos, { timeoutMs: 5000 });
+  run.attach(null);
+  ok((await pend) === null && (await run.complete(code, pos)) === null, "complétion : session détachée, les requêtes en attente rendent vide");
+  run.destroy();
+  viewer.destroy();
 }
 
 if (failures) {

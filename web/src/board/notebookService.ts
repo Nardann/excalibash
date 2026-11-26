@@ -129,6 +129,16 @@ const registry = new WeakMap<object, Map<string, Service>>();
 /** True when a service of this notebook is alive on the board (tests, diagnostics). */
 export const hasNotebookService = (host: object, docId: string): boolean => registry.get(host)?.has(docId) ?? false;
 
+/** The runner of a live service among `docIds` that follows a kernel session, if any (does not keep it alive). */
+export function peekNotebookRunner(host: object, docIds: readonly string[]): NotebookRunner | undefined {
+  const map = registry.get(host);
+  for (const id of docIds) {
+    const s = map?.get(id);
+    if (s && !s.disposed && s.runner.term && s.runner.status !== "dead") return s.runner;
+  }
+  return undefined;
+}
+
 /**
  * Joins (or creates) the service of a notebook of the board. The runner and the document handle
  * outlive the window: call `release()` when the window goes away.

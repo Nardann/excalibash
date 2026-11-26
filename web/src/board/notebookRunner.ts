@@ -14,66 +14,39 @@
 // recorded and `running` removed. Output events produced after the executor left are not recorded.
 // Pure TypeScript (timers only): the same code runs in the window and in the e2e scenario.
 import type * as Y from "yjs";
-import { LineSplitter, encodeOp, parseEvent, type KernelEvent, type KernelState } from "./kernelProtocol.ts";
+import { encodeOp, type KernelEvent } from "./kernelProtocol.ts";
+import { KernelSession, type KernelStatus, type TermPort } from "./kernelSession.ts";
 import { applyKernelEvents, beginRun, cellViews, cutAt, eventWeight, findCell, finishRun, newWriteState, type WriteState } from "./notebookDoc.ts";
 
-/** What the runner needs from the board session: the sealed terminal stream of the kernel. */
-export type TermPort = {
-  subscribe(term: string, l: { onReplay(data: Uint8Array): void; onData(data: Uint8Array): void }): () => void;
-  input(term: string, data: Uint8Array): void;
-};
+export type { KernelStatus, TermPort };
 export type AwarenessLike = {
   getStates(): Map<number, any>;
   setLocalStateField(field: string, value: unknown): void;
 };
 
-export type KernelStatus = KernelState | "absent";
 export type RunResult = { ok: true; execId: string } | { ok: false; reason: string };
 
 const FLUSH_MS = 80;
 /** Serialized size of the events written in one transaction: one document update must stay under 380 KiB. */
 const BATCH_BUDGET = 160 * 1024;
-const INPUT_CHUNK = 48 * 1024;
 const ORPHAN_MS = 5000;
 const SWEEP_MS = 1500;
 
 type Exec = { cellId: string; st: WriteState; queue: KernelEvent[]; timer?: ReturnType<typeof setTimeout> };
 
-const enc = new TextEncoder();
-
-export class NotebookRunner {
-  status: KernelStatus = "absent";
-  /** The bridge's last fatal message (kernel missing, ipykernel not installed…). */
-  fatal: string | null = null;
-  term: string | null = null;
+export class NotebookRunner extends KernelSession {
   private ydoc: Y.Doc;
-  private port: TermPort;
   private awareness: AwarenessLike | undefined;
-  private canEdit: boolean;
   private execs = new Map<string, Exec>();
   private foreignDone = new Map<string, number | null>();
   private orphanSince = new Map<string, number>();
-  private splitter = new LineSplitter();
-  private off: (() => void) | null = null;
   private sweeper: ReturnType<typeof setInterval> | undefined;
-  private listeners = new Set<() => void>();
-  private destroyed = false;
 
   constructor(ydoc: Y.Doc, port: TermPort, o: { awareness?: AwarenessLike; canEdit: boolean }) {
+    super(port, o.canEdit);
     this.ydoc = ydoc;
-    this.port = port;
     this.awareness = o.awareness;
-    this.canEdit = o.canEdit;
     if (o.canEdit) this.sweeper = setInterval(() => this.sweep(), SWEEP_MS);
-  }
-
-  /** Called when the status or the pending runs change. */
-  on(fn: () => void): () => void {
-    this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
-  }
-  private emit() {
-    for (const fn of this.listeners) fn();
   }
 
   /** The ids of the runs this client executes. */
@@ -81,52 +54,7 @@ export class NotebookRunner {
     return [...this.execs.keys()];
   }
 
-  /** Follows the kernel session `term` (or none). The stream is replayed first: every client sees the same events. */
-  attach(term: string | null) {
-    if (this.destroyed || term === this.term) return;
-    this.off?.();
-    this.off = null;
-    this.term = term;
-    this.splitter = new LineSplitter();
-    if (term) this.fatal = null;
-    this.status = term ? "idle" : "absent";
-    if (term) {
-      this.off = this.port.subscribe(term, {
-        onReplay: (d) => {
-          this.splitter = new LineSplitter();
-          this.consume(d);
-        },
-        onData: (d) => this.consume(d),
-      });
-    }
-    this.emit();
-  }
-
-  private consume(data: Uint8Array) {
-    for (const line of this.splitter.push(data)) {
-      const ev = parseEvent(line);
-      if (ev) this.handle(ev);
-    }
-  }
-
-  private handle(ev: KernelEvent) {
-    switch (ev.ev) {
-      case "status":
-        this.status = ev.state;
-        this.emit();
-        return;
-      case "fatal":
-        this.status = "dead";
-        this.fatal = typeof ev.error === "string" ? ev.error.slice(0, 500) : "Noyau arrêté";
-        this.emit();
-        return;
-      case "ready":
-      case "log":
-      case "pong":
-      case "complete":
-      case "inspect":
-        return;
-    }
+  protected onEvent(ev: KernelEvent) {
     const id = (ev as { id?: unknown }).id;
     if (typeof id !== "string") return;
     const ex = this.execs.get(id);
@@ -197,13 +125,6 @@ export class NotebookRunner {
     this.awareness?.setLocalStateField("execs", [...this.execs.keys()]);
   }
 
-  /** Sends one request line to the kernel session, in pieces (a terminal frame is limited). */
-  private send(line: string) {
-    if (!this.term) return;
-    const bytes = enc.encode(line);
-    for (let i = 0; i < bytes.length; i += INPUT_CHUNK) this.port.input(this.term, bytes.subarray(i, i + INPUT_CHUNK));
-  }
-
   /** Runs a cell on the shared kernel; this client becomes its executor. */
   run(cellId: string): RunResult {
     if (!this.canEdit) return { ok: false, reason: "Lecture seule" };
@@ -240,18 +161,6 @@ export class NotebookRunner {
       else if (!/déjà en cours|Seules les cellules/.test(r.reason)) break;
     }
     return n;
-  }
-
-  interrupt(): boolean {
-    if (!this.canEdit || !this.term) return false;
-    this.send(encodeOp({ op: "interrupt" }));
-    return true;
-  }
-
-  restart(): boolean {
-    if (!this.canEdit || !this.term) return false;
-    this.send(encodeOp({ op: "restart" }));
-    return true;
   }
 
   /** The kernel session ended (terminal exited or removed): this client's runs end with an error. */
@@ -303,9 +212,7 @@ export class NotebookRunner {
   }
 
   destroy() {
-    this.destroyed = true;
-    this.off?.();
-    this.off = null;
+    this.closeSession();
     clearInterval(this.sweeper);
     for (const ex of this.execs.values()) if (ex.timer) clearTimeout(ex.timer);
     this.execs.clear();
@@ -314,6 +221,5 @@ export class NotebookRunner {
     } catch {
       /* the awareness is already gone */
     }
-    this.listeners.clear();
   }
 }
