@@ -4,11 +4,12 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, Globe, History, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, Globe, History, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
 import { HistoryPanel } from "../board/HistoryPanel.tsx";
+import { ConfigModal } from "../board/ConfigModal.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
 import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
@@ -133,6 +134,10 @@ function Editor({ node }: { node: Node }) {
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
+  /** « Générer la config » : the node (tile, shape or group) whose dialog is open. */
+  const [configNode, setConfigNode] = useState<string | null>(null);
+  /** The single selected shape / group that has cables, for its floating « Config » button. */
+  const [cfgSel, setCfgSel] = useState<{ key: string; left: number; top: number } | null>(null);
   const [customizing, setCustomizing] = useState<string | null>(null);
   /** Every machine icon with its shells and sites, for the side dock. */
   const [dock, setDock] = useState<DockGroup[]>([]);
@@ -561,6 +566,27 @@ function Editor({ node }: { node: Node }) {
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // A shape or group with cables (a tile has its own toolbar): same key as in the topology export.
+      let cfg: { key: string; left: number; top: number } | null = null;
+      if (selected.length && !nd && !appState.newElement && !appState.isResizing && !appState.isRotating) {
+        const sel = elements.filter((e) => appState.selectedElementIds[e.id] && !e.isDeleted);
+        const target = (e: ExcalidrawElement) => (e.type === "text" && e.containerId ? (elements.find((c) => c.id === e.containerId) ?? e) : e);
+        const first = sel[0] && target(sel[0]);
+        const group = first?.groupIds.at(-1);
+        const okSel = first && !cableOf(first) && !terminalIdOf(first) && !(first.customData as any)?.webId && sel.every((e) => (group ? e.groupIds.at(-1) === group : target(e).id === first.id));
+        if (okSel) {
+          const members = group ? elements.filter((e) => !e.isDeleted && e.groupIds.includes(group) && !cableOf(e)) : [first];
+          const tile = members.find((e) => nodeDataOf(e));
+          const key = tile ? tile.id : group ? `group:${group}` : first.id;
+          const hit = (a: { id?: string; group?: string }) => (a.group ? a.group === group : !!a.id && members.some((m) => m.id === a.id));
+          if (elements.some((e) => !e.isDeleted && cableOf(e) && (hit(cableOf(e)!.a) || hit(cableOf(e)!.b)))) {
+            const right = Math.max(...sel.map((e) => e.x + e.width));
+            const top = Math.min(...sel.map((e) => e.y));
+            cfg = { key, left: Math.round((right + appState.scrollX) * appState.zoom.value), top: Math.round((top + appState.scrollY) * appState.zoom.value) };
+          }
+        }
+      }
+      setCfgSel((prev) => (JSON.stringify(prev) === JSON.stringify(cfg) ? prev : cfg));
       // The window being used (active, or just selected) goes above the windows it overlaps.
       const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId);
       const activeEl = appState.activeEmbeddable?.state === "active" ? appState.activeEmbeddable.element : undefined;
@@ -1002,6 +1028,9 @@ function Editor({ node }: { node: Node }) {
                 <button title="Icône et libellé" onClick={() => setCustomizing(selTerm.id)}>
                   <Palette size={14} />
                 </button>
+                <button title="Générer la config de l'équipement (Cisco IOS, Linux, netplan) d'après ses câbles" onClick={() => setConfigNode(selTerm.id)}>
+                  <FileCode size={14} />
+                </button>
               </>
             ) : selTerm.kind === "window" ? (
               <button onClick={() => reduce(selTerm.id)} title="Masquer la fenêtre (le shell continue) — Alt+R ou double-clic sur la barre">
@@ -1018,6 +1047,13 @@ function Editor({ node }: { node: Node }) {
                 </button>
               </>
             )}
+          </div>
+        )}
+        {cfgSel && (
+          <div className="term-float" style={{ left: cfgSel.left, top: cfgSel.top }}>
+            <button title="Générer la config de cet élément d'après ses câbles (Cisco IOS, Linux, netplan)" onClick={() => setConfigNode(cfgSel.key)}>
+              <FileCode size={14} /> Config
+            </button>
           </div>
         )}
         {conn === "connecting" && <div className="board-overlay">Connexion et déchiffrement…</div>}
@@ -1076,6 +1112,7 @@ function Editor({ node }: { node: Node }) {
           }}
         />
       )}
+      {configNode && excalidrawRef.current && <ConfigModal session={session} api={excalidrawRef.current} nodeKey={configNode} nameOf={exportNameOf(excalidrawRef.current)} onClose={() => setConfigNode(null)} />}
       {nodeMenu && (
         <NodeMenu
           session={session}
