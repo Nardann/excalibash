@@ -239,7 +239,8 @@ function CapturePanel({ client, iface }: { client: FileClient; iface: string }) 
   };
 
   return (
-    <fieldset className="capture-box">
+    // Enter in a capture field must not submit the cable form: that would close it and cancel the capture.
+    <fieldset className="capture-box" onKeyDown={(e) => e.key === "Enter" && e.target instanceof HTMLInputElement && e.preventDefault()}>
       <legend>Capturer (pcap)</legend>
       {bytes === null ? (
         <>
@@ -261,7 +262,10 @@ function CapturePanel({ client, iface }: { client: FileClient; iface: string }) 
           <button type="button" className="btn" disabled={!valid} onClick={start} title={ifaceOk ? undefined : "Nom d'interface invalide : utilise celui de la machine (eth0, enp3s0, br-lan…)"}>
             Capturer sur {iface.trim() || "…"}
           </button>
-          <span className="field-help">tcpdump tourne sur la machine : l'agent doit être root (ou tcpdump avoir CAP_NET_RAW). Le fichier .pcap arrive chiffré de bout en bout.</span>
+          <span className="field-help">
+            tcpdump tourne sur la machine : l'agent doit être root (ou tcpdump avoir CAP_NET_RAW). La connexion de l'agent au serveur est exclue de la capture.
+            Le fichier .pcap arrive chiffré de bout en bout. Garde cette fenêtre ouverte jusqu'à la fin.
+          </span>
         </>
       ) : (
         <div className="capture-row">
@@ -375,6 +379,12 @@ export function CableEndForm({
           </button>
         </div>
         {capture && iface.trim() && <CapturePanel client={capture} iface={iface} />}
+        {capture === null && iface.trim() && (
+          <span className="field-help">
+            Capture réseau (pcap) : ouvre d'abord un shell local sur la machine de cette extrémité ; la capture passe par lui. Les équipements Telnet / SSH
+            et les formes simples ne peuvent pas capturer.
+          </span>
+        )}
         <div className="modal-actions">
           {(info?.iface || info?.ip || info?.vlans) && (
             <button type="button" className="btn" style={{ marginRight: "auto" }} onClick={() => onSave({})}>
