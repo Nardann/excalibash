@@ -27,6 +27,8 @@ export const config = {
   agentDistDir: resolve(process.env.AGENT_DIST_DIR ?? resolve(root, "agent", "dist")),
   /** Bundled MCP client (excalibash-mcp.mjs) offered for download. */
   mcpDistDir: resolve(process.env.MCP_DIST_DIR ?? resolve(root, "mcp", "dist")),
+  /** Minimum time between two agent update requests for one machine (ms). */
+  updateIntervalMs: numEnv("UPDATE_INTERVAL_MS", 60_000),
   /** Public URL used in agent install commands (falls back to the request's host). */
   publicUrl: process.env.PUBLIC_URL ?? "",
   cookieSecure: process.env.COOKIE_SECURE === "true",

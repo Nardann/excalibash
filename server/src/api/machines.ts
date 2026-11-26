@@ -3,10 +3,11 @@ import { randomBytes } from "node:crypto";
 import { db, isClientId } from "../db.ts";
 import { getUserRow, requireUser, sha256 } from "../auth.ts";
 import { atLeast, getItem, getMachine, isTrashed, linkHolds, machineAccess, roleOn, type MachineRow } from "../access.ts";
-import { parseCaps, disconnectMachine, dropMachine, dropMachineTerminalsWhere, isMachineOnline } from "../terminals.ts";
+import { machineNote, machineSessionCount, parseCaps, disconnectMachine, dropMachine, dropMachineTerminalsWhere, isMachineOnline } from "../terminals.ts";
 import { dropMachineTunnels, dropMachineTunnelsWhere } from "../tunnels.ts";
 import { notify } from "../notify.ts";
 import { probeRefusal, relayProbe } from "../probes.ts";
+import { relayUpdate, updateRefusal } from "../agentUpdate.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 import { pinFor } from "../tls.ts";
 
@@ -24,6 +25,8 @@ function dto(m: MachineRow) {
     arch: m.arch,
     agentVersion: m.agent_version,
     agentCaps: parseCaps(m.agent_caps),
+    agentNote: machineNote(m.id),
+    openSessions: machineSessionCount(m.id),
     lastSeen: m.last_seen,
     online: isMachineOnline(m.id),
     shareBoards: !!m.share_boards,
@@ -42,6 +45,8 @@ function sharedDto(m: MachineRow & { owner_name: string }, key: string) {
     arch: m.arch,
     agentVersion: m.agent_version,
     agentCaps: parseCaps(m.agent_caps),
+    agentNote: machineNote(m.id),
+    openSessions: machineSessionCount(m.id),
     lastSeen: m.last_seen,
     online: isMachineOnline(m.id),
   };
@@ -235,6 +240,22 @@ machinesApi.post("/:id/probe", (req, res, next) => {
   relayProbe(m.id, rid, ts, box)
     .then((answer) => (answer ? res.json({ d: answer }) : res.status(504).json({ error: "La machine ne répond pas" })))
     .catch(next);
+});
+
+// Ask the agent to update itself. Boxed under machine auth like a probe: whoever may open a shell
+// on the machine may ask, and the agent only installs a release signed with its embedded key, so the
+// request grants nothing. The answer is a stream of boxed progress frames, one JSON object per line.
+machinesApi.post("/:id/update", (req, res) => {
+  const { rid, ts, d, boardId } = req.body ?? {};
+  const m = getMachine(pid(req));
+  if (!m || !machineAccess(req.user!.id, m, typeof boardId === "string" ? boardId : null)) throw new HttpError(404, "Machine introuvable");
+  if (!isClientId(rid) || !Number.isSafeInteger(ts)) throw new HttpError(400, "Requête invalide");
+  const box = blob(d, 2000);
+  const refusal = updateRefusal(m.id);
+  if (refusal === "offline") throw new HttpError(409, "Machine hors ligne");
+  if (refusal === "busy") throw new HttpError(409, "Une mise à jour est déjà en cours sur cette machine");
+  if (refusal) throw new HttpError(429, "Une mise à jour a déjà été demandée il y a moins d'une minute");
+  relayUpdate(m.id, rid, ts, box, res);
 });
 
 machinesApi.delete("/:id", (req, res) => {

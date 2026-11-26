@@ -19,6 +19,7 @@ import { installScript, uninstallScript, updateScript } from "./install.ts";
 import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
 import { accountApi } from "./api/account.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
+import { MANIFEST_FILE, latestRelease } from "./agentUpdate.ts";
 import { certificatePem, initTls, pinFor, serve, tlsInfo } from "./tls.ts";
 
 initTls();
@@ -73,6 +74,10 @@ app.get("/api/config", (req, res) => {
 // Small bodies before authentication; large ones (board content, key rotation) only for signed-in users.
 const small = express.json({ limit: "256kb" });
 const large = express.json({ limit: "200mb" });
+// Public metadata: the newest published agent release (the agents check its signature themselves).
+app.get("/api/agent/latest", (_req, res) => {
+  res.set("Cache-Control", "no-store").json(latestRelease());
+});
 app.use("/api/auth", small, authApi);
 app.use("/api/machines/pairings", small, pairingOwnerApi);
 app.use("/api/machines", small, machinesApi);
@@ -102,7 +107,7 @@ const MCP_FILE = /^excalibash-mcp\.mjs$/;
 
 /** Directory a downloadable file lives in, by strict filename match (no path traversal possible). */
 function downloadDir(file: string): string | null {
-  if (AGENT_FILE.test(file)) return config.agentDistDir;
+  if (AGENT_FILE.test(file) || MANIFEST_FILE.test(file)) return config.agentDistDir;
   if (MCP_FILE.test(file)) return config.mcpDistDir;
   return null;
 }
@@ -133,7 +138,7 @@ app.get("/certificate.pem", (_req, res) => {
 
 app.get("/downloads", (_req, res) => {
   const list = (dir: string, re: RegExp) => (existsSync(dir) ? readdirSync(dir).filter((f) => re.test(f)) : []);
-  res.json({ files: [...list(config.agentDistDir, AGENT_FILE), ...list(config.mcpDistDir, MCP_FILE)] });
+  res.json({ files: [...list(config.agentDistDir, AGENT_FILE), ...list(config.agentDistDir, MANIFEST_FILE), ...list(config.mcpDistDir, MCP_FILE)] });
 });
 
 app.get("/downloads/:file", (req, res) => {

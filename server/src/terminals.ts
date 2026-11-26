@@ -406,6 +406,7 @@ function onAgentMessage(machineId: string, msg: any): void {
     case "ws.data":
     case "ws.close":
     case "file.res":
+    case "update.res":
       for (const fn of agentHooks.message) fn(machineId, msg);
       break;
     case "opened":
@@ -434,6 +435,17 @@ function onAgentMessage(machineId: string, msg: any): void {
 }
 
 
+/** Shells open on a machine (an agent update restarts the agent and ends them). */
+export function machineSessionCount(machineId: string): number {
+  let n = 0;
+  for (const t of terms.values()) if (t.machineId === machineId && (t.status === "running" || t.status === "starting")) n++;
+  return n;
+}
+
+const notes = new Map<string, string>();
+/** What the agent said about itself in its last hello (« mise à jour annulée »), or null. */
+export const machineNote = (machineId: string): string | null => notes.get(machineId) ?? null;
+
 function onHello(machineId: string, msg: any): void {
   // No caps in the hello = an agent from before capabilities: stored as null, treated as old.
   const caps = Array.isArray(msg.caps) ? JSON.stringify(parseCaps(msg.caps)) : null;
@@ -446,6 +458,9 @@ function onHello(machineId: string, msg: any): void {
     Date.now(),
     machineId,
   );
+  // A short note the agent adds after a rolled-back update (plain metadata, kept in memory).
+  if (typeof msg.note === "string" && msg.note) notes.set(machineId, msg.note.slice(0, 80));
+  else notes.delete(machineId);
   const alive = new Set<string>(Array.isArray(msg.sessions) ? msg.sessions : []);
   for (const id of alive) {
     const t = terms.get(id);
