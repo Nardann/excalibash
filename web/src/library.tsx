@@ -227,6 +227,22 @@ export async function fetchBoardContent(key: SymKey, boardId: string): Promise<B
   return { elements, files };
 }
 
+export type VersionInfo = { id: number; createdAt: number; count: number; epoch: number };
+
+export const fetchVersions = (boardId: string) => api.get<VersionInfo[]>(`/items/${boardId}/versions`);
+
+/** One history version, decrypted here. Only the images the scene actually shows are decrypted. */
+export async function fetchVersionContent(key: SymKey, boardId: string, versionId: number): Promise<BoardContent> {
+  const c = await api.get<{ elements: Entry[]; files: Record<string, string> }>(`/items/${boardId}/versions/${versionId}`);
+  const elements = await Promise.all(c.elements.map((e) => decryptEntry(key, boardId, e)));
+  const files: Record<string, any> = {};
+  for (const el of elements) {
+    const fid = el.type === "image" && !el.isDeleted ? el.fileId : null;
+    if (fid && c.files[fid] && !files[fid]) files[fid] = await decryptFile(key, boardId, fid, c.files[fid]);
+  }
+  return { elements, files };
+}
+
 export async function duplicateBoard(ctx: Ctx, id: string): Promise<string> {
   const node = ctx.nodes.get(id)!;
   const content = await fetchBoardContent(keyOf(ctx, id), id);

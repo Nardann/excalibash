@@ -2,6 +2,15 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..", "..");
 
+/** Non-negative number from the environment (HISTORY_* settings). */
+function numEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${name}=${raw} : nombre positif attendu`);
+  return n;
+}
+
 const tlsMode = process.env.TLS || "auto";
 if (tlsMode !== "auto" && tlsMode !== "off") throw new Error(`TLS=${tlsMode} : valeurs possibles auto ou off`);
 
@@ -70,4 +79,14 @@ export const config = {
   proxyUrl: process.env.PROXY_URL ?? "",
   /** Encrypted scrollback kept per terminal, replayed to new viewers. */
   scrollbackBytes: Number(process.env.SCROLLBACK_BYTES ?? 768 * 1024),
+  /**
+   * Board history: ciphertext snapshots of the scene, kept per board. `keep` = 0 turns it off.
+   * `intervalMs` = 0 means no minimum delay between two versions (tests only).
+   */
+  history: {
+    keep: numEnv("HISTORY_KEEP", 10),
+    days: numEnv("HISTORY_DAYS", 7),
+    maxBytes: numEnv("HISTORY_MAX_MB", 5) * 1024 * 1024,
+    intervalMs: numEnv("HISTORY_INTERVAL_MIN", 15) * 60_000,
+  },
 };

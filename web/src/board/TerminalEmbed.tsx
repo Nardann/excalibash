@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import { Cable, ChevronDown, ChevronUp, Download, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, Radio, RotateCcw, Search, TerminalSquare, X } from "lucide-react";
+import { Cable, ChevronDown, ChevronUp, Download, FolderOpen, Lock, LockOpen, Maximize2, Minimize2, Monitor, Palette, Power, Radio, RotateCcw, Search, TerminalSquare, X } from "lucide-react";
 import { isRemoteLabel, type BoardSession } from "./collab.ts";
 import { confirmDialog, toast, useTheme } from "../components/ui.tsx";
 import { iconUrl, type TileIcon } from "./personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "./TileCustomizer.tsx";
 import { CastRecorder, bufferToText, exportName, saveBlob } from "./termTools.ts";
+import { FileClient, type Signal } from "./fileTransfer.ts";
+import { FilesPanel } from "./FilesPanel.tsx";
 import { clearBroadcast, fanOut, liveTargets, setBroadcast, toggleBroadcast, useBroadcastGroup } from "./broadcast.ts";
 
 const FONT = '"Cascadia Code", ui-monospace, Menlo, monospace';
@@ -114,6 +116,12 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
   const recRef = useRef<CastRecorder | null>(null);
   const [recording, setRecording] = useState(false);
   const nameRef = useRef("terminal");
+  // File transfers (agent/files.go): only on a running local shell, for editors.
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [dropping, setDropping] = useState(false);
+  const [xfer, setXfer] = useState<{ name: string; done: number; total?: number } | null>(null);
+  const xferSignal = useRef<Signal | null>(null);
+  const client = useMemo(() => new FileClient(session, terminalId), [session, terminalId]);
 
   useEffect(() => {
     const body = bodyRef.current!;
@@ -229,6 +237,39 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     if (!collapsed) setUnread(false);
   }, [collapsed]);
 
+  // Dropping files on a local shell uploads them into its working directory.
+  const canFilesRef = useRef(false);
+  const dropRef = useRef<(e: DragEvent) => void>(() => {});
+  useEffect(() => {
+    const el = rootRef.current!;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
+    const over = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation(); // not for the canvas, which would import the file into the drawing
+      if (e.dataTransfer) e.dataTransfer.dropEffect = canFilesRef.current ? "copy" : "none";
+      setDropping(canFilesRef.current);
+    };
+    const leave = (e: DragEvent) => {
+      if (!e.relatedTarget || !el.contains(e.relatedTarget as Node)) setDropping(false);
+    };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setDropping(false);
+      if (canFilesRef.current) dropRef.current(e);
+    };
+    el.addEventListener("dragover", over);
+    el.addEventListener("dragleave", leave);
+    el.addEventListener("drop", drop);
+    return () => {
+      el.removeEventListener("dragover", over);
+      el.removeEventListener("dragleave", leave);
+      el.removeEventListener("drop", drop);
+    };
+  }, []);
+
   // Keep keys, clipboard and wheel inside the terminal instead of reaching the canvas.
   useEffect(() => {
     const el = rootRef.current!;
@@ -294,6 +335,61 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     el.addEventListener("paste", onPaste, true);
     return () => el.removeEventListener("paste", onPaste, true);
   }, [session, terminalId]);
+
+  const cancelTransfer = () => {
+    if (xferSignal.current) xferSignal.current.aborted = true;
+  };
+  // Runs one transfer at a time; the shell's own state is never touched.
+  const runTransfer = async (name: string, job: (signal: Signal, progress: (done: number, total?: number) => void) => Promise<void>) => {
+    const signal: Signal = { aborted: false };
+    xferSignal.current = signal;
+    setXfer({ name, done: 0 });
+    try {
+      await job(signal, (done, total) => setXfer({ name, done, total }));
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      xferSignal.current = null;
+      setXfer(null);
+    }
+  };
+  const sendFiles = async (files: File[], dir?: string) => {
+    if (xferSignal.current) return toast.error(new Error("Un transfert est déjà en cours"));
+    for (const file of files) {
+      await runTransfer(file.name, async (signal, progress) => {
+        const send = (overwrite: boolean) => client.upload(file, { dir, overwrite, signal, onProgress: progress });
+        let path: string;
+        try {
+          path = await send(false);
+        } catch (e: any) {
+          if (e?.code !== "exists") throw e;
+          const ok = await confirmDialog({
+            title: `Remplacer « ${file.name} » ?`,
+            text: "Un fichier de ce nom existe déjà dans le dossier du shell. Il sera remplacé par le fichier envoyé.",
+            confirm: "Remplacer",
+            danger: true,
+          });
+          if (!ok) return;
+          path = await send(true);
+        }
+        toast(`Envoyé : ${path}`);
+      });
+    }
+  };
+  const fetchFile = (path: string) => {
+    if (xferSignal.current) return toast.error(new Error("Un transfert est déjà en cours"));
+    runTransfer(path.split("/").pop() || path, async (signal, progress) => {
+      const { name, blob } = await client.download(path, { signal, onProgress: progress });
+      saveBlob(blob, name);
+    });
+  };
+  const onDropFiles = (e: DragEvent) => {
+    const files = [...(e.dataTransfer?.items ?? [])].filter((i) => i.kind === "file");
+    if (files.some((i) => i.webkitGetAsEntry?.()?.isDirectory)) return toast.error(new Error("Les dossiers ne sont pas pris en charge : envoie les fichiers un à un"));
+    sendFiles([...(e.dataTransfer?.files ?? [])]);
+  };
+
+  dropRef.current = onDropFiles;
 
   const stopRecording = (auto = false) => {
     const rec = recRef.current;
@@ -374,6 +470,20 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
     else session.closeTerminal(terminalId);
   };
 
+  const isLocal = !isRemoteLabel(info?.label ?? "");
+  const canFiles = session.canEdit && isLocal && status === "running";
+  canFilesRef.current = canFiles;
+  useEffect(() => {
+    if (!canFiles) setFilesOpen(false);
+  }, [canFiles]);
+  const filesHint = !session.canEdit
+    ? "Transfert de fichiers indisponible en lecture seule"
+    : !isLocal
+      ? "Transfert de fichiers disponible seulement sur un shell local (pas en Telnet, SSH ou TCP)"
+      : status !== "running"
+        ? "Transfert de fichiers : le shell doit être en cours d'exécution"
+        : "Fichiers : parcourir le dossier du shell, télécharger, envoyer (ou glisse des fichiers sur la fenêtre)";
+
   const dot = `dot ${status === "running" ? "on" : status === "starting" ? "warn" : ""}`;
   const label = info?.label ?? "Terminal";
   const name = title || label;
@@ -419,6 +529,15 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
             </button>
           </span>
         )}
+        {xfer && (
+          <span className="term-xfer" title={xfer.name}>
+            <progress max={xfer.total ?? undefined} value={xfer.total ? xfer.done : undefined} />
+            <span>{xfer.total ? `${Math.floor((xfer.done / Math.max(xfer.total, 1)) * 100)} %` : `${(xfer.done / 1024 ** 2).toFixed(1)} Mio`}</span>
+            <button title="Annuler le transfert" onClick={cancelTransfer}>
+              <X size={11} />
+            </button>
+          </span>
+        )}
         {!session.canEdit && <span className="status">lecture seule</span>}
         <span className="status">{status ? STATUS_LABEL[status] : "introuvable"}</span>
         {status === "exited" && session.canEdit && (
@@ -436,6 +555,9 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
             <Radio size={14} />
           </button>
         )}
+        <button className={filesOpen ? "on" : undefined} aria-pressed={filesOpen} disabled={!canFiles} title={filesHint} onClick={() => setFilesOpen((v) => !v)}>
+          <FolderOpen size={14} />
+        </button>
         <button title="Rechercher dans l'historique (Ctrl+Maj+F)" aria-pressed={searchOpen} className={searchOpen ? "on" : undefined} onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}>
           <Search size={14} />
         </button>
@@ -480,6 +602,8 @@ export function TerminalEmbed({ session, terminalId, active, collapsed, title, i
         <TileCustomizer machineLabel={label} title={title ?? null} icon={icon ?? null} onSave={onCustomize} onClose={() => setCustomizing(false)} />
       )}
       <div className="term-body" ref={bodyRef}>
+        {dropping && <div className="term-drop">Dépose pour envoyer dans le dossier du shell</div>}
+        {filesOpen && canFiles && <FilesPanel client={client} busy={!!xfer} onDownload={fetchFile} onUpload={sendFiles} onClose={() => setFilesOpen(false)} />}
         {searchOpen && (
           <div className="term-search" role="search">
             <input

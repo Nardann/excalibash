@@ -3,6 +3,7 @@ import { AlertTriangle, Copy, Fingerprint, Gift, Loader2, ShieldCheck, UserMinus
 import { api, type Role } from "../api.ts";
 import { fingerprint, fromB64 } from "../crypto.ts";
 import { checkContact, pathOf, revokeAccess, shareItem, useLibrary, useLibraryCtx, type Member, type Node } from "../library.tsx";
+import { PublicLinks } from "./PublicLinks.tsx";
 import { Avatar, Modal, confirmDialog, copyText, toast } from "./ui.tsx";
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Propriétaire", editor: "Peut modifier", viewer: "Lecture seule" };
@@ -332,6 +333,8 @@ export function ShareModal({ node, onClose, giving = false }: { node: Node; onCl
           Pour donner cet élément à quelqu'un, sors-le d'abord à la racine de « Mes fichiers » (seul un élément à la racine peut changer de propriétaire).
         </p>
       )}
+
+      {node.kind === "board" && !giving && !node.deletedAt && (node.role === "owner" || node.role === "editor") && <PublicLinks node={node} />}
 
       <div className="modal-actions">
         <button className="btn" onClick={() => copyText(`${location.origin}/${node.kind === "board" ? "board" : "folder"}/${node.id}`)}>

@@ -113,10 +113,13 @@ function labelShapes(rect: { x: number; y: number; w: number; h: number; lines: 
 }
 
 /** The scene as it should appear on paper. `nameOf` gives a machine icon's name. */
-export function diagramElements(x: ExcalidrawImperativeAPI, nameOf: (nodeId: string) => string): El[] {
+export const diagramElements = (x: ExcalidrawImperativeAPI, nameOf: (nodeId: string) => string): El[] => diagramShapes(x.getSceneElements(), nameOf);
+
+/** Same, from a list of (non-deleted) elements: also used by the read-only public view. */
+export function diagramShapes(elements: readonly El[], nameOf: (nodeId: string) => string): El[] {
   const out: any[] = [];
   const labels: any[] = [];
-  for (const el of x.getSceneElements()) {
+  for (const el of elements) {
     if (isWindow(el)) continue;
     if (nodeDataOf(el)) {
       out.push(...nodeShapes(el, nameOf(el.id)));

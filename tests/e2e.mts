@@ -9,8 +9,10 @@ const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
-import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 
@@ -115,8 +117,11 @@ function boardSocket(u: U, boardId: string) {
   });
   const next = (pred: (m: any) => boolean, ms = 6000) =>
     new Promise<any>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("timeout waiting for message")), ms);
+      let expired = false;
+      // A timed-out wait must not stay registered: it would swallow a later message meant for another wait.
+      const t = setTimeout(() => ((expired = true), reject(new Error("timeout waiting for message"))), ms);
       const check = () => {
+        if (expired) return true;
         const i = queue.findIndex(pred);
         if (i >= 0) {
           clearTimeout(t);
@@ -383,6 +388,118 @@ ok(out.includes("CLEAR_42"), "Bob tape dans le terminal d'Alice, sortie chiffré
 sb.send(frame);
 const out2 = await termOutput(sb, ktBob, tid2, "CLEAR_42").catch(() => "");
 ok(!out2.includes("CLEAR_42"), "le rejeu d'une frappe par le serveur est ignoré par l'agent");
+
+// File transfer rides on the local shell of tid2 and is sealed with its key: the server relays blind.
+{
+  const fdir = mkdtempSync(join(tmpdir(), "eb-files-"));
+  await sendInput(sb, ktBob, tid2, "bobtab", `cd ${fdir} && echo CWD_$((6*7))\n`);
+  await termOutput(sb, ktBob, tid2, "CWD_42");
+  const seen: string[] = []; // everything the server relayed to the requester
+  const fileReq = async (sock: ReturnType<typeof boardSocket>, key: c.SymKey, op: object) => {
+    const rid = c.randomId();
+    const ts = Date.now();
+    const f = { t: "file.req", term: tid2, rid, ts, d: await c.box(key, c.utf8(JSON.stringify(op)), c.AAD.fileReq(tid2, rid, ts)) };
+    sock.send(f);
+    return { rid, f };
+  };
+  const open = async (key: c.SymKey, m: any) => {
+    seen.push(JSON.stringify(m));
+    return JSON.parse(c.fromUtf8(await c.unbox(key, m.d, c.AAD.fileRes(tid2, m.rid, m.n))));
+  };
+  const fileOne = async (sock: ReturnType<typeof boardSocket>, key: c.SymKey, op: object) => {
+    const { rid } = await fileReq(sock, key, op);
+    const m = await sock.next((x) => (x.t === "file.res" || x.t === "file.err") && x.rid === rid, 10000);
+    return m.t === "file.err" ? { error: m.message } : open(key, m);
+  };
+
+  const name = "SECRET_NOM_FICHIER_42.txt";
+  const content = Buffer.from("CONTENU_SECRET_FICHIER_42\n".repeat(50));
+  const xfer = c.randomId();
+  const begun = await fileOne(sb, ktBob, { op: "put", xfer, name, size: content.length });
+  const chunked = await fileOne(sb, ktBob, { op: "chunk", xfer, n: 0, data: c.toB64(content) });
+  const ended = await fileOne(sb, ktBob, { op: "end", xfer, sha256: createHash("sha256").update(content).digest("hex") });
+  ok(begun.ok && chunked.ok && ended.ok && ended.path === join(fdir, name), "envoi d'un fichier dans le dossier du shell, par un éditeur");
+  ok(readFileSync(join(fdir, name)).equals(content), "le fichier arrive sur le disque de la machine avec le bon contenu");
+  const dup = await fileOne(sb, ktBob, { op: "put", xfer: c.randomId(), name, size: 1 });
+  ok(dup.code === "exists", "écraser un fichier existant est refusé sans confirmation");
+  const evil = await fileOne(sb, ktBob, { op: "put", xfer: c.randomId(), name: "../evil", size: 1 });
+  ok(!!evil.error, "un nom avec un chemin est refusé");
+
+  const listing = await fileOne(sb, ktBob, { op: "ls" });
+  ok(listing.cwd === fdir && listing.entries.some((e: any) => e.name === name && e.size === content.length), "ls liste le fichier envoyé");
+
+  const gx = c.randomId();
+  const { rid: grid } = await fileReq(sb, ktBob, { op: "get", xfer: gx, path: name });
+  const parts: Buffer[] = [];
+  for (let n = 0; ; n++) {
+    const m = await sb.next((x) => x.t === "file.res" && x.rid === grid, 10000);
+    const body = await open(ktBob, m);
+    if (body.data) parts.push(Buffer.from(c.fromB64(body.data)));
+    if (m.end) {
+      ok(body.sha256 === createHash("sha256").update(content).digest("hex"), "get : l'empreinte finale correspond");
+      break;
+    }
+    await fileReq(sb, ktBob, { op: "ack", xfer: gx, n: n + 1 }); // answered by nothing
+  }
+  ok(Buffer.concat(parts).equals(content), "get renvoie exactement les mêmes octets");
+
+  // Replay of a captured request: the agent answers once.
+  const { rid: rrid, f: rframe } = await fileReq(sb, ktBob, { op: "ls" });
+  await sb.next((x) => x.t === "file.res" && x.rid === rrid, 10000);
+  sb.send(rframe);
+  const echo = await sb.next((x) => (x.t === "file.res" || x.t === "file.err") && x.rid === rrid, 1500).then(() => true, () => false);
+  ok(!echo, "le rejeu d'une requête de fichier est ignoré par l'agent");
+  // An answer is never sent to someone else than the requester.
+  const aliceHeard = await sa.next((x) => x.t === "file.res", 800).then(() => true, () => false);
+  ok(!aliceHeard, "les réponses de fichier ne sont envoyées qu'à celui qui les a demandées");
+
+  // A viewer is refused by the server.
+  await as(alice, async () => {
+    nA = await tree(alice);
+    const X = await lib.createItem(ctxOf(alice, nA), "board", null, "Tableau lecture seule", { elements: [], files: {} });
+    nA = await tree(alice);
+    await lib.shareItem(ctxOf(alice, nA), X, bobPub, "viewer");
+    const keyX = nA.get(X)!.key!;
+    const tx = c.randomId();
+    const ktx = await c.newSymKey();
+    const sx = boardSocket(alice, X);
+    await sx.open;
+    await sx.next((m) => m.t === "init");
+    sx.send({
+      t: "term.create", reqId: "rx", id: tx, machineId: machine.id, cols: 80, rows: 24,
+      keyForBoard: await c.wrapKey(keyX, ktx, c.AAD.termKey(X, tx)),
+      keyForAgent: await c.box(mAlice.auth, ktx.raw, c.AAD.termAgent(tx)),
+      encLabel: await c.boxText(keyX, "laptop-alice", c.AAD.termLabel(X, tx)),
+    });
+    await sx.next((m) => m.t === "term.created" && m.reqId === "rx");
+    await sx.next((m) => m.t === "term" && m.terminal.id === tx && m.terminal.status === "running", 8000);
+    const viewer = boardSocket(bob, X);
+    await viewer.open;
+    const vinit = await viewer.next((m) => m.t === "init");
+    ok(vinit.you.role === "viewer", "Bob est lecteur sur ce tableau");
+    const rid = c.randomId();
+    const ts = Date.now();
+    viewer.send({ t: "file.req", term: tx, rid, ts, d: await c.box(ktx, c.utf8(JSON.stringify({ op: "ls" })), c.AAD.fileReq(tx, rid, ts)) });
+    const refused = await viewer.next((m) => m.t === "file.err" && m.rid === rid, 4000);
+    ok(/lecture seule/i.test(refused.message), "un lecteur ne peut pas transférer de fichiers");
+    // The owner's own request on the same terminal works, so the refusal was about the role.
+    const rid2 = c.randomId();
+    const ts2 = Date.now();
+    sx.send({ t: "file.req", term: tx, rid: rid2, ts: ts2, d: await c.box(ktx, c.utf8(JSON.stringify({ op: "ls" })), c.AAD.fileReq(tx, rid2, ts2)) });
+    const okAnswer = await sx.next((m) => m.t === "file.res" && m.rid === rid2, 8000);
+    ok(!!okAnswer, "l'éditeur obtient sa réponse sur le même terminal");
+    viewer.ws.close();
+    sx.ws.close();
+  });
+
+  // Nothing about the file ever appears in clear: not in the database, the server log, nor the frames relayed.
+  await new Promise((r) => setTimeout(r, 500));
+  const fs = await import("node:fs");
+  const haystacks = [DB, `${DB}-wal`, `${dirname(DB)}/server.log`].filter((p) => fs.existsSync(p)).map((p) => fs.readFileSync(p).toString("latin1"));
+  haystacks.push(seen.join("\n"));
+  const needles = [name, "SECRET_NOM_FICHIER", "CONTENU_SECRET_FICHIER", fdir, c.toB64(content).slice(0, 40)];
+  ok(haystacks.every((h) => needles.every((n) => !h.includes(n))), "ni le nom, ni le contenu, ni le dossier du fichier n'apparaissent en clair côté serveur");
+}
 
 // Telnet to a device reachable from the machine (a fake switch): the target is sealed with the key.
 const IAC = 255, DO = 253, WILL = 251, ECHO = 1, SGA = 3;
@@ -913,6 +1030,198 @@ site.close();
   chmodSync(cfgFile, 0o600);
   const out = await run(["logout", "--config", cfgFile]);
   ok(out.code === 0 && !existsSync(cfgFile), "MCP : logout supprime la configuration");
+}
+
+// Public read-only links: created with real crypto, read without any account, gone after a key rotation.
+{
+  const pl = await import("../web/src/publicLinks.ts");
+  const { createHash } = await import("node:crypto");
+  (globalThis as any).location = { origin: BASE };
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  const parts = (url: string) => ({ token: new URL(url).pathname.split("/")[2], key: new URL(url).hash.slice(1) });
+  const pubGet = (token: string, headers: Record<string, string> = {}) => realFetch(`${BASE}/api/public/${token}`, { headers });
+  const db2 = new DatabaseSync(DB);
+
+  let nL = await tree(alice);
+  const F2 = await lib.createItem(ctxOf(alice, nL), "folder", null, "Dossier jury");
+  nL = await tree(alice);
+  const sceneRect = { ...rect, id: "pubrect", label: "PUBLIC_VISIBLE_42" };
+  const win = { ...rect, id: "pubwin", type: "embeddable", customData: { terminalId: "TERM_SECRET_ID" } };
+  const nodeEl = { ...rect, id: "pubnode", customData: { node: true, title: "Routeur", shells: [{ terminalId: "TERM_SECRET_ID" }], machineId: "MACHINE_SECRET", machineName: "laptop-secret", remote: { machineId: "x", target: { kind: "ssh", host: "10.9.9.9", port: 22 } } } };
+  const P = await lib.createItem(ctxOf(alice, nL), "board", F2, "Plan public", { elements: [sceneRect], files: {} });
+  nL = await tree(alice);
+  const keyP = nL.get(P)!.key!;
+  // Windows and node data cannot be written through createItem (it drops terminals): put them in the way a client would.
+  db2.prepare("UPDATE boards SET elements = ? WHERE id = ?").run(
+    JSON.stringify(await Promise.all([sceneRect, win, nodeEl].map((e) => encryptEntry(keyP, P, e)))),
+    P,
+  );
+  await as(alice, () => lib.shareItem(ctxOf(alice, nL), F2, { id: bob.user.id, email: "bob@test.local", publicKey: bob.user.publicKey }, "editor"));
+  await as(alice, () => lib.shareItem(ctxOf(alice, nL), F2, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+  const board = (n: Map<string, lib.Node>) => ({ id: P, key: n.get(P)!.key!, epoch: n.get(P)!.epoch, name: n.get(P)!.name });
+
+  const url1 = await as(alice, () => pl.createPublicLink(board(nL), "Pour le jury", 7));
+  const { token, key: frag } = parts(url1);
+  ok(/^\/v\/[A-Za-z0-9_-]{22}$/.test(new URL(url1).pathname) && frag.length === 43, "lien public : URL /v/<jeton 128 bits>#<clé 256 bits>");
+
+  const r1 = await pubGet(token);
+  const body1 = (await r1.json()) as any;
+  ok(r1.status === 200 && /no-store/.test(r1.headers.get("cache-control") ?? ""), "lien public : lu sans compte, Cache-Control no-store");
+  const linkKey = pl.linkKeyFromFragment(frag)!;
+  const scene = await pl.decryptPublic(body1, linkKey);
+  ok(scene.title === "Plan public", "lien public : titre déchiffré avec la clé du lien");
+  ok(scene.elements.some((e: any) => e.id === "pubrect" && e.label === "PUBLIC_VISIBLE_42"), "lien public : élément déchiffré avec la clé du fragment");
+  ok(!scene.elements.some((e: any) => e.id === "pubwin"), "lien public : les fenêtres de terminal sont écartées");
+  const nodeOut = scene.elements.find((e: any) => e.id === "pubnode");
+  ok(!!nodeOut && !/TERM_SECRET_ID|MACHINE_SECRET|laptop-secret|10\.9\.9\.9/.test(JSON.stringify(scene)), "lien public : les tuiles perdent terminaux, machine et cible distante");
+  const wrongKey = await pl.decryptPublic(body1, c.randomBytes(32)).then(() => true, () => false);
+  ok(!wrongKey, "lien public : une autre clé ne déchiffre rien");
+  ok(!JSON.stringify(body1).includes("Plan public") && !JSON.stringify(body1).includes("PUBLIC_VISIBLE_42"), "lien public : le serveur ne sert que des chiffrés");
+
+  const etag = r1.headers.get("etag")!;
+  ok((await pubGet(token, { "if-none-match": etag })).status === 304, "lien public : 304 tant que rien n'a changé");
+
+  // Stored hashed, never raw; neither the token nor the key reach the database or the logs.
+  const rows = JSON.stringify(db2.prepare("SELECT * FROM board_links").all());
+  const logText = readFileSync(`${dirname(DB)}/server.log`, "utf8");
+  ok(rows.includes(sha(token)) && !rows.includes(token) && !rows.includes(frag), "lien public : base = hachage du jeton, ni jeton ni clé du lien");
+  ok(!logText.includes(token) && !logText.includes(frag), "lien public : ni jeton ni clé du lien dans les logs du serveur");
+  ok(!rows.includes("Pour le jury") && !rows.includes("Plan public"), "lien public : libellé et titre chiffrés dans la base");
+
+  // Who can manage links.
+  const carolTry = await as(carol, () => api("POST", `/items/${P}/links`, { publicId: "0123456789abcdef", epoch: nL.get(P)!.epoch, wrappedKey: "AAAA" }));
+  ok(carolTry.status === 403, "lien public : un lecteur ne peut pas créer de lien");
+  ok((await as(carol, () => api("GET", `/items/${P}/links`))).status === 403, "lien public : un lecteur ne voit pas les liens");
+  const nBL = await tree(bob);
+  const urlBob = await as(bob, () => pl.createPublicLink(board(nBL), "Par Bob", null));
+  const listed = await as(alice, () => pl.listPublicLinks(P, keyP));
+  ok(listed.length === 2 && listed.some((l) => l.label === "Pour le jury" && l.createdBy === "Alice") && listed.some((l) => l.label === "Par Bob" && l.createdBy === "Bob" && l.expiresAt === null), "lien public : un éditeur crée, la liste montre libellés déchiffrés, auteurs et expirations");
+  ok((await as(carol, () => api("DELETE", `/items/${P}/links/${listed[0].publicId}`))).status === 403, "lien public : un lecteur ne supprime pas de lien");
+  ok((await as(bob, () => api("DELETE", `/items/${P}/links/${listed.find((l) => l.label === "Par Bob")!.publicId}`))).status === 200, "lien public : un éditeur supprime un lien");
+  ok((await pubGet(parts(urlBob).token)).status === 404, "lien public : supprimé, il répond 404");
+
+  // Expired, unknown and malformed tokens answer the same way.
+  const urlExp = await as(alice, () => pl.createPublicLink(board(nL), "Court", 1));
+  db2.prepare("UPDATE board_links SET expires_at = 1 WHERE token_hash = ?").run(sha(parts(urlExp).token));
+  const exp = await pubGet(parts(urlExp).token);
+  const unknown = await pubGet(c.toB64(c.randomBytes(16)));
+  const malformed = await pubGet("nope");
+  const [bExp, bUnk, bMal] = await Promise.all([exp.text(), unknown.text(), malformed.text()]);
+  ok(exp.status === 404 && unknown.status === 404 && malformed.status === 404 && bExp === bUnk && bUnk === bMal, "lien public : expiré, inconnu et mal formé répondent identiquement (404)");
+
+  // Trash hides the board from link holders; restoring brings it back.
+  await as(alice, () => api("DELETE", `/items/${P}`));
+  ok((await pubGet(token)).status === 404, "lien public : 404 quand le tableau est à la corbeille");
+  await as(alice, () => api("POST", `/items/${P}/restore`));
+  ok((await pubGet(token)).status === 200, "lien public : de nouveau lisible après restauration");
+
+  // Limit per board.
+  let last = 200;
+  for (let i = 0; i < 25 && last === 200; i++) {
+    const publicId = [...c.randomBytes(8)].map((x) => x.toString(16).padStart(2, "0")).join("");
+    last = (await as(alice, () => api("POST", `/items/${P}/links`, { publicId, epoch: nL.get(P)!.epoch, wrappedKey: "AAAA" }))).status;
+  }
+  ok(last === 400 && (db2.prepare("SELECT COUNT(*) AS n FROM board_links WHERE board_id = ?").get(P) as any).n === 20, "lien public : 20 liens au plus par tableau");
+  db2.prepare("DELETE FROM board_links WHERE board_id = ? AND public_id != ?").run(P, body1.publicId);
+
+  // Rate limit, per IP (X-Forwarded-For is honoured behind a local proxy).
+  let throttled = 0;
+  for (let i = 0; i < 70; i++) if ((await pubGet(c.toB64(c.randomBytes(16)), { "x-forwarded-for": "7.7.7.7" })).status === 429) throttled++;
+  ok(throttled > 0, "lien public : limitation de débit par IP");
+
+  // Revoking someone rotates every key: the links made under the old keys are deleted with them.
+  nL = await tree(alice);
+  const epochBefore = nL.get(P)!.epoch;
+  await as(alice, () => lib.revokeAccess(ctxOf(alice, nL), F2, carol.user.id));
+  ok((await pubGet(token)).status === 404, "lien public : supprimé par la rotation des clés (membre retiré)");
+  ok((db2.prepare("SELECT COUNT(*) AS n FROM board_links WHERE board_id = ?").get(P) as any).n === 0, "lien public : plus aucun lien en base après rotation");
+  nL = await tree(alice);
+  ok(nL.get(P)!.epoch === epochBefore + 1, "lien public : le tableau est passé à l'époque suivante");
+  const urlNew = await as(alice, () => pl.createPublicLink(board(nL), "Après rotation", 1));
+  const bodyNew = (await (await pubGet(parts(urlNew).token)).json()) as any;
+  const sceneNew = await pl.decryptPublic(bodyNew, pl.linkKeyFromFragment(parts(urlNew).key)!);
+  ok(bodyNew.epoch === epochBefore + 1 && sceneNew.elements.some((e: any) => e.id === "pubrect"), "lien public : un nouveau lien fonctionne avec les nouvelles clés");
+
+  // Deleting the board deletes its links.
+  await as(alice, () => api("DELETE", `/items/${P}`));
+  await as(alice, () => api("DELETE", `/items/${P}?permanent=1`));
+  ok((db2.prepare("SELECT COUNT(*) AS n FROM board_links").get() as any).n === 0 && (await pubGet(parts(urlNew).token)).status === 404, "lien public : supprimé avec le tableau");
+  db2.close();
+}
+
+// Board history: ciphertext snapshots, deduplicated per element, retention, purge on rotation.
+// (The server runs with HISTORY_INTERVAL_MIN=0: a version at every flush; HISTORY_KEEP=3.)
+{
+  nA = await tree(alice);
+  const H = await as(alice, () => lib.createItem(ctxOf(alice, nA), "board", null, "Historique"));
+  nA = await tree(alice);
+  await as(alice, () => lib.shareItem(ctxOf(alice, nA), H, bobPub, "viewer"));
+  let hKey = (await tree(alice)).get(H)!.key!;
+  const box = (id: string, version: number, label: string) => ({ id, type: "rectangle", version, versionNonce: Math.floor(Math.random() * 1e9), x: 0, y: 0, width: 10, height: 10, isDeleted: false, label });
+  const versions = async (u: U = alice) => (await as(u, () => api("GET", `/items/${H}/versions`))).body as { id: number; createdAt: number; count: number; epoch: number }[];
+  const stored = () => (rw.prepare("SELECT COUNT(*) AS n FROM board_entries WHERE board_id = ?").get(H) as any).n as number;
+  /** Connects, optionally writes the given entries, leaves (the end of the session captures a version). */
+  async function session(u: U, key: c.SymKey, els: any[], raw?: any[]) {
+    const s = boardSocket(u, H);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    const entries = raw ?? (await Promise.all(els.map((e) => encryptEntry(key, H, e))));
+    if (entries.length) s.send({ t: "scene", epoch: init.epoch, elements: entries });
+    const err = entries.length ? await s.next((m) => m.t === "error", 400).catch(() => null) : null;
+    s.ws.close();
+    await s.closed;
+    await new Promise((r) => setTimeout(r, 150));
+    return { entries, err, init };
+  }
+
+  ok((await versions()).length === 0, "historique : aucun version pour un tableau vide");
+  const a1 = box("ha", 1, "HISTSECRET_ONE");
+  const b1 = box("hb", 1, "HISTSTABLE");
+  await session(alice, hKey, [a1, b1]);
+  const afterOne = await versions();
+  ok(afterOne.length === 1 && afterOne[0].count === 2, "historique : une première version enregistrée en fin de session");
+  const second = await session(alice, hKey, [box("ha", 2, "HISTSECRET_TWO")]);
+  ok((await versions()).length === 2, "historique : une modification ajoute une version");
+  ok(stored() === 3, "historique : l'élément inchangé n'est stocké qu'une fois (3 chiffrés pour 2 versions)");
+  await session(alice, hKey, []);
+  ok((await versions()).length === 2, "historique : un état identique n'ajoute pas de version");
+  const replay = await session(alice, hKey, [], second.entries);
+  ok(replay.err === null && (await versions()).length === 2 && stored() === 3, "historique : un envoi non plus récent n'ajoute rien");
+
+  const list = await versions();
+  ok(list[0].id > list[1].id && list[0].epoch === 0, "historique : liste du plus récent au plus ancien");
+  const getV = async (id: number, u: U = alice) => (await as(u, () => api("GET", `/items/${H}/versions/${id}`))).body;
+  const old = await getV(list[1].id);
+  const oldEls = await Promise.all(old.elements.map((e: any) => decryptEntry(hKey, H, e)));
+  ok(oldEls.length === 2 && oldEls.some((e: any) => e.label === "HISTSECRET_ONE") && !oldEls.some((e: any) => e.label === "HISTSECRET_TWO"), "historique : la version ancienne se déchiffre dans son état d'alors");
+  const cur = await getV(list[0].id);
+  const curEls = await Promise.all(cur.elements.map((e: any) => decryptEntry(hKey, H, e)));
+  ok(curEls.some((e: any) => e.label === "HISTSECRET_TWO") && curEls.some((e: any) => e.label === "HISTSTABLE") && typeof cur.files === "object", "historique : la version récente contient l'état courant");
+  ok((await as(alice, () => api("GET", `/items/${H}/versions/999999`))).status === 404, "historique : version inconnue : 404");
+  const dump = JSON.stringify(rw.prepare("SELECT data FROM board_entries WHERE board_id = ?").all(H)) + JSON.stringify(rw.prepare("SELECT hashes FROM board_versions WHERE board_id = ?").all(H));
+  ok(!dump.includes("HISTSECRET") && !dump.includes("HISTSTABLE"), "historique : aucun texte en clair dans la base");
+
+  // A viewer can browse but not write; a stranger sees nothing.
+  const asViewer = await versions(bob);
+  ok(asViewer.length === 2 && (await getV(list[1].id, bob)).elements.length === 2, "historique : un lecteur peut consulter les versions");
+  const viewerWrite = await session(bob, hKey, [box("ha", 9, "HACK")]);
+  ok(viewerWrite.err?.message === "Lecture seule" && (await versions()).length === 2, "historique : un lecteur ne peut toujours pas écrire");
+  ok((await as(bob, () => api("GET", `/items/${B}/versions`))).status === 404, "historique : pas d'accès aux versions d'un tableau non partagé");
+
+  // Retention (HISTORY_KEEP=3): oldest versions and their now-unreferenced entries go.
+  for (let v = 3; v <= 6; v++) await session(alice, hKey, [box("ha", v, `HISTSECRET_V${v}`)]);
+  const kept = await versions();
+  ok(kept.length === 3 && !kept.some((v) => v.id === list[1].id), "historique : rétention, seules les 3 dernières versions restent");
+  const referenced = new Set((rw.prepare("SELECT hashes FROM board_versions WHERE board_id = ?").all(H) as any[]).flatMap((r) => JSON.parse(r.hashes)));
+  ok(stored() === referenced.size && stored() === 4, "historique : les chiffrés orphelins sont supprimés");
+
+  // Key rotation: history sealed under the old key is purged; a new one starts.
+  await as(alice, () => lib.revokeAccess(ctxOf(alice, nA), H, bob.user.id));
+  ok((await versions()).length === 0 && stored() === 0, "historique : la rotation des clés purge l'historique");
+  hKey = (await tree(alice)).get(H)!.key!;
+  await session(alice, hKey, [box("ha", 7, "HISTSECRET_NEW")]);
+  const fresh = await versions();
+  ok(fresh.length === 1 && fresh[0].epoch === 1 && (await getV(fresh[0].id)).elements.length > 0, "historique : une nouvelle version repart avec les nouvelles clés");
 }
 
 // Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).
