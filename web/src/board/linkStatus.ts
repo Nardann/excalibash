@@ -6,16 +6,16 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { api } from "../api.ts";
 import { AAD, boxJson, randomId, unboxJson } from "../crypto.ts";
 import type { Machine } from "../vault.ts";
-import { cableOf, type End } from "./cables.ts";
+import { cableOf, vlanParts, type End } from "./cables.ts";
 import { findEl, nodeDataOf } from "./nodes.ts";
 
 export type LinkState = { up: boolean; ms?: number; from: string };
-/** By `${cableId}:${end}`: the reachability of the IP written at that end. */
+/** By `${cableId}:${end}` (the IP written at that end) or `${cableId}:${end}:v${vlan}` (its address in a VLAN): its reachability. */
 export type LinkStates = Record<string, LinkState>;
 
 /** The address part of what was typed ("10.0.0.1/24" → "10.0.0.1"), or null. */
-export function ipOf(v?: string): string | null {
-  const ip = v?.trim().split("/")[0].replace(/^\[|\]$/g, "");
+export function ipOf(v?: unknown): string | null {
+  const ip = typeof v !== "string" ? undefined : v.trim().split("/")[0].replace(/^\[|\]$/g, "");
   return ip && /^[0-9A-Fa-f:.]{2,45}$/.test(ip) ? ip : null;
 }
 
@@ -48,16 +48,23 @@ export function planProbes(x: ExcalidrawImperativeAPI, liveMachine: (nodeId: str
     const hint = nd.remote?.machineId ?? nd.machineId;
     return liveMachine(anchorId) ?? (hint && inUse.has(hint) ? hint : null);
   };
-  for (const el of x.getSceneElements()) {
-    const c = cableOf(el);
-    if (!c) continue;
-    for (const [end, other] of [["a", "b"], ["b", "a"]] as [End, End][]) {
-      const ip = ipOf(c.ends?.[end]?.ip);
-      const machineId = machineOf(c[other].id);
-      if (!ip || !machineId) continue;
-      const list = plan.get(machineId) ?? [];
-      list.push({ ip, key: `${el.id}:${end}` });
-      plan.set(machineId, list);
+  // Two passes: the ends' own IPs first, then the VLAN addresses, so that a cable carrying many
+  // VLANs never pushes the ends' IPs out of the 32 addresses probed per machine.
+  for (const vlans of [false, true]) {
+    for (const el of x.getSceneElements()) {
+      const c = cableOf(el);
+      if (!c) continue;
+      for (const [end, other] of [["a", "b"], ["b", "a"]] as [End, End][]) {
+        const info = c.ends?.[end];
+        const machineId = info && machineOf(c[other].id);
+        if (!info || !machineId) continue;
+        const targets = vlans
+          ? vlanParts(info).withIp.map(([v, vip]) => ({ ip: ipOf(vip), key: `${el.id}:${end}:v${v}` }))
+          : [{ ip: ipOf(info.ip), key: `${el.id}:${end}` }];
+        const list = plan.get(machineId) ?? [];
+        for (const t of targets) if (t.ip) list.push({ ip: t.ip, key: t.key });
+        if (list.length) plan.set(machineId, list);
+      }
     }
   }
   return plan;
