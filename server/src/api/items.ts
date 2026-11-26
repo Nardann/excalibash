@@ -7,6 +7,7 @@ import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 import { purgeHistory } from "../history.ts";
+import { MAX_DOC_BYTES, isDocId, listDocs, replaceDocs, type RotatedDoc } from "../docs.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
 import { recheckBoardSessions } from "./machines.ts";
 import { linksApi } from "./links.ts";
@@ -238,6 +239,24 @@ itemsApi.get("/items/:id/content", (req, res) => {
   res.json({ epoch: item.key_epoch, elements: JSON.parse(row.elements), files: JSON.parse(row.files) });
 });
 
+// ---- Shared documents (ciphertext only; see docs.ts) ----------------------------------------
+
+/** Every document of a board with its stored ciphertext: what a client needs to re-encrypt them (key rotation). */
+itemsApi.get("/items/:id/docs", (req, res) => {
+  const { item } = need(req, "viewer");
+  if (item.kind !== "board") throw new HttpError(400, "Ce n'est pas un tableau");
+  res.set("Cache-Control", "no-store").json(listDocs(item.id));
+});
+
+function rotatedDocs(v: unknown): RotatedDoc[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new HttpError(400, "Documents invalides");
+  return v.map((d) => {
+    if (!d || !isDocId(d.doc) || !Number.isSafeInteger(d.upto) || d.upto < 0) throw new HttpError(400, "Document invalide");
+    return { doc: d.doc, upto: d.upto, d: blob(d.d, MAX_DOC_BYTES) };
+  });
+}
+
 // ---- Board history (ciphertext copies; decrypted in the browser) -------------------------
 
 itemsApi.get("/items/:id/versions", (req, res) => {
@@ -439,6 +458,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
     return { id: cur.id, keyForBoard: blob(t.keyForBoard), keyForAgent: blob(t.keyForAgent, 4000), encLabel: blob(t.encLabel) };
   });
 
+  const docsIn = new Map<string, RotatedDoc[]>(boardsIn.map((b: any) => [b.id, rotatedDocs(b.docs)]));
+
   const now = Date.now();
   tx(() => {
     // The revoked member may have seen public link tokens and keys: every link of the rotated boards dies with the old keys.
@@ -456,6 +477,11 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
         b.preview ? blob(b.preview, 8_000_000) : null,
         b.id,
       );
+    }
+    // Shared documents hold people's work: they are re-encrypted, never purged. If one was written or
+    // created since the client read them, everything rolls back and the client starts over.
+    for (const b of boardsIn) {
+      if (!replaceDocs(b.id, docsIn.get(b.id)!)) throw new HttpError(409, "Les documents ont changé pendant la rotation, on recommence");
     }
     // Old versions are sealed under the previous key: they cannot be re-encrypted by the server.
     purgeHistory(boards);

@@ -160,6 +160,75 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
 - La restauration laisse intacts les terminaux et sites (fenêtres) et les liens des machines, pour ne jamais
   couper un shell en cours.
 
+## Documents partagés (code et notebooks)
+
+Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128 bits tiré au hasard par le navigateur, rattaché
+à **un** tableau. Le serveur ne comprend rien à son contenu : il ordonne, stocke et relaie des chiffrés.
+
+| Donnée | AAD |
+|---|---|
+| Mise à jour ou instantané Yjs : `box(K_b, octets)` | `eb:doc:<boardId>:<docId>:<epoch>` |
+| Présence (curseurs, noms, sélections) : `box(K_b, octets)` | `eb:doc-aw:<boardId>:<docId>:<epoch>` |
+
+- Sur la socket du tableau : `doc.sub` (tout membre, lecteurs compris) → `doc.state {snap?, ups}` puis la socket reste abonnée ;
+  `doc.up` (éditeurs) est numéroté (`seq` strictement croissant par document), relayé aux autres abonnés et acquitté
+  (`doc.ack`) ; `doc.aw` (tout membre) est relayé sans être stocké, au plus 10 messages par seconde et par socket ;
+  `doc.snap` (éditeurs) est une compaction faite par le navigateur : l'instantané remplace l'ancien et toutes les mises à
+  jour jusqu'à `upto`, en une transaction. Le serveur demande la compaction (`doc.compact`) à un éditeur quand un document
+  dépasse 200 mises à jour ou 1 Mio de mises à jour.
+- Plafonds : une trame de mise à jour 512 Kio, la présence 32 Kio, un instantané 4 Mio, un document 8 Mio
+  (instantané compris, au-delà `doc.up` est refusé), 64 documents par tableau, 64 documents ouverts par socket.
+  Les identifiants sont validés strictement (22 caractères base64url).
+- **Ce que le serveur voit** : le nombre de documents d'un tableau, la taille et la date de chaque mise à jour, leur rythme
+  et le nombre de mises à jour en attente de compaction, qui est abonné. **Il ne voit jamais** le texte, le code, les
+  cellules, les curseurs ni les noms affichés dans la présence.
+- **Lecteurs** : ils reçoivent l'état et la présence, mais le serveur refuse leurs `doc.up` et `doc.snap`
+  (« Lecture seule ») sans rien changer au document stocké. Comme pour les terminaux, ils ont la clé : c'est une
+  restriction d'accès, pas une garantie cryptographique.
+- **Intégrité** : un chiffré déplacé vers un autre document, un autre tableau ou une autre génération de clés
+  ne s'authentifie pas (AAD). Une mise à jour qui échoue à l'authentification est ignorée par le navigateur, qui renonce
+  alors à compacter ce document plutôt que d'effacer ce qu'il n'a pas pu lire. Le serveur peut en revanche **retenir,
+  retarder ou supprimer** des mises à jour (déni de service) ; il ne peut pas en fabriquer. Comme pour l'historique,
+  une mise à jour authentique rejouée est sans effet (Yjs est idempotent).
+- **Rotation des clés** : les documents contiennent le travail des gens, ils ne sont donc **pas supprimés**. Le navigateur du
+  propriétaire récupère chaque document (`GET /api/items/:id/docs`), le déchiffre avec l'ancienne clé, fusionne instantané
+  et mises à jour en un seul état et le re-chiffre en instantané sous la nouvelle clé et le nouvel epoch. Le serveur remplace
+  les lignes de tous les documents du tableau dans la transaction de rotation, et seulement si l'ensemble des documents et
+  le dernier `seq` de chacun n'ont pas bougé depuis la lecture (sinon 409 et le navigateur recommence, aucune modification
+  n'est perdue). Les abonnés sont déconnectés par le code 4409 comme pour le reste du tableau.
+- La suppression définitive d'un tableau supprime ses documents.
+- **Fenêtres de code** : le document est un `Y.Text` (contenu) et un `Y.Map` (nom, langage, chemin sur la machine, empreinte
+  SHA-256 du dernier état lu ou écrit), donc chiffré comme n'importe quel document : le serveur ne voit ni le code, ni le
+  nom du fichier, ni son chemin. Monaco et ses workers sont servis par l'application elle-même (fichiers du même
+  domaine, sans `eval` ni `blob:` : la CSP est inchangée). Un fichier de la machine est lu et écrit par le canal de fichiers du
+  shell local (voir « Fichiers et captures »), jamais par le serveur : « Enregistrer » relit d'abord le fichier de la
+  machine et demande confirmation s'il a changé depuis l'ouverture. « Exécuter dans le terminal » ne tape dans un shell
+  qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
+  membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
+  du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
+- **Suppression définitive** : quand une fenêtre de code ou de notebook est retirée pour de bon (icône supprimée, ou fenêtre
+  « retirée », pas seulement masquée), l'éditeur qui l'a fait envoie `doc.del {doc}`. Le serveur applique les mêmes
+  contrôles que `doc.up` (éditeur, génération de clés courante ; il n'exige pas d'être abonné puisque la fenêtre est
+  déjà fermée), supprime les lignes de ce document, pour ce tableau seulement, et prévient les abonnés (`doc.gone {doc}`,
+  qui cessent d'envoyer). Annuler la suppression d'une icône (Ctrl+Z) la ramène avec un document vide.
+- **Notebooks** : un document de notebook est un `Y.Array` de cellules (`Y.Text` du source, sorties au format nbformat 4,
+  compteur d'exécution) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
+  le code, ni les sorties, ni les images, ni le nom du fichier. Une sortie trop grosse pour une mise à jour
+  (256 Kio) est remplacée par une note, un flux est plafonné à 1 Mio et un total à 3 Mio par cellule. Le fichier `.ipynb`
+  lui-même est lu et écrit par le canal de fichiers du shell local, comme pour le code (même contrôle de modification).
+- **Affichage des sorties de notebook (modèle de rendu).** Les sorties sont des *données* écrites par le noyau, donc par
+  n'importe quel code que n'importe quel éditeur a lancé, et par tout éditeur à travers le document partagé. Elles ne
+  s'exécutent jamais dans l'origine de l'application : le texte, les flux et les tracebacks (codes ANSI convertis en
+  styles par une table fixe, ou retirés) deviennent des nœuds texte (jamais `innerHTML`) ; une image PNG, JPEG ou GIF
+  devient un `<img src="data:…">` après contrôle strict de l'alphabet base64 ; tout le reste (`text/html`, SVG,
+  Markdown, JavaScript) ne s'affiche que dans un `<iframe sandbox="" srcdoc="…">` : aucun script, aucune origine commune,
+  ni formulaire, ni fenêtre, ni navigation du haut. Le document du cadre porte en plus une CSP
+  (`default-src 'none'; img-src data:`) et hérite de celle de l'application ; le JavaScript d'une sortie n'est pas exécuté,
+  seulement affiché. Le Markdown des cellules est converti par `marked` (sans assainisseur : il n'en a pas besoin, son
+  résultat n'entre que dans un cadre isolé). Le texte affiché est plafonné (1 Mio, « sortie tronquée »). Les widgets
+  Jupyter ne sont pas pris en charge. Reste possible dans un cadre isolé : un lien ou une redirection `meta refresh` fait
+  charger une adresse (comme ouvrir un lien), sans rien lire de l'application.
+
 ## Machines et terminaux
 
 - Ajout d'une machine : **le navigateur** génère la clé privée X25519 de l'agent (32 octets). Elle
@@ -232,6 +301,41 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
   il pré-remplit le formulaire, que l'utilisateur relit et valide, comme la cible d'un équipement.
 - L'option « Équipement ancien » n'ajoute des algorithmes faibles (`diffie-hellman-group1-sha1`,
   `ssh-rsa`, `ssh-dss`, CBC, `hmac-sha1`) qu'à la session qui la demande.
+
+## Noyau Jupyter (carnets collaboratifs)
+
+- Un troisième genre de session distante, `jupyter`, ne se connecte à aucun équipement : l'agent lance sur
+  la machine un pont Python (embarqué dans le binaire, `python3 -u -I -c`) qui pilote un noyau Jupyter
+  (`jupyter_client` + `ipykernel` du Python de la machine) et dialogue avec lui en lignes JSON sur
+  l'entrée et la sortie standard (tubes, sans terminal). Ces lignes circulent dans le même flux
+  chiffré qu'un terminal : même clé de terminal, mêmes trames, même anti-rejeu.
+- **Autorité : celle d'un shell local.** Le noyau exécute du code Python arbitraire avec les droits de
+  l'utilisateur de l'agent. La cible `{kind:"jupyter", cwd?, kernel?}` n'est donc acceptée que dans une clé
+  de terminal scellée sous `machineAuth` (AAD `eb:term:<id>`), comme les autres cibles distantes : seuls le
+  propriétaire de la machine et ceux à qui elle est partagée peuvent en créer une. Le serveur ne peut ni la
+  fabriquer, ni la modifier, ni lire le code, les résultats ou les images ; une rotation de clé ne change pas la
+  cible. Les données d'un tableau (que tout éditeur écrit) ne suffisent jamais à lancer un noyau.
+- Validation par l'agent : `cwd` absolu ou en `~/…` (512 octets au plus, sans NUL ni saut de ligne), `kernel`
+  limité à `[A-Za-z0-9._-]{1,64}` (défaut `python3`), aucun hôte, port, utilisateur ni rebond. Ces valeurs
+  sont passées comme arguments (jamais interprétées par un shell).
+- Tous les participants de la session partagent un seul noyau (état, variables, file d'exécution). Les
+  lignes d'entrée sont limitées à 2 Mio ; une sortie unique à 8 Mio et le total d'une exécution à 32 Mio
+  (le surplus est remplacé par un message). Le pont ne lance rien d'autre que ce que le noyau exécute.
+- À la fermeture de la session (ou du pont), le noyau est arrêté ; il ne survit pas à son pont. Le serveur ne
+  voit que la taille et le rythme des trames.
+- **Notebooks : un noyau partagé, choix assumé.** Le notebook garde l'identifiant de la session de noyau dans son
+  document (`meta.kernelTerm`) : tous les participants utilisent le même noyau, comme ils se partagent un shell.
+  *Démarrer* un noyau exige `machineAuth` (la même condition que pour une session distante : le navigateur demande
+  d'abord confirmation) ; en revanche **tout éditeur du tableau peut ensuite exécuter du code dans ce noyau**, avec
+  les droits de l'agent de la machine, exactement comme un éditeur peut taper dans un shell local partagé. Les lecteurs
+  reçoivent les sorties (ils ont la clé) mais le serveur refuse leurs frappes. Écrire un autre identifiant dans
+  `meta.kernelTerm` ne donne rien de plus : la clé du terminal n'est donnée qu'aux membres du tableau, et le navigateur
+  ne ferme que des sessions dont le libellé est celui d'un noyau. Une cellule est exécutée par un seul client, celui de la personne
+  qui a cliqué (identifiant `<cellule>:<aléa>` gardé en mémoire locale) : lui seul écrit les sorties de cet identifiant dans
+  le document, les autres lisent le même flux et n'écrivent rien. Si l'exécuteur disparaît en cours de route, tout
+  éditeur qui voit une cellule « en cours » dont l'identifiant n'est dans la présence de personne depuis 5 s la termine
+  (compteur du `done` vu, ou noyau au repos) ; les sorties produites après le départ de l'exécuteur ne sont pas conservées.
+  Les clients MCP qui savent écrire dans un terminal peuvent aussi parler à ce noyau, comme à n'importe quel shell.
 
 ## Tunnels web
 

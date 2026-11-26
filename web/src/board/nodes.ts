@@ -5,39 +5,50 @@ import { CaptureUpdateAction, convertToExcalidrawElements, newElementWith } from
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { cd, nodeDataOf } from "./nodeData.ts";
-import type { NodeData, ShellRef, WebRef, RemoteRef, Geometry } from "./nodeData.ts";
+import type { NodeData, ShellRef, WebRef, CodeRef, NotebookRef, RemoteRef, Geometry } from "./nodeData.ts";
 import type { TileIcon } from "./personalLibrary.ts";
 export { nodeDataOf };
-export type { NodeData, ShellRef, WebRef, RemoteRef };
+export type { NodeData, ShellRef, WebRef, CodeRef, NotebookRef, RemoteRef };
 
 export const LINK_BASE = "https://excalibash.local/";
 export const TERMINAL_LINK = `${LINK_BASE}terminal/`;
 const WEB_LINK = `${LINK_BASE}web/`;
+const CODE_LINK = `${LINK_BASE}code/`;
+const NOTEBOOK_LINK = `${LINK_BASE}notebook/`;
 const NODE_LINK = `${LINK_BASE}node/`;
 export const TERM_W = 760;
 export const TERM_H = 440;
+export const CODE_W = 760;
+export const CODE_H = 520;
+export const NOTEBOOK_W = 820;
+export const NOTEBOOK_H = 620;
 export const NODE_SIZE = 110;
 const GAP = 40;
 
 type El = ExcalidrawElement;
 type Api = ExcalidrawImperativeAPI;
 
-/** The two kinds of windows a node can own. */
+/**
+ * The kinds of windows a node can own. `field` is the key in the window's customData, `ref` the
+ * key of its entry in the node's list (they differ for code: `codeId` in the window, `docId` in the node).
+ */
 const KINDS = {
-  terminal: { field: "terminalId", list: "shells", link: TERMINAL_LINK, w: TERM_W, h: TERM_H },
-  web: { field: "webId", list: "webs", link: WEB_LINK, w: 900, h: 580 },
+  terminal: { field: "terminalId", ref: "terminalId", list: "shells", link: TERMINAL_LINK, w: TERM_W, h: TERM_H },
+  web: { field: "webId", ref: "webId", list: "webs", link: WEB_LINK, w: 900, h: 580 },
+  code: { field: "codeId", ref: "docId", list: "codes", link: CODE_LINK, w: CODE_W, h: CODE_H },
+  notebook: { field: "notebookId", ref: "docId", list: "notebooks", link: NOTEBOOK_LINK, w: NOTEBOOK_W, h: NOTEBOOK_H },
 } as const;
 type Kind = keyof typeof KINDS;
 
 
-/** A shell or site window (as opposed to a drawing or a node tile). */
-export const isWindow = (el: El | null | undefined): boolean => !!(cd(el).terminalId || cd(el).webId);
+/** A shell, site or code window (as opposed to a drawing or a node tile). */
+export const isWindow = (el: El | null | undefined): boolean => !!(cd(el).terminalId || cd(el).webId || cd(el).codeId || cd(el).notebookId);
 
 /** The node a window belongs to (undefined for standalone, older terminals). */
 export const windowNodeId = (el: El | null | undefined): string | undefined =>
-  cd(el).terminalId || cd(el).webId ? cd(el).nodeId : undefined;
+  isWindow(el) ? cd(el).nodeId : undefined;
 
-const kindOf = (el: El): Kind | undefined => (cd(el).webId ? "web" : cd(el).terminalId ? "terminal" : undefined);
+const kindOf = (el: El): Kind | undefined => (cd(el).webId ? "web" : cd(el).codeId ? "code" : cd(el).notebookId ? "notebook" : cd(el).terminalId ? "terminal" : undefined);
 
 function embeddable(x: number, y: number, w: number, h: number, link: (id: string) => string, customData: Record<string, unknown>): El {
   const [base] = convertToExcalidrawElements([
@@ -56,6 +67,8 @@ function openWindow(api: Api, kind: Kind, id: string) {
 /** The visible window of a shell, if it is open. */
 export const openWindowOf = (api: Api, terminalId: string) => openWindow(api, "terminal", terminalId);
 export const openWebWindowOf = (api: Api, webId: string) => openWindow(api, "web", webId);
+export const openCodeWindowOf = (api: Api, docId: string) => openWindow(api, "code", docId);
+export const openNotebookWindowOf = (api: Api, docId: string) => openWindow(api, "notebook", docId);
 
 function commit(api: Api, changed: El[], added: El[] = [], appState?: object) {
   const byId = new Map(changed.map((e) => [e.id, e]));
@@ -113,12 +126,16 @@ function add(api: Api, kind: Kind, nodeId: string, id: string, machineId?: strin
     machineId && !data.remote && (!data.machineId || data.machineId === machineId)
       ? { machineId, ...(machineName ? { machineName } : {}) }
       : {};
-  commit(api, [newElementWith(node, { customData: { ...data, ...learn, [k.list]: [...refsOf(data, kind), { [k.field]: id }] } })]);
+  commit(api, [newElementWith(node, { customData: { ...data, ...learn, [k.list]: [...refsOf(data, kind), { [k.ref]: id }] } })]);
   open(api, kind, nodeId, id);
 }
 export const addShell = (api: Api, nodeId: string, terminalId: string, machineId?: string, machineName?: string) =>
   add(api, "terminal", nodeId, terminalId, machineId, machineName);
 export const addWeb = (api: Api, nodeId: string, webId: string, machineId?: string, machineName?: string) => add(api, "web", nodeId, webId, machineId, machineName);
+/** Adds a code window (shared document `docId`) to a node and opens it. */
+export const addCode = (api: Api, nodeId: string, docId: string) => add(api, "code", nodeId, docId);
+/** Adds a notebook window (shared document `docId`) to a node and opens it. */
+export const addNotebook = (api: Api, nodeId: string, docId: string) => add(api, "notebook", nodeId, docId);
 
 function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
   const k = KINDS[kind];
@@ -131,11 +148,11 @@ function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
   const data = nodeDataOf(node);
   if (!node || !data) return;
   const refs = refsOf(data, kind);
-  const i = Math.max(0, refs.findIndex((r) => r[k.field] === id));
+  const i = Math.max(0, refs.findIndex((r) => r[k.ref] === id));
   const ref = refs[i] ?? {};
-  // Web views open below the node, shells to its right: their default spots don't overlap.
+  // Web views and code open below the node, shells to its right: their default spots don't overlap.
   const geometry =
-    kind === "web"
+    kind !== "terminal"
       ? { x: ref.x ?? node.x + i * 28, y: ref.y ?? node.y + node.height + GAP + i * 28, width: ref.w ?? k.w, height: ref.h ?? k.h }
       : { x: ref.x ?? node.x + node.width + GAP + i * 28, y: ref.y ?? node.y + i * 28, width: ref.w ?? k.w, height: ref.h ?? k.h };
   // Reuse the hidden window when there is one: no pile of deleted elements.
@@ -151,6 +168,8 @@ function open(api: Api, kind: Kind, nodeId: string, id: string, focus = true) {
 }
 export const openShell = (api: Api, nodeId: string, terminalId: string, focus = true) => open(api, "terminal", nodeId, terminalId, focus);
 export const openWeb = (api: Api, nodeId: string, webId: string, focus = true) => open(api, "web", nodeId, webId, focus);
+export const openCode = (api: Api, nodeId: string, docId: string, focus = true) => open(api, "code", nodeId, docId, focus);
+export const openNotebook = (api: Api, nodeId: string, docId: string, focus = true) => open(api, "notebook", nodeId, docId, focus);
 
 const overlap = (a: El, b: El) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
@@ -219,7 +238,7 @@ export function hideShell(api: Api, windowId: string) {
   if (node && data) {
     const k = KINDS[kind];
     const id = cd(win)[k.field];
-    const refs = refsOf(data, kind).map((r) => (r[k.field] === id ? { ...r, x: win.x, y: win.y, w: win.width, h: win.height } : r));
+    const refs = refsOf(data, kind).map((r) => (r[k.ref] === id ? { ...r, x: win.x, y: win.y, w: win.width, h: win.height } : r));
     changed.push(newElementWith(node, { customData: { ...data, [k.list]: refs } }));
   }
   commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
@@ -232,12 +251,14 @@ function toggle(api: Api, kind: Kind, nodeId: string, id: string) {
 }
 export const toggleShell = (api: Api, nodeId: string, terminalId: string) => toggle(api, "terminal", nodeId, terminalId);
 export const toggleWeb = (api: Api, nodeId: string, webId: string) => toggle(api, "web", nodeId, webId);
+export const toggleCode = (api: Api, nodeId: string, docId: string) => toggle(api, "code", nodeId, docId);
+export const toggleNotebook = (api: Api, nodeId: string, docId: string) => toggle(api, "notebook", nodeId, docId);
 
 /** Opens every window of a node, or hides them all if any is open. */
 export function toggleAll(api: Api, nodeId: string) {
   const data = nodeDataOf(findEl(api, nodeId));
   if (!data) return;
-  const items = (["terminal", "web"] as Kind[]).flatMap((kind) => refsOf(data, kind).map((r) => ({ kind, id: r[KINDS[kind].field] as string })));
+  const items = (["terminal", "web", "code", "notebook"] as Kind[]).flatMap((kind) => refsOf(data, kind).map((r) => ({ kind, id: r[KINDS[kind].ref] as string })));
   const open_ = items.map((it) => openWindow(api, it.kind, it.id)).filter(Boolean) as El[];
   if (open_.length) for (const w of open_) hideShell(api, w.id);
   else items.forEach((it, i) => open(api, it.kind, nodeId, it.id, i === items.length - 1));
@@ -287,6 +308,26 @@ export function removeWeb(api: Api, nodeId: string, webId: string) {
   const changed: El[] = [];
   if (node && data) changed.push(newElementWith(node, { customData: { ...data, webs: (data.webs ?? []).filter((w) => w.webId !== webId) } }));
   for (const e of all(api)) if (cd(e).webId === webId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
+  commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
+}
+
+/** Removes a code window from its node (the shared document itself stays on the server). */
+export function removeCode(api: Api, nodeId: string, docId: string) {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  const changed: El[] = [];
+  if (node && data) changed.push(newElementWith(node, { customData: { ...data, codes: (data.codes ?? []).filter((c) => c.docId !== docId) } }));
+  for (const e of all(api)) if (cd(e).codeId === docId && cd(e).nodeId === nodeId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
+  commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
+}
+
+/** Removes a notebook window from its node (the caller discards the shared document and its kernel). */
+export function removeNotebook(api: Api, nodeId: string, docId: string) {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  const changed: El[] = [];
+  if (node && data) changed.push(newElementWith(node, { customData: { ...data, notebooks: (data.notebooks ?? []).filter((c) => c.docId !== docId) } }));
+  for (const e of all(api)) if (cd(e).notebookId === docId && cd(e).nodeId === nodeId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
   commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
 }
 

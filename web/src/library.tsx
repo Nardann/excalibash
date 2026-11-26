@@ -23,6 +23,7 @@ import {
 } from "./crypto.ts";
 import { checkContact, listMachines, loadPlacements, pinContact, setPlacement as savePlacement } from "./vault.ts";
 import { decryptEntry, decryptFile, encryptEntry, encryptPreview, reencryptFile } from "./board/boardCrypto.ts";
+import { reencryptDoc, type StoredDoc } from "./board/docCrypto.ts";
 
 export type Node = Omit<RawItem, "encName" | "keyWrap"> & {
   name: string;
@@ -333,7 +334,12 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
         const files: Record<string, string> = {};
         for (const [fid, c] of Object.entries(b.files)) files[fid] = await reencryptFile(ok, nk, b.id, fid, c);
         const preview = b.preview ? await boxText(nk, await unboxText(ok, b.preview, AAD.preview(b.id)), AAD.preview(b.id)) : null;
-        return { id: b.id, elements, files, preview };
+        // Shared documents (code, notebooks) are merged and re-encrypted as one snapshot each, never dropped.
+        // The server refuses the rotation if one of them was written since (409: we start over).
+        const stored = await api.get<StoredDoc[]>(`/items/${b.id}/docs`);
+        const epoch = snap.items.find((i) => i.id === b.id)!.epoch + 1;
+        const docs = await Promise.all(stored.map((d) => reencryptDoc(b.id, d, ok, nk, epoch)));
+        return { id: b.id, elements, files, preview, docs };
       }),
     );
 

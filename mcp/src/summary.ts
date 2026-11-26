@@ -96,8 +96,8 @@ export function summarize(opts: { name: string; role: Role; elements: Map<string
   }
 
   const other = els.length - texts.length - nodes.length - cables.length;
-  const windows = els.filter((e) => cd(e).terminalId || cd(e).webId).length;
-  if (other > 0) out.push("", `Autres éléments graphiques : ${Math.max(0, other - windows)} (formes, flèches, images…), fenêtres de terminal/site : ${windows}.`);
+  const windows = els.filter((e) => cd(e).terminalId || cd(e).webId || cd(e).codeId || cd(e).notebookId).length;
+  if (other > 0) out.push("", `Autres éléments graphiques : ${Math.max(0, other - windows)} (formes, flèches, images…), fenêtres de terminal/site/code/notebook : ${windows}.`);
 
   const text = out.join("\n");
   return text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) + "\n[… résumé tronqué à 20 000 caractères]" : text;

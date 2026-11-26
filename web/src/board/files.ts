@@ -6,12 +6,16 @@ import { isWindow } from "./nodes.ts";
 
 /** Renders a scene to an SVG string for dashboard thumbnails (Excalidraw is loaded on demand). */
 export async function renderPreview(elements: readonly any[], files: Record<string, any>, background = "#ffffff"): Promise<string | null> {
-  // Terminal windows would export as a bare URL placeholder: draw them as dark panes, and
+  // Terminal and code windows would export as a bare URL placeholder: draw them as dark panes, and
   // machine nodes as their library icon (or a small box).
   const visible = elements
     .filter((e) => !e.isDeleted)
     .flatMap((e): any[] => {
       if (e.customData?.node) return nodePreview(e);
+      if (e.customData?.notebookId)
+        return [{ ...e, type: "rectangle", link: null, backgroundColor: "#fafafa", fillStyle: "solid", strokeColor: "#f97316", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
+      if (e.customData?.codeId)
+        return [{ ...e, type: "rectangle", link: null, backgroundColor: "#1e1e1e", fillStyle: "solid", strokeColor: "#3b82f6", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       if (e.customData?.webId)
         return [{ ...e, type: "rectangle", link: null, backgroundColor: "#ffffff", fillStyle: "solid", strokeColor: "#1e293b", strokeWidth: 2, roughness: 0, roundness: { type: 3 } }];
       if (e.customData?.terminalId)
@@ -37,7 +41,7 @@ export async function savePreview(boardId: string, key: SymKey, epoch: number, e
 /** Node tiles stay as drawings (title, icon) but lose their shells, sites, machine and remote links. */
 function stripNodeRefs<T extends { customData?: Record<string, any> }>(e: T): T {
   if (!e.customData?.node) return e;
-  const { shells: _s, webs: _w, machineId: _m, machineName: _n, remote: _r, ...rest } = e.customData;
+  const { shells: _s, webs: _w, codes: _c, notebooks: _nb, machineId: _m, machineName: _n, remote: _r, ...rest } = e.customData;
   return { ...e, customData: rest };
 }
 

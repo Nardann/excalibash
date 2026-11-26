@@ -30,6 +30,9 @@ Polices d'Excalidraw servies par l'application (copiées depuis `@excalidraw/exc
 | hash-wasm | MIT | <https://github.com/Daninet/hash-wasm> |
 | date-fns | MIT | <https://github.com/date-fns/date-fns> |
 | Lucide | ISC | <https://github.com/lucide-icons/lucide> |
+| Monaco Editor (`monaco-editor`), y-monaco | MIT | <https://github.com/microsoft/monaco-editor>, <https://github.com/yjs/y-monaco> |
+| Yjs, y-protocols, lib0 | MIT | <https://github.com/yjs/yjs>, <https://github.com/yjs/y-protocols>, <https://github.com/dmonad/lib0> |
+| marked (Markdown des notebooks, rendu dans un cadre isolé) | MIT | <https://github.com/markedjs/marked> |
 
 ## Serveur
 

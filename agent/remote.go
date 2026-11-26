@@ -45,6 +45,9 @@ type target struct {
 	LegacyHostKey bool   `json:"legacyHostKey"`
 	LegacyCiphers bool   `json:"legacyCiphers"`
 	HostKeyCheck  string `json:"hostKeyCheck"`
+	// Jupyter only: working directory of the kernel (absolute or ~/…) and kernel name.
+	Cwd    string `json:"cwd,omitempty"`
+	Kernel string `json:"kernel,omitempty"`
 	// Via: SSH jump hosts, first one reached from this machine (like ssh -J). The target is
 	// reached from the last one, whatever its kind.
 	Via []target `json:"via"`
@@ -87,6 +90,8 @@ func parseTarget(raw json.RawMessage) (*target, error) {
 // validate checks and completes one hop or target.
 func (t *target) validate() error {
 	switch t.Kind {
+	case "jupyter":
+		return t.validateJupyter()
 	case "telnet", "ssh", "raw":
 	default:
 		return badTarget("type de connexion inconnu")
@@ -141,14 +146,18 @@ func startRemote(t target, cols, rows uint16) *remote {
 		ended: make(chan struct{}), cols: cols, rows: rows,
 	}
 	go func() {
-		hostname, _ := os.Hostname()
-		r.printf("\x1b[90mConnexion à %s (%s) depuis %s%s…\x1b[0m\r\n", t.addr(), t.Kind, hostname, t.viaText())
+		if t.Kind != "jupyter" { // a Jupyter stream carries protocol lines only
+			hostname, _ := os.Hostname()
+			r.printf("\x1b[90mConnexion à %s (%s) depuis %s%s…\x1b[0m\r\n", t.addr(), t.Kind, hostname, t.viaText())
+		}
 		var code int
 		switch t.Kind {
 		case "telnet":
 			code = r.runTelnet()
 		case "ssh":
 			code = r.runSSH()
+		case "jupyter":
+			code = r.runJupyter()
 		default:
 			code = r.runRaw()
 		}
@@ -197,7 +206,12 @@ func (t target) viaText() string {
 	return " par " + strings.Join(hops, ", ")
 }
 
-func (r *remote) describe() string { return r.t.Kind + " " + r.t.userAddr() + r.t.viaText() }
+func (r *remote) describe() string {
+	if r.t.Kind == "jupyter" {
+		return r.t.describeJupyter()
+	}
+	return r.t.Kind + " " + r.t.userAddr() + r.t.viaText()
+}
 
 func (r *remote) resize(cols, rows uint16) {
 	r.mu.Lock()

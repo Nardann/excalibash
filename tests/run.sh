@@ -17,8 +17,11 @@ sleep 1.5
 BASE="http://127.0.0.1:$PORT" PROXY="http://127.0.0.1:$PROXY_PORT" DB="$DATA/excalibash.db" npx --yes tsx@4 tests/e2e.mts
 kill $SERVER 2>/dev/null || true
 
-# Export de topologie, génération de config et vérification du schéma (fonctions pures, sans serveur).
+# Export de topologie, génération de config, vérification du schéma, protocole du noyau, fenêtres de code et notebooks (fonctions pures, sans serveur).
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/topology.test.ts
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/configGen.test.ts
 node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/schemaCheck.test.ts
+node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/kernelProtocol.test.ts
+node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/code.test.ts
+node --disable-warning=ExperimentalWarning --experimental-strip-types web/src/board/notebook.test.ts
 TLS_PORT=${TLS_PORT:-6791} TLS_PROXY_PORT=${TLS_PROXY_PORT:-6792} node --disable-warning=ExperimentalWarning tests/tls.mts

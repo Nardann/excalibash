@@ -9,6 +9,16 @@ type El = ExcalidrawElement;
 export type Geometry = { x?: number; y?: number; w?: number; h?: number };
 export type ShellRef = Geometry & { terminalId: string };
 export type WebRef = Geometry & { webId: string };
+/** A shared code document (see sharedDoc.ts): `docId` is the id of its Yjs document. */
+export type CodeRef = Geometry & { docId: string };
+/** A shared notebook document: same shape, its own list and window kind. */
+export type NotebookRef = Geometry & { docId: string };
+/** 128 random bits, base64url (same rule as the server's). */
+export const DOC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+/** Most code windows one node may own (the server caps documents per board at 64). */
+export const MAX_CODES = 32;
+/** Most notebook windows one node may own. */
+export const MAX_NOTEBOOKS = 32;
 /** A device reached over Telnet / SSH through an agent: new shells of its icon reopen this target. */
 export type RemoteRef = { machineId: string; target: RemoteTarget };
 /**
@@ -21,6 +31,8 @@ export type NodeData = {
   icon?: TileIcon | null;
   shells: ShellRef[];
   webs?: WebRef[];
+  codes?: CodeRef[];
+  notebooks?: NotebookRef[];
   remote?: RemoteRef;
   machineId?: string;
   /** Name of that machine, so the icon keeps its label once its last shell is closed. */
@@ -42,6 +54,18 @@ const geometry = (r: Record<string, unknown>): Geometry => {
 function refs<T extends string>(v: unknown, field: T): (Geometry & Record<T, string>)[] {
   if (!Array.isArray(v)) return [];
   return v.filter((r) => r && typeof r === "object" && str(r[field])).map((r) => ({ ...geometry(r), [field]: r[field] }) as Geometry & Record<T, string>);
+}
+/** Code and notebook windows: strict document ids, no duplicates, at most `max`. */
+function docRefs(v: unknown, max: number): CodeRef[] {
+  const seen = new Set<string>();
+  const out: CodeRef[] = [];
+  for (const r of refs(v, "docId")) {
+    if (!DOC_ID_RE.test(r.docId) || seen.has(r.docId)) continue;
+    seen.add(r.docId);
+    out.push(r);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 const KINDS_OK = ["telnet", "ssh", "raw"];
 const bool = (v: unknown) => v === true;
@@ -82,6 +106,8 @@ export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => {
     icon,
     shells: refs(raw.shells, "terminalId"),
     webs: refs(raw.webs, "webId"),
+    codes: docRefs(raw.codes, MAX_CODES),
+    notebooks: docRefs(raw.notebooks, MAX_NOTEBOOKS),
     ...(remoteRef(raw.remote) ? { remote: remoteRef(raw.remote) } : {}),
     ...(str(raw.machineId) ? { machineId: raw.machineId } : {}),
     ...(str(raw.machineName) ? { machineName: raw.machineName } : {}),

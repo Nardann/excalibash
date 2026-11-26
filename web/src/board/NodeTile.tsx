@@ -9,6 +9,8 @@ export function NodeTile(p: {
   session: BoardSession;
   shells: string[];
   webCount?: number;
+  codeCount?: number;
+  notebookCount?: number;
   openCount: number;
   title?: string | null;
   icon?: TileIcon | null;
@@ -43,6 +45,8 @@ export function NodeTile(p: {
   const shellsText = [
     `${p.shells.length} shell${p.shells.length > 1 ? "s" : ""}`,
     webs ? `${webs} site${webs > 1 ? "s" : ""}` : "",
+    p.codeCount ? `${p.codeCount} fichier${p.codeCount > 1 ? "s" : ""} de code` : "",
+    p.notebookCount ? `${p.notebookCount} notebook${p.notebookCount > 1 ? "s" : ""}` : "",
     p.openCount ? `${p.openCount} ouvert${p.openCount > 1 ? "s" : ""}` : "",
   ]
     .filter(Boolean)
