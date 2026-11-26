@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, FileCode2, FilePlus2, FolderOpen, Globe, NotebookPen, NotebookText, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, FileCode2, FilePlus2, FolderOpen, Globe, NotebookPen, NotebookText, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, RefreshCw, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -12,6 +12,8 @@ import { HistoryPanel } from "../board/HistoryPanel.tsx";
 import { ConfigModal } from "../board/ConfigModal.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
+import { UpdateDialog, useLatestRelease } from "../components/AgentUpdate.tsx";
+import { classify } from "../agentUpdate.ts";
 import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
@@ -209,6 +211,11 @@ function Editor({ node }: { node: Node }) {
   /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
   const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Machines with a shell or a site on this board that this user can use, to offer updating their agents.
+  const latestRelease = useLatestRelease();
+  const [boardMachines, setBoardMachines] = useState<Machine[]>([]);
+  const [updatingAgents, setUpdatingAgents] = useState(false);
+  const refreshBoardMachines = useRef<() => void>(() => {});
   /** "Vérifier le schéma": the last report (never stored in the scene), and whether there is anything to check. */
   const [schema, setSchema] = useState<SchemaReport | null>(null);
   const [schemaPossible, setSchemaPossible] = useState(false);
@@ -275,6 +282,28 @@ function Editor({ node }: { node: Node }) {
     setMachineBoard(editor ? { id: node.id, key: node.key! } : null);
     return () => setMachineBoard(null);
   }, [node.id, node.key, editor]);
+
+  useEffect(() => {
+    if (!latestRelease?.signed) {
+      setBoardMachines([]);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      if (!inUse.size) return alive && setBoardMachines([]);
+      const all = await listMachines(keys).catch(() => null);
+      if (alive && all) setBoardMachines(all.filter((m) => inUse.has(m.id)));
+    };
+    refreshBoardMachines.current = () => void tick();
+    void tick();
+    const timer = setInterval(tick, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [latestRelease, session, keys, editor]);
+  const outdatedAgents = latestRelease ? boardMachines.filter((m) => classify(m, latestRelease) === "outdated").length : 0;
 
   // Our machines get linked to this board when we open a shell or a site on them (linkMachine);
   // here the links are kept in step: removed once the machine has no session here, refreshed
@@ -1220,6 +1249,16 @@ function Editor({ node }: { node: Node }) {
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
+        {outdatedAgents > 0 && (
+          <button
+            className="btn btn-sm"
+            data-testid="update-agents-button"
+            title="Met à jour les agents des machines de ce tableau (version signée, redémarrage de l'agent)"
+            onClick={() => setUpdatingAgents(true)}
+          >
+            <RefreshCw size={16} /> Mettre à jour les agents ({outdatedAgents})
+          </button>
+        )}
         <button className="btn btn-icon btn-sm" title="Exporter le schéma (image, topologie Containerlab, Mermaid, JSON)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
           <Download size={16} />
         </button>
@@ -1265,6 +1304,9 @@ function Editor({ node }: { node: Node }) {
         />
         <CaptureDock manager={captures} />
         {schema && <SchemaPanel report={schema} editor={editor} labelOf={schemaEndLabel} onFix={fixSchema} onRecheck={() => void runSchema()} onClose={() => setSchema(null)} />}
+        {updatingAgents && latestRelease && (
+          <UpdateDialog machines={boardMachines} latest={latestRelease} boardId={node.id} onClose={() => setUpdatingAgents(false)} onChanged={() => refreshBoardMachines.current()} />
+        )}
         {historyOpen && <HistoryPanel boardId={node.id} boardKey={node.key!} api={excalidraw} editor={editor} onClose={() => setHistoryOpen(false)} />}
         {editor && dock.length > 0 && (
           <WindowDock

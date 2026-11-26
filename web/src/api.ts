@@ -32,6 +32,10 @@ export type RawMachine = {
   /** What the agent announced: its version and features (empty: an agent from before the list existed). */
   agentVersion: string | null;
   agentCaps: string[];
+  /** Said by the agent in its hello after a rolled-back update (« mise à jour annulée »). */
+  agentNote?: string | null;
+  /** Shells open on the machine (an update restarts the agent and ends them). */
+  openSessions?: number;
   lastSeen: number | null;
   online: boolean;
   shareBoards: boolean;
@@ -49,6 +53,8 @@ export type RawSharedMachine = {
   /** What the agent announced: its version and features (empty: an agent from before the list existed). */
   agentVersion: string | null;
   agentCaps: string[];
+  agentNote?: string | null;
+  openSessions?: number;
   lastSeen: number | null;
   online: boolean;
 };

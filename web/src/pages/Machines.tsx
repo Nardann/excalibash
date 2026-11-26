@@ -21,6 +21,7 @@ import { ShareMachineModal } from "../components/ShareMachineModal.tsx";
 import { UpdateHowTo, useUpdateCommand } from "../components/AgentOutdated.tsx";
 import { FEATURES, KNOWN_CAPS, missingCaps, needsUpdate } from "../agentCaps.ts";
 import { useUser } from "../auth.tsx";
+import { MachineUpdate, useLatestRelease } from "../components/AgentUpdate.tsx";
 
 type Enrollment = Awaited<ReturnType<typeof createMachine>> & { name: string };
 
@@ -35,6 +36,7 @@ export function Machines() {
   const [sharing, setSharing] = useState<Machine | null>(null);
   const [updating, setUpdating] = useState<Machine | null>(null);
   const user = useUser();
+  const latest = useLatestRelease();
   const mine = machines?.filter((m) => m.access === "owner") ?? null;
   const sharedWithMe = machines?.filter((m) => m.access === "shared") ?? [];
 
@@ -171,6 +173,7 @@ export function Machines() {
                 </div>
                 {m.lastSeen && <AgentVersion m={m} />}
               </div>
+              <MachineUpdate machine={m} latest={latest} onChanged={load} />
               {m.lastSeen && needsUpdate(m.agentCaps) && (
                 <button className="btn btn-sm" title="Montre la commande qui met l'agent à jour sur la machine" onClick={() => setUpdating(m)}>
                   <RefreshCw size={16} /> Mettre à jour l'agent
@@ -517,6 +520,11 @@ function AgentVersion({ m }: { m: Machine }) {
       {old && (
         <span className="badge-update" style={{ marginLeft: 8, color: "var(--danger)", fontWeight: 600 }} title={`Manque : ${missingCaps(m.agentCaps).join(", ")}`}>
           à mettre à jour
+        </span>
+      )}
+      {m.agentNote && (
+        <span style={{ marginLeft: 8, color: "var(--danger)", fontWeight: 600 }} data-testid="agent-note" title="La dernière mise à jour automatique n'a pas abouti : l'ancienne version a été remise en place">
+          {m.agentNote}
         </span>
       )}
     </div>
