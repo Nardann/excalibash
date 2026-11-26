@@ -11,13 +11,18 @@ import (
 	"testing"
 )
 
-// fakePairing approves the first registered key, sealing auth to sealFor(pub).
+const testConfirm = "ABCD2345"
+
+func init() { newConfirmCode = func() string { return testConfirm } }
+
+// fakePairing approves the first registered key, sealing auth to sealFor(pub) with a tag made
+// from the confirmation code `confirm` (what the owner typed).
 func fakePairing(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(pairingHandler(t, auth, sealFor))
+	return httptest.NewServer(pairingHandler(t, auth, sealFor, testConfirm))
 }
 
-func pairingHandler(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte) http.Handler {
+func pairingHandler(t *testing.T, auth []byte, sealFor func(agentPub []byte) []byte, confirm string) http.Handler {
 	var registered string
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/pair/7KQ4FD") {
@@ -36,7 +41,8 @@ func pairingHandler(t *testing.T, auth []byte, sealFor func(agentPub []byte) []b
 			return
 		}
 		pub, _ := b64.DecodeString(registered)
-		sealed, err := seal(mustPub(t, sealFor(pub)), auth, "eb:pair:7KQ4FD")
+		payload := append(append([]byte{}, auth...), pairTag(confirm, auth, pub)...)
+		sealed, err := seal(mustPub(t, sealFor(pub)), payload, "eb:pair:7KQ4FD")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,5 +91,47 @@ func TestPairingRejectsOtherKey(t *testing.T) {
 	defer srv.Close()
 	if _, err := pair(srv.URL, "7KQ4FD", "vm1", false, ""); err == nil {
 		t.Fatal("pairing accepted an auth key not sealed to this agent")
+	}
+}
+
+func TestPairingRejectsServerChosenAuth(t *testing.T) {
+	// A server that seals an auth key of its own to the agent's real key: it knows the key and the
+	// code, but not the confirmation code shown on the machine.
+	auth := make([]byte, 32)
+	rand.Read(auth)
+	srv := httptest.NewServer(pairingHandler(t, auth, func(p []byte) []byte { return p }, "ZZZZ9999"))
+	defer srv.Close()
+	if _, err := pair(srv.URL, "7KQ4FD", "vm1", false, ""); err == nil {
+		t.Fatal("pairing accepted an auth key without the confirmation code")
+	}
+}
+
+func TestPairingRejectsBareAuth(t *testing.T) {
+	// The former format, auth alone, has no tag at all.
+	auth := make([]byte, 32)
+	rand.Read(auth)
+	var registered string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var body struct{ Pub string }
+			json.NewDecoder(r.Body).Decode(&body)
+			registered = body.Pub
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		pub, _ := b64.DecodeString(registered)
+		sealed, _ := seal(mustPub(t, pub), auth, "eb:pair:7KQ4FD")
+		json.NewEncoder(w).Encode(map[string]string{"token": "eba_test", "sealedAuth": b64.EncodeToString(sealed)})
+	}))
+	defer srv.Close()
+	if _, err := pair(srv.URL, "7KQ4FD", "vm1", false, ""); err == nil {
+		t.Fatal("pairing accepted an auth key without a tag")
+	}
+}
+
+func TestConfirmCode(t *testing.T) {
+	c := randomConfirmCode()
+	if len(c) != confirmLen || strings.Trim(c, confirmAlphabet) != "" {
+		t.Fatalf("bad confirmation code %q", c)
 	}
 }

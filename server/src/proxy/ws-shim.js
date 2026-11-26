@@ -66,7 +66,8 @@
     (material ||= (async () => {
       const saved = await idb("tunnels");
       if (!saved) throw new Error("no tunnel key");
-      const key = await crypto.subtle.importKey("raw", unb64(saved.key), "AES-GCM", false, ["encrypt", "decrypt"]);
+      // A non-extractable CryptoKey since the key is stored as one; a raw string from an older worker.
+      const key = typeof saved.key === "string" ? await crypto.subtle.importKey("raw", unb64(saved.key), "AES-GCM", false, ["encrypt", "decrypt"]) : saved.key;
       const jar = (await idb("cookies")) || {};
       return { key, cookie: Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ") };
     })());

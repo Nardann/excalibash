@@ -10,6 +10,7 @@ import {
   fromUtf8,
   generateKeyPair,
   machineAuthKey,
+  pairTag,
   randomBytes,
   randomId,
   seal,
@@ -167,13 +168,18 @@ export async function renameMachine(keys: KeyPair, id: string, name: string) {
 
 /**
  * Approves a machine paired with a short code, once the owner has checked its fingerprint: a
- * fresh machine auth key is sealed to the key the agent generated on the machine itself.
+ * fresh machine auth key is sealed to the key the agent generated on the machine itself, with a
+ * tag under the confirmation code shown on the machine (the agent rejects an auth key without it).
  */
-export async function approvePairing(keys: KeyPair, code: string, agentPubB64: string, name: string, shareBoards = true) {
+export async function approvePairing(keys: KeyPair, code: string, agentPubB64: string, confirm: string, name: string, shareBoards = true) {
   const vk = await vaultKey(keys);
   const id = randomId();
   const pub = fromB64(agentPubB64);
   const auth = randomBytes(32);
+  const tag = await pairTag(confirm, auth, pub);
+  const payload = new Uint8Array(auth.length + tag.length);
+  payload.set(auth);
+  payload.set(tag, auth.length);
   await api.post(`/machines/pairings/${encodeURIComponent(code)}/approve`, {
     id,
     agentPub: agentPubB64,
@@ -181,7 +187,7 @@ export async function approvePairing(keys: KeyPair, code: string, agentPubB64: s
     encName: await boxText(vk, name, machineNameAad(id)),
     encPub: await box(vk, pub, AAD.machine(id)),
     encAuth: await box(vk, auth, AAD.machineAuth(id)),
-    sealedAuth: await seal(pub, auth, `eb:pair:${code.toUpperCase().replace(/[^A-Z0-9]/g, "")}`),
+    sealedAuth: await seal(pub, payload, `eb:pair:${code.toUpperCase().replace(/[^A-Z0-9]/g, "")}`),
   });
   return id;
 }

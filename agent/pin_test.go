@@ -89,7 +89,7 @@ func TestPinnedWebsocket(t *testing.T) {
 func TestPinnedPairing(t *testing.T) {
 	auth := make([]byte, 32)
 	rand.Read(auth)
-	srv := httptest.NewTLSServer(pairingHandler(t, auth, func(p []byte) []byte { return p }))
+	srv := httptest.NewTLSServer(pairingHandler(t, auth, func(p []byte) []byte { return p }, testConfirm))
 	defer srv.Close()
 	pin := serverPin(srv)
 

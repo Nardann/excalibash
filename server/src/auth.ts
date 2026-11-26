@@ -164,7 +164,13 @@ export function readCookie(header: string | undefined, name: string): string | u
   if (!header) return undefined;
   for (const part of header.split(";")) {
     const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return undefined; // malformed escape: no session rather than a throw
+      }
+    }
   }
   return undefined;
 }

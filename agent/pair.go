@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +21,43 @@ import (
 // Pairing with a short code typed on the machine (no copy-paste needed). The agent makes its
 // own key pair here; the owner checks the fingerprint shown below against the one in the browser,
 // then the browser seals the machine auth key to this public key. The private key never leaves.
+//
+// The seal alone is anonymous: the server relays the agent's public key and the code, so it could
+// seal an auth key of its own choosing. The agent also shows a confirmation code that only goes
+// from its screen to the owner's browser, by hand; the browser seals auth ‖ HMAC(confirm, auth ‖ pub),
+// and an auth key the server made up lacks a valid tag. The server gets one guess per pairing.
 
 const pairTimeout = 10 * time.Minute
+
+const confirmAlphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ" // no 0/O, 1/I/L
+const confirmLen = 8
+
+// newConfirmCode is a variable so tests can know the code the owner would read.
+var newConfirmCode = randomConfirmCode
+
+func randomConfirmCode() string {
+	b := make([]byte, confirmLen)
+	for i := range b {
+		var r [1]byte
+		for {
+			_, _ = rand.Read(r[:])
+			// 248 = 8 × 31: rejection sampling keeps the letters uniform.
+			if r[0] < 248 {
+				break
+			}
+		}
+		b[i] = confirmAlphabet[int(r[0])%len(confirmAlphabet)]
+	}
+	return string(b)
+}
+
+// pairTag binds the auth key to this agent's key under the confirmation code.
+func pairTag(confirm string, auth, pub []byte) []byte {
+	m := hmac.New(sha256.New, []byte(normalizeCode(confirm)))
+	m.Write(auth)
+	m.Write(pub)
+	return m.Sum(nil)
+}
 
 // savedConfig is what a paired agent keeps on disk (0600).
 type savedConfig struct {
@@ -124,8 +161,10 @@ func pair(server, rawCode, name string, insecure bool, pin string) (savedConfig,
 		return savedConfig{}, fmt.Errorf("le serveur a refusé l'appairage (%d)", resp.StatusCode)
 	}
 
+	confirm := newConfirmCode()
 	fmt.Fprintf(os.Stderr, "\n  Empreinte de cette machine :\n\n      %s\n\n", fingerprint(priv.PublicKey().Bytes()))
-	fmt.Fprintln(os.Stderr, "  Vérifie qu'Excalibash affiche exactement la même, puis clique sur « C'est la même ».")
+	fmt.Fprintln(os.Stderr, "  Vérifie qu'Excalibash affiche exactement la même, puis tape ce code de confirmation :")
+	fmt.Fprintf(os.Stderr, "\n      Code de confirmation : %s-%s\n\n", confirm[:4], confirm[4:])
 	fmt.Fprintln(os.Stderr, "  En attente de validation…")
 
 	deadline := time.Now().Add(pairTimeout)
@@ -157,9 +196,13 @@ func pair(server, rawCode, name string, insecure bool, pin string) (savedConfig,
 		if err != nil {
 			return savedConfig{}, errCrypto
 		}
-		auth, err := unseal(priv, sealed, "eb:pair:"+code)
-		if err != nil || len(auth) != keyLen {
+		opened, err := unseal(priv, sealed, "eb:pair:"+code)
+		if err != nil || len(opened) != keyLen+sha256.Size {
 			return savedConfig{}, errors.New("clé de la machine non authentique : appairage annulé")
+		}
+		auth, tag := opened[:keyLen], opened[keyLen:]
+		if !hmac.Equal(tag, pairTag(confirm, auth, priv.PublicKey().Bytes())) {
+			return savedConfig{}, errors.New("code de confirmation faux, ou clé ne venant pas du navigateur du propriétaire : appairage annulé (recommence avec un nouveau code)")
 		}
 		return savedConfig{Server: base, Token: res.Token, Auth: b64.EncodeToString(auth), Pub: pub, Name: name, Pin: pin}, nil
 	}
