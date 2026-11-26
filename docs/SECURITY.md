@@ -486,6 +486,45 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
   malveillant pourrait présenter à quelqu'un une « machine partagée par Alice » qui est en fait la sienne, et lire ce
   qui y serait tapé. Un lien de tableau, lui, est chiffré sous la clé du tableau, que le serveur n'a pas.
 
+## Mise à jour des agents
+
+Un agent peut se mettre à jour seul (« Mettre à jour » sur la page Machines, « Mettre à jour les agents » sur un tableau).
+Règle d'or : **le serveur ne peut pas faire exécuter de code à un agent**, même compromis.
+
+- **Ancre de confiance = une clé publique Ed25519 compilée dans l'agent** (`-X main.updatePubKey=…`, voir
+  [RELEASE.md](RELEASE.md)). La clé privée reste hors ligne chez la personne qui publie : ni le serveur, ni la CI, ni le dépôt
+  ne la détiennent. Un agent compilé sans clé refuse toute mise à jour (message clair) et se met à jour à la main (`update.sh`).
+- **Le serveur ne fait que distribuer** : `agent-manifest.json` (`{version, date, files: {<os>-<arch>: {sha256, size}}}`) et
+  `agent-manifest.json.sig` (signature Ed25519 des octets exacts du manifeste) sont servis avec les binaires, par une liste
+  blanche stricte de noms. `GET /api/agent/latest` (public) annonce `{version, signed}` : simple métadonnée, le serveur ne
+  vérifie rien, c'est l'agent qui juge.
+- **La demande** est scellée sous `machineAuth` comme une sonde : `POST /api/machines/:id/update {rid, ts, d}` avec
+  `d = box(machineAuth, {op:"update"}, "eb:update:<rid>:<ts>")`. Qui peut ouvrir un shell sur la machine peut la demander
+  (propriétaire, partage direct, éditeur d'un tableau lié) : cela ne donne rien, puisque la charge est un binaire officiel
+  signé. Le serveur limite à une demande par minute et par machine (une à la fois), relaie le chiffré et renvoie, ligne par
+  ligne, les trames de progression `update.res` scellées sous `eb:update-res:<rid>` (phases `check`, `download`, `install`,
+  `restarting`, `error`, numérotées : le navigateur ignore une trame rejouée ou mal authentifiée). Il ne voit ni la
+  phase ni les messages.
+- **Procédure de l'agent** : horodatage à ±5 min et `rid` à usage unique (comme les sondes) ; refus si aucune clé n'est
+  intégrée ; téléchargement du manifeste et de sa signature par le même chemin HTTP que la connexion de l'agent (même
+  épinglage TLS, redirections vers un autre hôte refusées) ; **vérification de la signature avant de lire le manifeste** ;
+  `version` strictement supérieure à la version courante (comparaison semver : **ni retour en arrière, ni réinstallation** ;
+  un agent « dev » refuse) ; entrée de sa plateforme présente ; téléchargement dans `.excalibash-agent.new` (0700) borné à la
+  taille signée (et à 64 Mio) ; SHA-256 comparé à celui signé ; puis remplacement atomique (l'exécutable devient
+  `.excalibash-agent.old`, le nouveau le remplace) et `exec` sur place : même PID, donc systemd, crontab ou lancement manuel ne
+  voient rien. Si l'`exec` échoue, l'ancien binaire est remis en place.
+- **Retour arrière** : le processus lancé par une mise à jour (variable `EXCALIBASH_UPDATE_TRIAL`) doit se connecter au
+  serveur et envoyer son `hello` en moins de 120 s ; sinon il remet `.excalibash-agent.old` à sa place et le relance, avec une
+  note « mise à jour annulée » dans son `hello` (affichée sur la page Machines). Une fois connecté, l'ancien binaire est supprimé.
+  Ces variables sont retirées de l'environnement du processus pour ne pas être héritées par les shells.
+- **Sessions** : la mise à jour redémarre l'agent, ce qui met fin aux shells ouverts. L'interface le dit et demande confirmation,
+  en comptant les sessions ouvertes (nombre donné par le serveur, qui connaît l'état des terminaux).
+- **Limites** : le serveur (ou quiconque contrôle le réseau) peut empêcher une mise à jour, ou proposer une version signée plus
+  ancienne que la dernière mais plus récente que celle de l'agent (jamais un retour en arrière). Un défaut qui empêche le
+  nouveau binaire de démarrer du tout, avant d'avoir pu se surveiller, n'est pas rattrapé par le retour arrière si le
+  superviseur relance le processus sans la variable d'essai. La compromission de la clé privée de publication permet de signer
+  une version malveillante : voir la procédure dans [RELEASE.md](RELEASE.md#6-rotation-et-compromission-de-la-clé).
+
 ## Fichiers et captures
 
 Envoyer un fichier dans le dossier d'un shell, en télécharger un, ou capturer le trafic d'une interface (pcap)
@@ -521,7 +560,7 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   porte `version` et `caps` (liste de mots courts, métadonnée en clair) ; sans `caps`, l'agent est traité comme ancien. Le
   navigateur refuse alors la fonction avec « L'agent de <machine> est trop ancien pour… : mets-le à jour » et la commande
   de mise à jour, et sans réponse à une première trame il abandonne au bout de 10 s (« agent hors ligne ou trop ancien »).
-  `/update.sh` remplace le programme et redémarre le service ; il ne touche ni à `agent.json` ni à `agent.env` : la
+  `/update.sh` (ou, si l'instance publie des versions signées, le bouton « Mettre à jour » : voir « Mise à jour des agents ») remplace le programme et redémarre le service ; il ne touche ni à `agent.json` ni à `agent.env` : la
   machine garde son identité. Le script est le même pour tout le monde et ne contient aucun secret.
 - **Capture** : l'agent lance `tcpdump -i <interface> -U -n -s 0 -w - -- <filtre>` directement, jamais via un shell.
   L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
