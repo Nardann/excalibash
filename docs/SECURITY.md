@@ -11,8 +11,7 @@ les dates (dont la dernière activité de chaque compte), les liens publics d'un
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
-et versions des éléments (dont l'empreinte SHA-1 de chaque image), qui est connecté, les dimensions et le rythme
-d'activité des terminaux, le nom d'hôte, l'OS et l'architecture annoncés par chaque agent. **Il ne voit jamais** : les noms de
+et versions des éléments (dont l'empreinte SHA-1 de chaque image), qui est connecté, les dimensions et le rythme d'activité des terminaux, et pour chaque machine ce que l'agent annonce de lui-même (nom d'hôte, système, architecture, **version et liste des fonctions** qu'il connaît : `files`, `capture`…). Cette dernière liste est aussi donnée aux membres d'un tableau, dans l'état de chaque terminal, pour qu'ils sachent quoi proposer ; rien d'autre sur la machine. **Il ne voit jamais** : les noms de
 dossiers et de tableaux, les dessins, les images, les aperçus, les positions de curseur, ni ce qui
 est tapé ou affiché dans les terminaux.
 
@@ -198,6 +197,16 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   le dernier `seq` de chacun n'ont pas bougé depuis la lecture (sinon 409 et le navigateur recommence, aucune modification
   n'est perdue). Les abonnés sont déconnectés par le code 4409 comme pour le reste du tableau.
 - La suppression définitive d'un tableau supprime ses documents.
+- **Duplication d'un tableau** : le navigateur de la personne qui duplique récupère les documents du tableau source
+  (`GET /api/items/:id/docs`, lecteur au moins), garde ceux que le schéma référence (icônes de code et de notebook),
+  les déchiffre avec la clé du tableau source, fusionne chaque document en un état, **efface les références vivantes**
+  (`meta.kernelTerm` : la session de noyau est un terminal du tableau source, dont la copie n'a pas la clé ; marques
+  « en cours ») et le chiffre en instantané sous la clé du **nouveau** tableau, son identifiant et l'epoch 0. Les `docId` restent
+  les mêmes (ils ne sont uniques que par tableau, le schéma copié n'a donc pas à être réécrit). Les instantanés partent dans
+  le corps de la création du tableau (`POST /api/items`, champ `board.docs`) : aucune route d'écriture de plus, la création
+  est atomique, et le serveur ne fait que valider les identifiants (22 caractères base64url, sans doublon), 64 documents
+  au plus et 4 Mio par instantané. Le serveur ne voit que des chiffrés ; l'ancienne clé ne lit pas la copie (clé, tableau et
+  epoch sont dans l'AAD). Un chiffré qui ne s'authentifie pas interrompt la copie.
 - **Fenêtres de code** : le document est un `Y.Text` (contenu) et un `Y.Map` (nom, langage, chemin sur la machine, empreinte
   SHA-256 du dernier état lu ou écrit), donc chiffré comme n'importe quel document : le serveur ne voit ni le code, ni le
   nom du fichier, ni son chemin. Monaco et ses workers sont servis par l'application elle-même (fichiers du même
@@ -207,13 +216,22 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
   membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
   du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
+- **Nom affiché** : l'entrée d'une fenêtre de code ou de notebook dans la liste de son icône peut porter un `label`
+  (le nom de base du fichier, jamais le chemin ; 80 caractères au plus, sans caractère de contrôle ni `/`), pour que le
+  dock affiche « demo.py » au lieu de « Code 1 ». Il vit dans le tableau, donc chiffré avec lui ; chaque lecture le
+  revalide et l'écarte s'il est invalide.
+- **Migration de l'ordre des cellules** : un ancien notebook (sans `order`) se lit tel quel, dans l'ordre de stockage ; la
+  première modification de structure par un éditeur (insérer, déplacer, supprimer) écrit l'ordre. L'opération est idempotente
+  et sans copie de cellule ; deux éditeurs qui la font en même temps laissent des identifiants répétés, ignorés à la
+  lecture et supprimés ensuite par les éditeurs. L'export `.ipynb` est identique.
 - **Suppression définitive** : quand une fenêtre de code ou de notebook est retirée pour de bon (icône supprimée, ou fenêtre
   « retirée », pas seulement masquée), l'éditeur qui l'a fait envoie `doc.del {doc}`. Le serveur applique les mêmes
   contrôles que `doc.up` (éditeur, génération de clés courante ; il n'exige pas d'être abonné puisque la fenêtre est
   déjà fermée), supprime les lignes de ce document, pour ce tableau seulement, et prévient les abonnés (`doc.gone {doc}`,
   qui cessent d'envoyer). Annuler la suppression d'une icône (Ctrl+Z) la ramène avec un document vide.
 - **Notebooks** : un document de notebook est un `Y.Array` de cellules (`Y.Text` du source, sorties au format nbformat 4,
-  compteur d'exécution) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
+  compteur d'exécution), un `Y.Array` `order` d'identifiants (l'ordre d'affichage : déplacer une cellule ne touche
+  que lui, jamais la cellule, donc une frappe simultanée n'est pas perdue) et un `Y.Map` de métadonnées (nom, chemin, empreinte, session de noyau) : le serveur ne voit ni
   le code, ni les sorties, ni les images, ni le nom du fichier. Une sortie trop grosse pour une mise à jour
   (256 Kio) est remplacée par une note, un flux est plafonné à 1 Mio et un total à 3 Mio par cellule. Le fichier `.ipynb`
   lui-même est lu et écrit par le canal de fichiers du shell local, comme pour le code (même contrôle de modification).
@@ -339,6 +357,24 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   éditeur qui voit une cellule « en cours » dont l'identifiant n'est dans la présence de personne depuis 5 s la termine
   (compteur du `done` vu, ou noyau au repos) ; les sorties produites après le départ de l'exécuteur ne sont pas conservées.
   Les clients MCP qui savent écrire dans un terminal peuvent aussi parler à ce noyau, comme à n'importe quel shell.
+- **Exécuter un fichier Python (fenêtre de code).** « ▶ Exécuter » envoie le contenu **actuel** de la fenêtre (enregistré
+  ou non) à un noyau Jupyter propre au fichier, dont l'identifiant de session est gardé dans le document de code
+  (`meta.kernelTerm`, même modèle que le notebook : *démarrer* exige `machineAuth` et une confirmation, ensuite tout
+  éditeur du tableau peut y exécuter du code, avec les droits de l'agent). Le dossier de travail est celui du fichier
+  quand son chemin est absolu. Mêmes règles que les cellules : un seul exécuteur (celui qui a cliqué) écrit les sorties
+  de son exécution, au format nbformat, dans le `Y.Array` `outputs` du document (tout le monde voit la dernière exécution),
+  `meta.running` marque l'exécution en cours, et un exécuteur disparu est remplacé au bout de 5 s. « Exécuter dans le
+  terminal » reste pour le shell et JavaScript, et en action secondaire pour Python. La session de noyau est fermée avec
+  le document quand la fenêtre est retirée.
+- **Complétion et documentation.** Les requêtes `complete` / `inspect` du pont sont des lignes écrites dans le même
+  terminal chiffré : le navigateur les envoie à la demande (« . », Ctrl+Espace, survol, Maj+Tab), avec abandon à 3 s et
+  annulation. Elles ne sont jamais envoyées pour un lecteur (le serveur refuse sa saisie) ni quand le noyau est occupé
+  (elles attendraient derrière la cellule en cours). Les réponses sont des données du noyau : la documentation s'affiche
+  en texte dans un bloc de code Markdown, ANSI retiré, sans HTML ni lien interprété.
+- **L'exécuteur survit à la fenêtre.** L'exécution d'un notebook (abonnement au flux du noyau, écriture des sorties,
+  reprise des exécuteurs disparus) appartient à un objet par tableau et par notebook, pas à la fenêtre : masquer la
+  fenêtre en pleine exécution ne perd plus rien. Il est libéré quand le document est supprimé, quand le tableau est
+  fermé, ou 60 s après la dernière exécution quand aucune fenêtre ne l'affiche. Rien ne change pour le serveur.
 
 ## Tunnels web
 
@@ -454,6 +490,45 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
   malveillant pourrait présenter à quelqu'un une « machine partagée par Alice » qui est en fait la sienne, et lire ce
   qui y serait tapé. Un lien de tableau, lui, est chiffré sous la clé du tableau, que le serveur n'a pas.
 
+## Mise à jour des agents
+
+Un agent peut se mettre à jour seul (« Mettre à jour » sur la page Machines, « Mettre à jour les agents » sur un tableau).
+Règle d'or : **le serveur ne peut pas faire exécuter de code à un agent**, même compromis.
+
+- **Ancre de confiance = une clé publique Ed25519 compilée dans l'agent** (`-X main.updatePubKey=…`, voir
+  [RELEASE.md](RELEASE.md)). La clé privée reste hors ligne chez la personne qui publie : ni le serveur, ni la CI, ni le dépôt
+  ne la détiennent. Un agent compilé sans clé refuse toute mise à jour (message clair) et se met à jour à la main (`update.sh`).
+- **Le serveur ne fait que distribuer** : `agent-manifest.json` (`{version, date, files: {<os>-<arch>: {sha256, size}}}`) et
+  `agent-manifest.json.sig` (signature Ed25519 des octets exacts du manifeste) sont servis avec les binaires, par une liste
+  blanche stricte de noms. `GET /api/agent/latest` (public) annonce `{version, signed}` : simple métadonnée, le serveur ne
+  vérifie rien, c'est l'agent qui juge.
+- **La demande** est scellée sous `machineAuth` comme une sonde : `POST /api/machines/:id/update {rid, ts, d}` avec
+  `d = box(machineAuth, {op:"update"}, "eb:update:<rid>:<ts>")`. Qui peut ouvrir un shell sur la machine peut la demander
+  (propriétaire, partage direct, éditeur d'un tableau lié) : cela ne donne rien, puisque la charge est un binaire officiel
+  signé. Le serveur limite à une demande par minute et par machine (une à la fois), relaie le chiffré et renvoie, ligne par
+  ligne, les trames de progression `update.res` scellées sous `eb:update-res:<rid>` (phases `check`, `download`, `install`,
+  `restarting`, `error`, numérotées : le navigateur ignore une trame rejouée ou mal authentifiée). Il ne voit ni la
+  phase ni les messages.
+- **Procédure de l'agent** : horodatage à ±5 min et `rid` à usage unique (comme les sondes) ; refus si aucune clé n'est
+  intégrée ; téléchargement du manifeste et de sa signature par le même chemin HTTP que la connexion de l'agent (même
+  épinglage TLS, redirections vers un autre hôte refusées) ; **vérification de la signature avant de lire le manifeste** ;
+  `version` strictement supérieure à la version courante (comparaison semver : **ni retour en arrière, ni réinstallation** ;
+  un agent « dev » refuse) ; entrée de sa plateforme présente ; téléchargement dans `.excalibash-agent.new` (0700) borné à la
+  taille signée (et à 64 Mio) ; SHA-256 comparé à celui signé ; puis remplacement atomique (l'exécutable devient
+  `.excalibash-agent.old`, le nouveau le remplace) et `exec` sur place : même PID, donc systemd, crontab ou lancement manuel ne
+  voient rien. Si l'`exec` échoue, l'ancien binaire est remis en place.
+- **Retour arrière** : le processus lancé par une mise à jour (variable `EXCALIBASH_UPDATE_TRIAL`) doit se connecter au
+  serveur et envoyer son `hello` en moins de 120 s ; sinon il remet `.excalibash-agent.old` à sa place et le relance, avec une
+  note « mise à jour annulée » dans son `hello` (affichée sur la page Machines). Une fois connecté, l'ancien binaire est supprimé.
+  Ces variables sont retirées de l'environnement du processus pour ne pas être héritées par les shells.
+- **Sessions** : la mise à jour redémarre l'agent, ce qui met fin aux shells ouverts. L'interface le dit et demande confirmation,
+  en comptant les sessions ouvertes (nombre donné par le serveur, qui connaît l'état des terminaux).
+- **Limites** : le serveur (ou quiconque contrôle le réseau) peut empêcher une mise à jour, ou proposer une version signée plus
+  ancienne que la dernière mais plus récente que celle de l'agent (jamais un retour en arrière). Un défaut qui empêche le
+  nouveau binaire de démarrer du tout, avant d'avoir pu se surveiller, n'est pas rattrapé par le retour arrière si le
+  superviseur relance le processus sans la variable d'essai. La compromission de la clé privée de publication permet de signer
+  une version malveillante : voir la procédure dans [RELEASE.md](RELEASE.md#6-rotation-et-compromission-de-la-clé).
+
 ## Fichiers et captures
 
 Envoyer un fichier dans le dossier d'un shell, en télécharger un, ou capturer le trafic d'une interface (pcap)
@@ -485,13 +560,22 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   shell (lu dans `/proc/<pid>/cwd` sous Linux ; sous macOS, faute de mieux, le dossier personnel du compte).
 - **Téléchargement** : fichiers ordinaires seulement (ni dossier, ni périphérique, ni tube).
 
+- **Agent trop ancien** : un agent d'avant ces fonctions ignore sans réponse les trames `file`. Le `hello` de l'agent
+  porte `version` et `caps` (liste de mots courts, métadonnée en clair) ; sans `caps`, l'agent est traité comme ancien. Le
+  navigateur refuse alors la fonction avec « L'agent de <machine> est trop ancien pour… : mets-le à jour » et la commande
+  de mise à jour, et sans réponse à une première trame il abandonne au bout de 10 s (« agent hors ligne ou trop ancien »).
+  `/update.sh` (ou, si l'instance publie des versions signées, le bouton « Mettre à jour » : voir « Mise à jour des agents ») remplace le programme et redémarre le service ; il ne touche ni à `agent.json` ni à `agent.env` : la
+  machine garde son identité. Le script est le même pour tout le monde et ne contient aucun secret.
 - **Capture** : l'agent lance `tcpdump -i <interface> -U -n -s 0 -w - -- <filtre>` directement, jamais via un shell.
   L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
   `[A-Za-z0-9._:/!()&|<>=-]{1,64}` dont aucun ne commence par `-` (aucune option ne peut être injectée). Durée de 1 à
   300 s, taille de 50 Mio au plus ; le groupe de processus est arrêté à la fin, à l'annulation ou à l'abandon. Il faut
-  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'erreur de tcpdump est renvoyée.
+  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'agent renvoie un message clair (avec la commande
+  `setcap`) et la ligne d'origine de tcpdump en détail ; toutes les lignes d'erreur sont lues, pas seulement la première.
   « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
-  l'extrémité d'un câble dont l'interface est renseignée, sur une icône qui a un shell local en cours.
+  l'extrémité d'un câble, sur une icône qui a un shell local en cours ; l'interface se choisit dans la liste de celles de la
+  machine (opération `ifaces` du canal de fichiers : noms, état et adresses lus par `net.Interfaces`, sans rien exécuter,
+  scellés comme le reste ; le serveur ne les voit pas). Les erreurs de tcpdump restent affichées dans le panneau. Une capture appartient au tableau ouvert (pas à la fenêtre de l'extrémité) : elle continue si on ferme la fenêtre, un indicateur flottant permet de l'arrêter, le fichier est enregistré à la fin, et elle est abandonnée quand on quitte le tableau.
 
 ## Client MCP
 

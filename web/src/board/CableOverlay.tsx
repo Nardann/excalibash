@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { Modal, toast } from "../components/ui.tsx";
 import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, vlanParts, type End, type EndInfo } from "./cables.ts";
-import { FileClient, IFACE_RE, filterProblem, type Signal } from "./fileTransfer.ts";
-import { saveBlob, exportName } from "./termTools.ts";
+import type { FileClient } from "./fileTransfer.ts";
+import type { CaptureManager } from "./captureManager.ts";
+import { CapturePanel } from "./CapturePanel.tsx";
 import type { LinkState, LinkStates } from "./linkStatus.ts";
 
 const linkText = (ip: string, l: LinkState) =>
@@ -204,84 +205,6 @@ function rowsOf(info?: EndInfo): VlanRow[] {
 
 const isSingleVlan = (v: string) => /^\d{1,4}$/.test(v.trim());
 
-/**
- * Packet capture on the interface at this cable end, run by the agent of the item's machine through
- * its local shell (tcpdump). The pcap goes straight to the browser, sealed with the shell's key.
- */
-function CapturePanel({ client, iface }: { client: FileClient; iface: string }) {
-  const [seconds, setSeconds] = useState(30);
-  const [filter, setFilter] = useState("");
-  const [mib, setMib] = useState(20);
-  const [bytes, setBytes] = useState<number | null>(null);
-  const signal = useRef<Signal | null>(null);
-  const ifaceOk = IFACE_RE.test(iface.trim());
-  const problem = filterProblem(filter);
-  const valid = ifaceOk && !problem && seconds >= 1 && seconds <= 300 && mib >= 1 && mib <= 50;
-  useEffect(() => () => void (signal.current && (signal.current.aborted = true)), []);
-
-  const start = async () => {
-    const s: Signal = { aborted: false };
-    signal.current = s;
-    setBytes(0);
-    try {
-      const { name, blob } = await client.capture(
-        { iface: iface.trim(), filter: filter.trim() || undefined, seconds, maxBytes: Math.round(mib * 1024 * 1024) },
-        { signal: s, onProgress: setBytes },
-      );
-      saveBlob(blob, exportName(name.replace(/\.pcap$/, ""), "pcap"));
-      toast(`Capture terminée : ${(blob.size / 1024).toFixed(0)} Kio téléchargés`);
-    } catch (e) {
-      toast.error(e);
-    } finally {
-      signal.current = null;
-      setBytes(null);
-    }
-  };
-
-  return (
-    // Enter in a capture field must not submit the cable form: that would close it and cancel the capture.
-    <fieldset className="capture-box" onKeyDown={(e) => e.key === "Enter" && e.target instanceof HTMLInputElement && e.preventDefault()}>
-      <legend>Capturer (pcap)</legend>
-      {bytes === null ? (
-        <>
-          <div className="capture-row">
-            <label className="field">
-              Durée (s)
-              <input className="input" type="number" min={1} max={300} value={seconds} onChange={(e) => setSeconds(Number(e.target.value))} />
-            </label>
-            <label className="field">
-              Taille max (Mio)
-              <input className="input" type="number" min={1} max={50} value={mib} onChange={(e) => setMib(Number(e.target.value))} />
-            </label>
-          </div>
-          <label className="field">
-            Filtre BPF (facultatif)
-            <input className="input" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="tcp port 80 and host 10.0.0.1" spellCheck={false} />
-            {problem && <span className="field-help">{problem}</span>}
-          </label>
-          <button type="button" className="btn" disabled={!valid} onClick={start} title={ifaceOk ? undefined : "Nom d'interface invalide : utilise celui de la machine (eth0, enp3s0, br-lan…)"}>
-            Capturer sur {iface.trim() || "…"}
-          </button>
-          <span className="field-help">
-            tcpdump tourne sur la machine : l'agent doit être root (ou tcpdump avoir CAP_NET_RAW). La connexion de l'agent au serveur est exclue de la capture.
-            Le fichier .pcap arrive chiffré de bout en bout. Garde cette fenêtre ouverte jusqu'à la fin.
-          </span>
-        </>
-      ) : (
-        <div className="capture-row">
-          <span>{(bytes / 1024).toFixed(1)} Kio capturés…</span>
-          <button type="button" className="btn" onClick={() => signal.current && (signal.current.stop = true)}>
-            Arrêter
-          </button>
-          <button type="button" className="btn" onClick={() => signal.current && (signal.current.aborted = true)}>
-            Annuler
-          </button>
-        </div>
-      )}
-    </fieldset>
-  );
-}
-
 export function CableEndForm({
   info,
   itemName,
@@ -294,7 +217,7 @@ export function CableEndForm({
   onSave: (i: EndInfo) => void;
   onClose: () => void;
   /** A running local shell on the item's machine, when there is one: enables the capture. */
-  capture?: FileClient | null;
+  capture?: { client: FileClient; manager: CaptureManager; key: string } | null;
 }) {
   const [iface, setIface] = useState(info?.iface ?? "");
   const [ip, setIp] = useState(info?.ip ?? "");
@@ -378,7 +301,7 @@ export function CableEndForm({
             <Plus size={14} /> Ajouter un VLAN
           </button>
         </div>
-        {capture && iface.trim() && <CapturePanel client={capture} iface={iface} />}
+        {capture && <CapturePanel client={capture.client} manager={capture.manager} captureKey={capture.key} cableIface={iface} />}
         {capture === null && iface.trim() && (
           <span className="field-help">
             Capture réseau (pcap) : ouvre d'abord un shell local sur la machine de cette extrémité ; la capture passe par lui. Les équipements Telnet / SSH

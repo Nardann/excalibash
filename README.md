@@ -41,6 +41,7 @@ Tout le TP tient sur un seul tableau, partagé avec le binôme ou le prof. Les d
 - **Dossiers partagés.** Partage en lecture ou en édition ; les sous-dossiers suivent. Retirer quelqu'un renouvelle toutes les clés du sous-arbre.
 - **Lien public en lecture seule.** Le propriétaire et les éditeurs d'un tableau peuvent créer un lien `/v/<jeton>#<clé>` (expiration d'1, 7 ou 30 jours, ou aucune) qui montre le tableau sans compte et sans les terminaux. La clé de déchiffrement reste dans la partie `#` de l'adresse, que le navigateur n'envoie jamais au serveur. Retirer un membre supprime les liens du tableau.
 - **Machines.** Agent Go statique (Linux, macOS, amd64, arm64) qui se connecte en sortie, sans port à ouvrir. Appairage par code court, démarrage avec la machine, reconnexion automatique.
+- **Mise à jour des agents en un clic.** Depuis la page Machines ou un tableau, si l'instance publie une version signée. L'agent ne l'installe que si la signature Ed25519 vérifie avec la clé publique compilée dans son programme (le serveur ne fait que distribuer) ; pas de retour en arrière, retour automatique si le nouvel agent ne se reconnecte pas. Voir [docs/RELEASE.md](docs/RELEASE.md) et [docs/SECURITY.md](docs/SECURITY.md#mise-à-jour-des-agents).
 - **Client MCP local.** Un petit programme Node (sans dépendance) expose tes tableaux et terminaux à un client MCP, avec ton propre compte : il déchiffre sur ta machine, comme le navigateur, et le serveur ne voit rien de plus. Lecture seule par défaut. Voir [docs/MCP.md](docs/MCP.md).
 - **Comptes.** Le mot de passe ne quitte pas le navigateur et une clé de récupération est remise à l'inscription. « Mon compte » liste les appareils connectés (navigateur et préfixe d'IP approximatifs, dernière activité) et permet de les déconnecter un à un ou tous d'un coup. Les inscriptions se font sur invitation ou sont ouvertes à tous, avec vérification par email. Le panneau d'administration gère les comptes et le stockage sans accès au contenu.
 
@@ -156,6 +157,18 @@ curl -fsSL https://excalibash.example.com/uninstall.sh | sh
 ```
 
 Pour un agent installé en root (service système), la lancer avec `sudo sh`.
+
+### Mettre à jour l'agent
+
+La page **Machines** affiche la version de chaque agent et un badge « à mettre à jour » quand il ne connaît pas une fonction de l'application (capture réseau, fichiers, notebooks…) ; **Mettre à jour l'agent** donne la commande, à lancer sur la machine :
+
+```bash
+curl -fsSL https://excalibash.example.com/update.sh | sh
+```
+
+Elle remplace le programme et relance le service sans toucher à la clé ni au nom de la machine : elle reste appairée, ses shells en cours sont seulement interrompus. Pour un agent installé en root (service système), la lancer avec `sudo sh`. Si une fonction est refusée parce que l'agent est trop ancien, l'application affiche ce message et cette commande.
+
+Si l'instance publie des agents signés ([docs/RELEASE.md](docs/RELEASE.md)), la page Machines propose **Mettre à jour (x → y)** et un tableau **Mettre à jour les agents** : l'agent télécharge la version, vérifie sa signature, se remplace et redémarre (les shells ouverts sont interrompus, la confirmation les compte). Sans clé de signature intégrée, seule la commande manuelle ci-dessus s'applique.
 
 ### Partager une machine
 

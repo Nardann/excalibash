@@ -38,6 +38,7 @@ type manager struct {
 	web      *webHub
 	probe    *probeHub
 	files    *fileHub
+	update   *updater
 	out      *outbox // nil while disconnected
 }
 
@@ -83,6 +84,8 @@ func newManager(priv *ecdh.PrivateKey) *manager {
 func newManagerWithAuth(auth []byte) *manager {
 	m := &manager{auth: auth, sessions: map[string]*session{}, web: newWebHub(auth), probe: newProbeHub(auth)}
 	m.files = newFileHub(m)
+	m.update = newUpdater(auth)
+	m.update.beforeExec = m.closeAll
 	return m
 }
 

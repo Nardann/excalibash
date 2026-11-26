@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -104,8 +105,12 @@ func TestProbeRefusesForgedOldAndReplayed(t *testing.T) {
 }
 
 func TestProbeOnlyPingsPlainAddresses(t *testing.T) {
+	var mu sync.Mutex
 	var pinged []string
 	fake := func(a netip.Addr) probeResult {
+		// probeAll pings in parallel.
+		mu.Lock()
+		defer mu.Unlock()
 		pinged = append(pinged, a.String())
 		return probeResult{Up: true, Ms: 1}
 	}

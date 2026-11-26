@@ -184,6 +184,11 @@ function addColumn(table: string, column: string, ddl: string, backfill?: string
   if (backfill) db.exec(backfill);
 }
 
+// What the agent announces about itself (plain metadata like hostname / os / arch): its version and
+// the features it supports (JSON array). Null caps = an agent from before capabilities existed.
+addColumn("machines", "agent_version", "TEXT");
+addColumn("machines", "agent_caps", "TEXT");
+
 // Registration, verification and administration.
 addColumn("users", "email_verified", "INTEGER NOT NULL DEFAULT 1"); // accounts from before verification count as verified
 addColumn("users", "verify_code_hash", "TEXT");

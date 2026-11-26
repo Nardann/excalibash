@@ -16,10 +16,11 @@ import { adminApi } from "./api/admin.ts";
 import { getItem, isTrashed, roleOn } from "./access.ts";
 import { joinBoard, flushAllRooms } from "./rooms.ts";
 import { authenticateAgent, handleAgent } from "./terminals.ts";
-import { installScript, uninstallScript } from "./install.ts";
+import { installScript, uninstallScript, updateScript } from "./install.ts";
 import { pairScript, pairingAgentApi, pairingOwnerApi } from "./api/pairing.ts";
 import { accountApi } from "./api/account.ts";
 import { proxyUrl, startProxy } from "./proxy.ts";
+import { MANIFEST_FILE, latestRelease } from "./agentUpdate.ts";
 import { certificatePem, initTls, pinFor, serve, tlsInfo } from "./tls.ts";
 
 initTls();
@@ -100,6 +101,10 @@ const withBody = (req: Request, _res: Response, next: NextFunction) => {
 };
 const small = [express.json({ limit: "256kb" }), withBody];
 const large = [express.json({ limit: "200mb" }), withBody];
+// Public metadata: the newest published agent release (the agents check its signature themselves).
+app.get("/api/agent/latest", (_req, res) => {
+  res.set("Cache-Control", "no-store").json(latestRelease());
+});
 app.use("/api/auth", small, authApi);
 app.use("/api/machines/pairings", small, pairingOwnerApi);
 app.use("/api/machines", small, machinesApi);
@@ -134,7 +139,7 @@ const MCP_FILE = /^excalibash-mcp\.mjs$/;
 
 /** Directory a downloadable file lives in, by strict filename match (no path traversal possible). */
 function downloadDir(file: string): string | null {
-  if (AGENT_FILE.test(file)) return config.agentDistDir;
+  if (AGENT_FILE.test(file) || MANIFEST_FILE.test(file)) return config.agentDistDir;
   if (MCP_FILE.test(file)) return config.mcpDistDir;
   return null;
 }
@@ -147,6 +152,9 @@ app.get("/uninstall.sh", (_req, res) => {
   res.type("text/x-shellscript").set("Cache-Control", "no-store").send(uninstallScript());
 });
 
+app.get("/update.sh", (req, res) => {
+  res.type("text/x-shellscript").set("Cache-Control", "no-store").send(updateScript(publicUrl(req), pinFor(req)));
+});
 app.get("/install.sh", (req, res) => {
   res.type("text/x-shellscript").set("Cache-Control", "no-store").send(installScript(publicUrl(req), pinFor(req)));
 });
@@ -162,7 +170,7 @@ app.get("/certificate.pem", (_req, res) => {
 
 app.get("/downloads", (_req, res) => {
   const list = (dir: string, re: RegExp) => (existsSync(dir) ? readdirSync(dir).filter((f) => re.test(f)) : []);
-  res.json({ files: [...list(config.agentDistDir, AGENT_FILE), ...list(config.mcpDistDir, MCP_FILE)] });
+  res.json({ files: [...list(config.agentDistDir, AGENT_FILE), ...list(config.agentDistDir, MANIFEST_FILE), ...list(config.mcpDistDir, MCP_FILE)] });
 });
 
 app.get("/downloads/:file", (req, res) => {

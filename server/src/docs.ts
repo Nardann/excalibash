@@ -87,6 +87,29 @@ export function listDocs(boardId: string) {
 }
 
 export type RotatedDoc = { doc: string; upto: number; d: string };
+export type NewDoc = { doc: string; d: string };
+
+/**
+ * Creates the documents of a board that is being created (duplicate): each one starts as one snapshot,
+ * boxed by the client under the new board's key and epoch 0. Inside the caller's transaction.
+ * Returns an error message when the set is invalid.
+ */
+export function createDocs(boardId: string, docs: NewDoc[]): string | null {
+  if (docs.length > MAX_DOCS_PER_BOARD) return "trop de documents";
+  const now = Date.now();
+  for (const d of docs) {
+    if (d.d.length > MAX_SNAPSHOT) return "document trop gros";
+    db.prepare("INSERT INTO board_docs (board_id, doc_id, epoch, snap, snap_seq, last_seq, bytes, updated_at) VALUES (?, ?, (SELECT key_epoch FROM items WHERE id = ?), ?, 1, 1, ?, ?)").run(
+      boardId,
+      d.doc,
+      boardId,
+      d.d,
+      d.d.length,
+      now,
+    );
+  }
+  return null;
+}
 
 /**
  * Key rotation, inside the caller's transaction: each document becomes one fresh snapshot under the

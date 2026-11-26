@@ -29,6 +29,8 @@ export type MachineRow = {
   hostname: string | null;
   os: string | null;
   arch: string | null;
+  agent_version: string | null;
+  agent_caps: string | null;
   last_seen: number | null;
   created_at: number;
   share_boards: number;

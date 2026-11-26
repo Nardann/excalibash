@@ -203,8 +203,16 @@ func TestOpenInputClose(t *testing.T) {
 	h.waitGen(t, c, "t1")
 
 	send(t, c, message{T: "ping", Ts: json.RawMessage("123")})
-	if m := recv(t, c); m.T != "pong" || string(m.Ts) != "123" {
-		t.Fatalf("expected pong 123, got %+v", m)
+	// The shell may still be printing its prompt: output frames can come before the pong.
+	for {
+		m := recv(t, c)
+		if m.T == "output" && m.ID == "t1" {
+			continue
+		}
+		if m.T != "pong" || string(m.Ts) != "123" {
+			t.Fatalf("expected pong 123, got %+v", m)
+		}
+		break
 	}
 
 	first := h.input(t, "t1", "tabA", 1, now(), "echo h''i\n")

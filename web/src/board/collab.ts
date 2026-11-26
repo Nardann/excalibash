@@ -71,6 +71,7 @@ export class BoardSession {
   private pendingInit: any = null;
   private retries = 0;
   private disposed = false;
+  private disposeListeners = new Set<() => void>();
   private reconnectTimer: number | undefined;
   /** Incoming messages are decrypted asynchronously but applied strictly in order. */
   private inbox: Promise<void> = Promise.resolve();
@@ -183,8 +184,16 @@ export class BoardSession {
     }
   }
 
+  /** Calls `fn` once when this session is closed (the board page was left). */
+  onDispose(fn: () => void): () => void {
+    this.disposeListeners.add(fn);
+    return () => this.disposeListeners.delete(fn);
+  }
+
   dispose() {
     this.disposed = true;
+    for (const fn of [...this.disposeListeners]) fn();
+    this.disposeListeners.clear();
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.sendTimer);
     this.ws?.close();
