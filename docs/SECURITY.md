@@ -521,7 +521,8 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
   `[A-Za-z0-9._:/!()&|<>=-]{1,64}` dont aucun ne commence par `-` (aucune option ne peut être injectée). Durée de 1 à
   300 s, taille de 50 Mio au plus ; le groupe de processus est arrêté à la fin, à l'annulation ou à l'abandon. Il faut
-  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'erreur de tcpdump est renvoyée.
+  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'agent renvoie un message clair (avec la commande
+  `setcap`) et la ligne d'origine de tcpdump en détail ; toutes les lignes d'erreur sont lues, pas seulement la première.
   « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
   l'extrémité d'un câble dont l'interface est renseignée, sur une icône qui a un shell local en cours.
 
