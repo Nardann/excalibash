@@ -78,7 +78,9 @@ pairingOwnerApi.post("/:code/approve", (req, res) => {
   if (blob(req.body.agentPub, 100) !== p.agentPub) throw new HttpError(409, "La clé de la machine a changé : recommence");
   if (!isClientId(req.body.id) || getMachine(req.body.id)) throw new HttpError(400, "Identifiant invalide");
   const token = "eba_" + randomBytes(24).toString("base64url");
-  db.prepare("INSERT INTO machines (id, owner_id, enc_name, enc_pub, enc_auth, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+  db.prepare(
+    "INSERT INTO machines (id, owner_id, enc_name, enc_pub, enc_auth, token_hash, created_at, share_boards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
     req.body.id,
     p.ownerId,
     blob(req.body.encName, 1000),
@@ -86,6 +88,7 @@ pairingOwnerApi.post("/:code/approve", (req, res) => {
     blob(req.body.encAuth, 300),
     sha256(token),
     Date.now(),
+    req.body.shareBoards === false ? 0 : 1,
   );
   p.approved = { token, sealedAuth: blob(req.body.sealedAuth, 300) };
   res.json({ ok: true });

@@ -7,6 +7,7 @@ import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
+import { recheckBoardSessions } from "./machines.ts";
 
 export const itemsApi = Router();
 itemsApi.use(requireUser);
@@ -197,6 +198,7 @@ itemsApi.delete("/items/:id", (req, res) => {
   else {
     db.prepare("UPDATE items SET deleted_at = ? WHERE id = ?").run(Date.now(), item.id);
     evictBoards(subtree(item.id), 4404, "supprimé");
+    recheckBoardSessions(boardIdsOf(subtree(item.id)));
   }
   const what = kindLabel(item.kind);
   const done = permanent ? "supprimé définitivement" : "mis à la corbeille";
@@ -274,6 +276,7 @@ itemsApi.put("/items/:id/grants/:userId", (req, res) => {
      ON CONFLICT(item_id, user_id) DO UPDATE SET role = excluded.role, wrapped_key = excluded.wrapped_key`,
   ).run(item.id, target.id, role, blob(req.body.wrappedKey, 300), uid, Date.now());
   evictBoards(subtree(item.id), 4410, "droits modifiés");
+  recheckBoardSessions(boardIdsOf(subtree(item.id)));
   if (isNew) {
     notify(req, [target.id], "itemShared", `Excalibash : ${req.user!.name} t'a partagé ${kindLabel(item.kind)}`, () => ({
       title: `${req.user!.name} t'a partagé ${kindLabel(item.kind)}`,
@@ -306,6 +309,7 @@ itemsApi.post("/items/:id/transfer", (req, res) => {
     db.prepare("UPDATE grants SET role = 'editor' WHERE item_id = ? AND user_id = ?").run(item.id, uid);
   });
   evictBoards(all, 4410, "droits modifiés");
+  recheckBoardSessions(boardIdsOf(all));
   notify(req, [to], "itemTransferred", `Excalibash : ${req.user!.name} t'a donné ${kindLabel(item.kind)}`, () => ({
     title: `${req.user!.name} t'a donné ${kindLabel(item.kind)}`,
     lines: [`**${req.user!.name}** t'a transféré ${kindLabel(item.kind)} : tu en es maintenant **propriétaire**.`, "Il est rangé dans « Mes fichiers »."],
@@ -394,16 +398,20 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const grantMap = new Map<string, string>(grantsIn.map((g: any) => [key(String(g.itemId), String(g.userId)), blob(g.wrappedKey, 300)]));
   if (grantMap.size !== remaining.length || !remaining.every((g) => grantMap.has(key(g.item_id, g.user_id)))) throw new HttpError(400, "Rotation incomplète (partages)");
 
+  // Sessions get new keys from someone holding the machine's auth key: its owner, or someone it
+  // was shared with directly (board links are under the old board keys, and dropped below).
+  const canRekey = (machineId: string, ownerId: string | null) =>
+    ownerId === uid || !!db.prepare("SELECT 1 FROM machine_shares WHERE machine_id = ? AND user_id = ?").get(machineId, uid);
   const known = new Map(terminalsOfBoards(boards).map((t) => [t.id, t]));
   const rekeyed = termsIn.map((t: any) => {
     const cur = known.get(String(t.id));
-    if (!cur || cur.machineOwnerId !== uid) throw new HttpError(400, "Terminal invalide dans la rotation");
+    if (!cur || !canRekey(cur.machineId, cur.machineOwnerId)) throw new HttpError(400, "Terminal invalide dans la rotation");
     return { id: cur.id, keyForBoard: blob(t.keyForBoard), keyForAgent: blob(t.keyForAgent), encLabel: blob(t.encLabel) };
   });
   const knownWebs = new Map(tunnelsOfBoards(boards).map((t) => [t.id, t]));
   const rekeyedWebs = websIn.map((t: any) => {
     const cur = knownWebs.get(String(t.id));
-    if (!cur || cur.machineOwnerId !== uid) throw new HttpError(400, "Tunnel web invalide dans la rotation");
+    if (!cur || !canRekey(cur.machineId, cur.machineOwnerId)) throw new HttpError(400, "Tunnel web invalide dans la rotation");
     return { id: cur.id, keyForBoard: blob(t.keyForBoard), keyForAgent: blob(t.keyForAgent, 4000), encLabel: blob(t.encLabel) };
   });
 
@@ -426,6 +434,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
     for (const g of remaining) {
       db.prepare("UPDATE grants SET wrapped_key = ? WHERE item_id = ? AND user_id = ?").run(grantMap.get(key(g.item_id, g.user_id))!, g.item_id, g.user_id);
     }
+    // Machine links are boxed under the old board keys: their owners link them again on their next visit.
+    for (const b of boards) db.prepare("DELETE FROM machine_boards WHERE board_id = ?").run(b);
   });
 
   evictBoards(all, 4409, "clés renouvelées", true);
@@ -435,6 +445,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
   const keptWebs = new Set(rekeyedWebs.map((t: { id: string }) => t.id));
   dropTunnels([...knownWebs.keys()].filter((id) => !keptWebs.has(id)));
   for (const t of rekeyedWebs) rekeyTunnel(t.id, t.keyForBoard, t.keyForAgent, t.encLabel);
+  // The board links went with the old keys: sessions they allowed are closed too.
+  recheckBoardSessions(boards);
   notify(req, [revoked], "accessRevoked", `Excalibash : ${req.user!.name} t'a retiré un accès`, () => ({
     title: "Un accès t'a été retiré",
     lines: [`**${req.user!.name}** t'a retiré l'accès à ${kindLabel(item.kind)} partagé avec toi.`],

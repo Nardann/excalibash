@@ -127,7 +127,7 @@ export function ShareModal({ node, onClose, giving = false }: { node: Node; onCl
   const revoke = async (m: Member) => {
     const ok = await confirmDialog({
       title: `Retirer ${m.name} ?`,
-      text: `Son accès est coupé et toutes les clés de « ${node.name} » (et de son contenu) sont renouvelées puis re-chiffrées dans ton navigateur. Les terminaux qui ne tournent pas sur tes machines seront fermés.`,
+      text: `Son accès est coupé et toutes les clés de « ${node.name} » (et de son contenu) sont renouvelées puis re-chiffrées dans ton navigateur. Les terminaux qui ne tournent ni sur tes machines ni sur celles qu'on t'a partagées seront fermés.`,
       confirm: "Retirer et renouveler les clés",
       danger: true,
     });

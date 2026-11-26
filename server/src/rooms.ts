@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 import { db, isClientId, newId } from "./db.ts";
 import type { User } from "./auth.ts";
-import { atLeast, getItem, getMachine, type Role } from "./access.ts";
+import { atLeast, getItem, getMachine, machineAccess, type Role } from "./access.ts";
 import { rooms, type BoardRoom } from "./hub.ts";
 import {
   createTerminal,
@@ -166,7 +166,7 @@ class Room implements BoardRoom {
       case "term.create": {
         if (!editor) return deny("Lecture seule");
         const machine = getMachine(String(msg.machineId));
-        if (!machine || machine.owner_id !== client.user.id) return deny("On ne peut ouvrir des terminaux que sur ses propres machines");
+        if (!machine || !machineAccess(client.user.id, machine, this.boardId)) return deny("Cette machine ne t'est pas partagée");
         if (!isClientId(msg.id) || terminalExists(msg.id)) return deny("Identifiant de terminal invalide");
         if (!str(msg.keyForBoard) || !str(msg.keyForAgent) || !str(msg.encLabel)) return deny("Clés manquantes");
         const terminal = createTerminal({
@@ -186,7 +186,7 @@ class Room implements BoardRoom {
       case "web.create": {
         if (!editor) return deny("Lecture seule");
         const machine = getMachine(String(msg.machineId));
-        if (!machine || machine.owner_id !== client.user.id) return deny("On ne peut ouvrir des tunnels que vers ses propres machines");
+        if (!machine || !machineAccess(client.user.id, machine, this.boardId)) return deny("Cette machine ne t'est pas partagée");
         if (!isClientId(msg.id) || tunnelExists(msg.id)) return deny("Identifiant de tunnel invalide");
         if (!str(msg.keyForBoard) || !str(msg.keyForAgent) || !str(msg.encLabel)) return deny("Clés manquantes");
         const web = createTunnel({

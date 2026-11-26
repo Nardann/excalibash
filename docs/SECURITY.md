@@ -137,8 +137,8 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
 - Ajout d'une machine : **le navigateur** génère la clé privée X25519 de l'agent (32 octets). Elle
   n'apparaît que dans la commande d'installation affichée à l'utilisateur.
-  - Clé d'autorisation : `machineAuth = HKDF(priv, "excalibash/machine-auth")`. Seuls le propriétaire
-    et l'agent la connaissent.
+  - Clé d'autorisation : `machineAuth = HKDF(priv, "excalibash/machine-auth")`. Seuls le propriétaire,
+    l'agent et les personnes avec qui il partage la machine la connaissent (voir « Partage de machines »).
   - Le serveur ne reçoit que des chiffrés du coffre, qu'il ne peut pas forger : la clé publique
     (`eb:machine:<id>`, pour l'empreinte), `machineAuth` (`eb:machine-auth:<id>`) et le nom.
   - Le jeton d'authentification à `/agent` est distinct et ne sert qu'à la connexion.
@@ -148,7 +148,7 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   - le navigateur du propriétaire affiche l'empreinte de cette clé, que l'humain compare avec celle affichée par la machine ;
   - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé (`seal(agentPub, machineAuth, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
   - un serveur qui substituerait sa propre clé ferait apparaître une empreinte différente de celle de l'écran de la machine. Deviner un code n'apporte rien d'autre que ce même risque : le dépôt de clé est limité en débit, et un code n'accepte qu'une seule machine.
-- Chaque terminal a une clé `K_t` générée par le navigateur **du propriétaire de la machine**.
+- Chaque terminal a une clé `K_t` générée par le navigateur **de qui l'ouvre**, qui doit détenir `machineAuth` (le propriétaire de la machine, ou une personne à qui il l'a partagée).
   Le serveur stocke :
   - `keyForBoard = box(K_b, K_t, "eb:termkey:<boardId>:<termId>")` ;
   - `keyForAgent = box(machineAuth, K_t, "eb:term:<termId>")`. Une clé simplement scellée avec la clé
@@ -180,8 +180,8 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
   comme les autres : même clé de terminal, mêmes trames chiffrées, même anti-rejeu. Seule la source
   change : une connexion réseau ouverte par l'agent au lieu d'un shell local.
 - La cible (`kind`, hôte, port, utilisateur, options) est scellée avec la clé du terminal sous
-  `machineAuth` (AAD `eb:term:<id>`) : seul le propriétaire de la machine peut la fixer, et le
-  serveur ne peut ni la lire ni la remplacer. Une nouvelle clé (rotation) ne change jamais la cible.
+  `machineAuth` (AAD `eb:term:<id>`) : seuls ceux qui détiennent cette clé (propriétaire, personnes à qui la
+  machine est partagée) peuvent la fixer, et le serveur ne peut ni la lire ni la remplacer. Une nouvelle clé (rotation) ne change jamais la cible.
 - L'agent valide chaque champ (hôte, port, utilisateur) avant de se connecter ; tout champ invalide
   ferme la session.
 - **Telnet et TCP brut** ne sont chiffrés que jusqu'à l'agent : entre la machine et l'équipement, le
@@ -195,7 +195,7 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
 ## Tunnels web
 
-- Le navigateur du propriétaire de la machine génère `K_w`. Il dépose `box(machineAuth, {k: K_w, url, insecure}, "eb:web:<id>")`
+- Le navigateur de qui ouvre le tunnel (propriétaire de la machine ou personne à qui elle est partagée) génère `K_w`. Il dépose `box(machineAuth, {k: K_w, url, insecure}, "eb:web:<id>")`
   pour l'agent : la **cible est scellée avec la clé**, et le serveur ne peut ni la lire ni la changer
   (pas de redirection vers un autre port ou un autre hôte). Il dépose aussi `box(K_b, K_w, "eb:webkey:…")` pour les membres
   du tableau, et la cible chiffrée dans le libellé.
@@ -239,20 +239,57 @@ les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
 
 ## État des câbles (ping)
 
-- Une IP saisie au bout d'un câble est testée depuis la machine à l'autre bout, seulement si cette machine
-  appartient à l'utilisateur qui regarde le tableau. Son navigateur dépose
+- Une IP saisie au bout d'un câble est testée depuis la machine à l'autre bout, seulement si l'utilisateur
+  qui regarde le tableau peut utiliser cette machine (la sienne, ou une machine partagée avec lui, voir « Partage de machines »). Son navigateur dépose
   `box(machineAuth, {targets}, "eb:probe:<rid>:<ts>")` via `POST /api/machines/<id>/probe`. Le serveur vérifie
-  que l'utilisateur possède la machine, limite à une sonde en cours et une toutes les 2 s par machine, et relaie
+  que l'utilisateur a accès à la machine, limite à une sonde en cours et une toutes les 2 s par machine, et relaie
   le chiffré à l'agent.
 - L'agent rejette les horodatages à plus de 5 min, les `rid` déjà vus et tout ce qui n'est pas scellé sous
   `machineAuth`. Il ne teste que de vraies adresses IP (au plus 32), une à une, avec le `ping` du système, l'adresse
   étant passée comme simple argument (jamais via un shell). Il répond `box(machineAuth, {r}, "eb:probe-res:<rid>")`.
 - Le serveur ne voit ni les adresses ni les résultats, et ne peut pas faire sonder quoi que ce soit : il ne
-  détient pas `machineAuth`. Les résultats restent dans le navigateur du propriétaire et ne sont pas partagés
-  avec les autres membres du tableau.
+  détient pas `machineAuth`. Les résultats restent dans le navigateur de qui a demandé la sonde et ne sont pas
+  partagés avec les autres membres du tableau.
 - La machine mémorisée par une icône est une donnée du tableau, que tout éditeur peut écrire. Elle n'est retenue
   que si cette machine a un terminal ou un tunnel ouvert sur ce tableau, d'après le serveur. Un éditeur ne peut
   donc pas faire envoyer des pings depuis la machine d'un autre en trafiquant une icône.
+
+## Partage de machines
+
+Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machine revient à confier cette clé.
+
+- **Partage direct** : le navigateur du propriétaire scelle `{auth: machineAuth, name, pub}` pour la clé publique du
+  destinataire (`seal(pub_user, …, "eb:machine-share:<machineId>")`). Cette clé est vérifiée contre l'épingle du coffre
+  (TOFU), exactement comme pour un partage de tableau : une clé changée est refusée sauf vérification de l'empreinte. Le
+  destinataire peut alors utiliser la machine depuis n'importe quel tableau dont il est éditeur.
+- **Partage via les tableaux** (option par machine, activée par défaut à la création, désactivée pour les machines
+  antérieures) : quand le propriétaire ouvre lui-même un shell ou un site sur une de ses machines dans un tableau
+  qu'il peut modifier, son navigateur dépose `box(K_b, {auth, name, pub}, "eb:machine-link:<boardId>:<machineId>")`.
+  Les membres du tableau peuvent le déchiffrer avec la clé du tableau.
+  - Le lien n'est **créé que sur une action du propriétaire** (ouvrir une session). Ni une icône (donnée du tableau que
+    tout éditeur peut écrire), ni la liste des sessions (fournie par le serveur), ni une session ouverte par quelqu'un
+    à qui la machine est partagée directement ne suffisent : personne ne peut faire remettre la machine aux membres
+    d'un tableau à la place du propriétaire. Après une rotation des clés, le navigateur ne recrée que les liens qu'il
+    avait créés lui-même (mémorisés localement).
+  - Le lien est retiré quand la machine n'a plus de session sur le tableau.
+  - Le serveur n'accepte un lien que du propriétaire, éditeur du tableau, avec l'option activée, hors corbeille ; il ne
+    le sert qu'aux éditeurs, et plus du tout si le propriétaire perd ses droits d'édition ou si le tableau part à la corbeille.
+- **Contrôle du serveur** : `term.create`, `web.create` et la sonde ne sont acceptés que pour le propriétaire, un
+  destinataire direct, ou (depuis ce tableau seulement) un éditeur du tableau lié, tant que le propriétaire en est encore
+  éditeur, que l'option est activée et que le tableau n'est pas à la corbeille. Le serveur ne sert pas les liens aux
+  lecteurs, mais ils ont la clé du tableau : comme pour la lecture seule, c'est une restriction du serveur, pas une
+  garantie cryptographique.
+- **Retrait** : retirer une personne, retirer un lien, désactiver l'option, changer un rôle, mettre le tableau à la
+  corbeille, le donner ou renouveler ses clés ferme les shells et les sites ouverts par ceux qui perdent l'accès. Une rotation des clés d'un tableau supprime ses liens (ils étaient chiffrés sous l'ancienne
+  clé) ; ses terminaux sont rafraîchis par quiconque détient `machineAuth` en propre (propriétaire ou partage direct).
+- Le serveur voit qui a accès à quelle machine et à quels tableaux elle est liée. Il ne voit ni la clé, ni le nom de la
+  machine.
+- **Limite** : `machineAuth` ne change pas quand on retire un accès. Quelqu'un qui l'a reçue et qui s'entendrait avec
+  le serveur pourrait encore ouvrir des sessions ; le serveur seul ne le peut pas. Pour une coupure complète, supprimer
+  la machine et l'appairer de nouveau (nouvelle clé).
+- **Origine non authentifiée** : comme pour les dossiers, un partage direct est scellé de façon anonyme. Un serveur
+  malveillant pourrait présenter à quelqu'un une « machine partagée par Alice » qui est en fait la sienne, et lire ce
+  qui y serait tapé. Un lien de tableau, lui, est chiffré sous la clé du tableau, que le serveur n'a pas.
 
 ## Client MCP
 
@@ -322,7 +359,8 @@ vérification de la clé publique, mêmes websockets de tableau et mêmes trames
 - **Disponibilité et retour en arrière** : le serveur peut refuser, retarder ou resservir une
   ancienne version complète d'un élément (chiffré authentique mais périmé).
 - **Membres** : les éditeurs peuvent taper dans les terminaux du tableau, avec les droits du
-  propriétaire de la machine. Les lecteurs ont les clés : la lecture seule est appliquée par le
+  propriétaire de la machine. Avec le partage via les tableaux, ils peuvent aussi ouvrir de nouvelles
+  sessions sur les machines liées au tableau. Les lecteurs ont les clés : la lecture seule est appliquée par le
   serveur, pas par la cryptographie.
 - **Suppression d'un compte par un admin** : elle ne déclenche pas de rotation sur les dossiers que
   ce compte partageait.

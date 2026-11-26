@@ -176,6 +176,29 @@ addColumn("sessions", "user_agent_label", "TEXT");
 addColumn("sessions", "ip_prefix", "TEXT");
 db.exec("CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id)");
 
+// Machine sharing. A direct share seals the machine auth key to one person; a board link boxes it
+// under a board's key, for the editors of that board (see docs/SECURITY.md, « Partage de machines »).
+// Machines from before this feature keep it off; new ones have it on unless the owner says otherwise.
+addColumn("machines", "share_boards", "INTEGER NOT NULL DEFAULT 1", "UPDATE machines SET share_boards = 0");
+db.exec(`
+CREATE TABLE IF NOT EXISTS machine_shares (
+  machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sealed TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (machine_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS machine_shares_user ON machine_shares(user_id);
+CREATE TABLE IF NOT EXISTS machine_boards (
+  machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  wrapped TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (machine_id, board_id)
+);
+CREATE INDEX IF NOT EXISTS machine_boards_board ON machine_boards(board_id);
+`);
+
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");
 }

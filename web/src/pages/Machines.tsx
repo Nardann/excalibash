@@ -1,12 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import { fr } from "date-fns/locale";
-import { Copy, Fingerprint, Loader2, Pencil, Plus, Server, Trash2 } from "lucide-react";
+import { Copy, Fingerprint, LogOut, Loader2, Pencil, Plus, Server, Trash2, Users } from "lucide-react";
 import { api, serverConfig } from "../api.ts";
 import { useKeys } from "../auth.tsx";
-import { approvePairing, createMachine, listMachines, renameMachine, type Machine } from "../vault.ts";
+import {
+  approvePairing,
+  createMachine,
+  listMachines,
+  machineShares,
+  renameMachine,
+  shareMachine,
+  unshareMachine,
+  type Machine,
+  type MachineShare,
+} from "../vault.ts";
 import { fingerprint, fromB64 } from "../crypto.ts";
-import { Modal, confirmDialog, copyText, toast } from "../components/ui.tsx";
+import { Modal, Switch, confirmDialog, copyText, toast } from "../components/ui.tsx";
+import { ShareMachineModal } from "../components/ShareMachineModal.tsx";
+import { useUser } from "../auth.tsx";
 
 type Enrollment = Awaited<ReturnType<typeof createMachine>> & { name: string };
 
@@ -18,6 +30,10 @@ export function Machines() {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   /** A machine just removed: the command that removes its agent from the machine itself. */
   const [removed, setRemoved] = useState<{ name: string; command: string } | null>(null);
+  const [sharing, setSharing] = useState<Machine | null>(null);
+  const user = useUser();
+  const mine = machines?.filter((m) => m.access === "owner") ?? null;
+  const sharedWithMe = machines?.filter((m) => m.access === "shared") ?? [];
 
   const load = useCallback(() => {
     listMachines(keys).then(setMachines).catch(toast.error);
@@ -42,10 +58,36 @@ export function Machines() {
     load();
   };
 
+  /** Opens the share dialog of a machine just added (once the list knows it). */
+  const shareNew = async (id: string) => {
+    const m = (await listMachines(keys).catch(() => [])).find((x) => x.id === id);
+    if (m) setSharing(m);
+    else toast.error("Machine introuvable");
+  };
+
+  const leave = async (m: Machine) => {
+    const ok = await confirmDialog({
+      title: `Ne plus utiliser « ${m.name} » ?`,
+      text: `Tu n'auras plus accès à cette machine de ${m.ownerName ?? "quelqu'un d'autre"}, et les shells et sites que tu y as ouverts seront fermés.`,
+      confirm: "Retirer",
+      danger: true,
+    });
+    if (!ok) return;
+    await unshareMachine(m.id, user.id).catch(toast.error);
+    load();
+  };
+
   const rename = async (m: Machine) => {
     const name = prompt("Nom de la machine", m.name);
     if (!name?.trim()) return;
     await renameMachine(keys, m.id, name.trim()).catch(toast.error);
+    // The people it is shared with get the new name too (board links follow on the owner's next visit).
+    const { shares } = await machineShares(m.id).catch(() => ({ shares: [] as MachineShare[] }));
+    const stale: string[] = [];
+    for (const sh of shares) {
+      await shareMachine(user, keys, { ...m, name: name.trim() }, { id: sh.userId, email: sh.email, publicKey: sh.publicKey }).catch(() => stale.push(sh.name));
+    }
+    if (stale.length) toast.error(`Nouveau nom non transmis à ${stale.join(", ")} (clé changée ou erreur) : partage à vérifier.`);
     load();
   };
 
@@ -101,14 +143,14 @@ export function Machines() {
             </button>
           </div>
         </div>
-        {machines === null ? (
+        {mine === null ? (
           <div className="row">Chargement…</div>
-        ) : machines.length === 0 ? (
+        ) : mine.length === 0 ? (
           <div className="row" style={{ color: "var(--text-2)" }}>
             Aucune machine pour l'instant. Ajoute-en une pour ouvrir des terminaux.
           </div>
         ) : (
-          machines.map((m) => (
+          mine.map((m) => (
             <div className="row" key={m.id}>
               <span className={`dot ${m.online ? "on" : ""}`} title={m.online ? "En ligne" : "Hors ligne"} />
               <Server size={18} style={{ color: "var(--muted)" }} />
@@ -125,6 +167,9 @@ export function Machines() {
                   <Fingerprint size={11} /> {m.fingerprint}
                 </div>
               </div>
+              <button className="btn btn-sm" title="Partager la machine avec d'autres personnes, ou via les tableaux" onClick={() => setSharing(m)}>
+                <Users size={16} /> Partager
+              </button>
               <button className="btn btn-sm btn-icon" title="Renommer" onClick={() => rename(m)}>
                 <Pencil size={16} />
               </button>
@@ -136,11 +181,42 @@ export function Machines() {
         )}
       </div>
 
+      {sharedWithMe.length > 0 && (
+        <div className="panel" style={{ marginTop: 18 }}>
+          <div className="panel-head">
+            <h3>Partagées avec moi</h3>
+          </div>
+          {sharedWithMe.map((m) => (
+            <div className="row" key={m.id}>
+              <span className={`dot ${m.online ? "on" : ""}`} title={m.online ? "En ligne" : "Hors ligne"} />
+              <Server size={18} style={{ color: "var(--muted)" }} />
+              <div className="grow">
+                <div className="title">{m.name}</div>
+                <div className="sub">
+                  De {m.ownerName} · {m.online ? `en ligne${m.hostname ? ` · ${m.hostname}` : ""}` : "hors ligne"}
+                </div>
+                <div className="sub mono" title="Empreinte de la clé de l'agent">
+                  <Fingerprint size={11} /> {m.fingerprint}
+                </div>
+              </div>
+              <button className="btn btn-sm btn-icon" title="Ne plus utiliser cette machine" style={{ color: "var(--danger)" }} onClick={() => leave(m)}>
+                <LogOut size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {adding && method === "code" && (
         <PairingModal
           onClose={() => {
             setAdding(false);
             load();
+          }}
+          onShare={(id) => {
+            setAdding(false);
+            load();
+            void shareNew(id);
           }}
         />
       )}
@@ -154,18 +230,29 @@ export function Machines() {
           }}
         />
       )}
-      {enrollment && <EnrollmentModal enrollment={enrollment} onClose={() => setEnrollment(null)} />}
+      {enrollment && (
+        <EnrollmentModal
+          enrollment={enrollment}
+          onClose={() => setEnrollment(null)}
+          onShare={() => {
+            setEnrollment(null);
+            void shareNew(enrollment.id);
+          }}
+        />
+      )}
+      {sharing && <ShareMachineModal machine={sharing} onClose={() => setSharing(null)} onChanged={load} />}
     </>
   );
 }
 
 /** Pairing with a short code typed on the machine: for consoles without copy-paste. */
-function PairingModal({ onClose }: { onClose: () => void }) {
+function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (machineId: string) => void }) {
   const keys = useKeys();
   const [pairing, setPairing] = useState<{ code: string; command: string; expiresAt: number } | null>(null);
   const [claim, setClaim] = useState<{ agentPub: string; agentName: string; fingerprint: string } | null>(null);
   const [name, setName] = useState("");
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [viaBoards, setViaBoards] = useState(true);
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
 
@@ -206,8 +293,7 @@ function PairingModal({ onClose }: { onClose: () => void }) {
     if (!pairing || !claim) return;
     setBusy(true);
     try {
-      await approvePairing(keys, pairing.code, claim.agentPub, name.trim() || claim.agentName || "machine");
-      setDone(true);
+      setDone(await approvePairing(keys, pairing.code, claim.agentPub, name.trim() || claim.agentName || "machine", viaBoards));
     } catch (e) {
       toast.error(e);
     } finally {
@@ -226,6 +312,9 @@ function PairingModal({ onClose }: { onClose: () => void }) {
             L'agent tourne maintenant sur « {name || claim?.agentName} » et redémarre tout seul. Sa clé privée n'a jamais quitté la machine.
           </p>
           <div className="modal-actions">
+            <button className="btn" onClick={() => onShare(done)}>
+              <Users size={16} /> Partager la machine
+            </button>
             <button className="btn btn-primary" onClick={onClose}>
               Fermer
             </button>
@@ -243,6 +332,7 @@ function PairingModal({ onClose }: { onClose: () => void }) {
             Nom dans Excalibash (chiffré)
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
           </label>
+          <ShareBoardsField on={viaBoards} onChange={setViaBoards} />
           <div className="modal-actions">
             <button className="btn" onClick={cancel}>
               Ce n'est pas la même
@@ -290,6 +380,7 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
   const keys = useKeys();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [viaBoards, setViaBoards] = useState(true);
   return (
     <Modal onClose={onClose}>
       <h2 className="display">Nouvelle machine</h2>
@@ -299,7 +390,7 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
           e.preventDefault();
           setBusy(true);
           try {
-            onCreated({ ...(await createMachine(keys, name.trim())), name: name.trim() });
+            onCreated({ ...(await createMachine(keys, name.trim(), viaBoards)), name: name.trim() });
           } catch (err) {
             toast.error(err);
             setBusy(false);
@@ -310,6 +401,7 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
           Nom
           <input className="input" autoFocus required placeholder="ex. laptop, vps-prod, raspberry" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
+        <ShareBoardsField on={viaBoards} onChange={setViaBoards} />
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             Annuler
@@ -323,7 +415,7 @@ function AddMachine({ onClose, onCreated }: { onClose: () => void; onCreated: (e
   );
 }
 
-function EnrollmentModal({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
+function EnrollmentModal({ enrollment, onClose, onShare }: { enrollment: Enrollment; onClose: () => void; onShare: () => void }) {
   const [pin, setPin] = useState<string | null>(null);
   useEffect(() => {
     serverConfig()
@@ -356,11 +448,29 @@ function EnrollmentModal({ enrollment, onClose }: { enrollment: Enrollment; onCl
         <Code text={manual} />
       </details>
       <div className="modal-actions">
+        <button className="btn" onClick={onShare}>
+          <Users size={16} /> Partager la machine
+        </button>
         <button className="btn btn-primary" onClick={onClose}>
           C'est fait
         </button>
       </div>
     </Modal>
+  );
+}
+
+/** The "share through boards" choice of a new machine (on by default). */
+function ShareBoardsField({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="field" style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
+      <div style={{ flex: 1 }}>
+        Partager via les tableaux
+        <div className="sub" style={{ fontWeight: 400 }}>
+          Quand tu ouvriras un shell ou un site sur cette machine dans un tableau partagé, ses éditeurs pourront l'utiliser depuis ce tableau. Modifiable ensuite avec « Partager ».
+        </div>
+      </div>
+      <Switch on={on} onChange={onChange} label="Partager via les tableaux" />
+    </div>
   );
 }
 
