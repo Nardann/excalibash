@@ -532,7 +532,7 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
   l'extrémité d'un câble, sur une icône qui a un shell local en cours ; l'interface se choisit dans la liste de celles de la
   machine (opération `ifaces` du canal de fichiers : noms, état et adresses lus par `net.Interfaces`, sans rien exécuter,
-  scellés comme le reste ; le serveur ne les voit pas). Les erreurs de tcpdump restent affichées dans le panneau.
+  scellés comme le reste ; le serveur ne les voit pas). Les erreurs de tcpdump restent affichées dans le panneau. Une capture appartient au tableau ouvert (pas à la fenêtre de l'extrémité) : elle continue si on ferme la fenêtre, un indicateur flottant permet de l'arrêter, le fichier est enregistré à la fin, et elle est abandonnée quand on quitte le tableau.
 
 ## Client MCP
 

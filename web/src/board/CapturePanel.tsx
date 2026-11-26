@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { toast } from "../components/ui.tsx";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AgentOutdatedNotice } from "../components/AgentOutdated.tsx";
-import { FileClient, IFACE_RE, filterProblem, type MachineIface, type Signal } from "./fileTransfer.ts";
+import { FileClient, IFACE_RE, filterProblem, type MachineIface } from "./fileTransfer.ts";
 import { splitDetails } from "./errorDetails.ts";
-import { saveBlob, exportName } from "./termTools.ts";
+import { exportName } from "./termTools.ts";
+import type { CaptureManager } from "./captureManager.ts";
 
 /** A persistent, red error with tcpdump's own line folded under it. */
 export function InlineError({ text }: { text: string }) {
@@ -50,14 +50,13 @@ function useMachineIfaces(client: FileClient): MachineIface[] | null | "unknown"
  * local shell (tcpdump). The pcap goes straight to the browser, sealed with the shell's key.
  * `cableIface` is the interface written on the cable: preselected when the machine has it.
  */
-export function CapturePanel({ client, cableIface }: { client: FileClient; cableIface: string }) {
+export function CapturePanel({ client, manager, captureKey, cableIface }: { client: FileClient; manager: CaptureManager; captureKey: string; cableIface: string }) {
   const [seconds, setSeconds] = useState(30);
   const [filter, setFilter] = useState("");
   const [mib, setMib] = useState(20);
-  const [bytes, setBytes] = useState<number | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const signal = useRef<Signal | null>(null);
+  // The capture lives in the board's manager, not here: closing this window leaves it running.
+  const entry = useSyncExternalStore(manager.subscribe, () => manager.get(captureKey));
   const ifaces = useMachineIfaces(client);
   const wanted = cableIface.trim();
   const names = Array.isArray(ifaces) ? ifaces.filter((i) => IFACE_RE.test(i.name)) : null;
@@ -66,7 +65,6 @@ export function CapturePanel({ client, cableIface }: { client: FileClient; cable
   const ifaceOk = IFACE_RE.test(iface.trim());
   const problem = filterProblem(filter);
   const valid = ifaceOk && !problem && seconds >= 1 && seconds <= 300 && mib >= 1 && mib <= 50;
-  useEffect(() => () => void (signal.current && (signal.current.aborted = true)), []);
 
   const refusal = client.refusal("capture");
   if (refusal)
@@ -77,33 +75,30 @@ export function CapturePanel({ client, cableIface }: { client: FileClient; cable
       </fieldset>
     );
 
-  const start = async () => {
-    const s: Signal = { aborted: false };
-    signal.current = s;
-    setError(null);
-    setBytes(0);
-    try {
-      const { name, blob } = await client.capture(
-        { iface: iface.trim(), filter: filter.trim() || undefined, seconds, maxBytes: Math.round(mib * 1024 * 1024) },
-        { signal: s, onProgress: setBytes },
-      );
-      saveBlob(blob, exportName(name.replace(/\.pcap$/, ""), "pcap"));
-      toast(`Capture terminée : ${(blob.size / 1024).toFixed(0)} Kio téléchargés`);
-    } catch (e) {
-      if (!s.aborted) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      signal.current = null;
-      setBytes(null);
-    }
-  };
+  const start = () =>
+    manager.start(captureKey, client, { iface: iface.trim(), filter: filter.trim() || undefined, seconds, maxBytes: Math.round(mib * 1024 * 1024) }, (name) =>
+      exportName(name.replace(/\.pcap$/, ""), "pcap"),
+    );
 
   return (
     // Enter in a capture field must not submit the cable form: that would close it and cancel the capture.
     <fieldset className="capture-box" onKeyDown={(e) => e.key === "Enter" && e.target instanceof HTMLInputElement && e.preventDefault()}>
       <legend>Capturer (pcap)</legend>
-      {bytes === null ? (
+      {entry?.phase !== "running" ? (
         <>
-          {error && <InlineError text={error} />}
+          {entry?.phase === "error" && (
+            <>
+              <InlineError text={entry.details ? `${entry.message}\nDétail : ${entry.details}` : entry.message} />
+              <button type="button" className="btn btn-sm" style={{ justifySelf: "start" }} onClick={() => manager.dismiss(captureKey)}>
+                Fermer le message
+              </button>
+            </>
+          )}
+          {entry?.phase === "done" && (
+            <div className="field-help" role="status" data-testid="capture-done">
+              Capture sur {entry.iface} terminée : {(entry.bytes / 1024).toFixed(0)} Kio, téléchargés dans {entry.file}.
+            </div>
+          )}
           {names ? (
             <label className="field">
               Interface à capturer
@@ -151,20 +146,58 @@ export function CapturePanel({ client, cableIface }: { client: FileClient; cable
           </button>
           <span className="field-help">
             tcpdump tourne sur la machine : l'agent doit être root (ou tcpdump avoir CAP_NET_RAW). La connexion de l'agent au serveur est exclue de la capture.
-            Le fichier .pcap arrive chiffré de bout en bout. Garde cette fenêtre ouverte jusqu'à la fin.
+            Le fichier .pcap arrive chiffré de bout en bout. La capture continue si tu fermes cette fenêtre ; le fichier est téléchargé à la fin.
           </span>
         </>
       ) : (
-        <div className="capture-row">
-          <span>{(bytes / 1024).toFixed(1)} Kio capturés…</span>
-          <button type="button" className="btn" onClick={() => signal.current && (signal.current.stop = true)}>
+        <div className="capture-row" data-testid="capture-running">
+          <span>
+            Capture sur {entry.iface} : {(entry.bytes / 1024).toFixed(1)} Kio capturés…
+          </span>
+          <button type="button" className="btn" disabled={entry.stopping} onClick={() => manager.stop(captureKey)}>
             Arrêter
           </button>
-          <button type="button" className="btn" onClick={() => signal.current && (signal.current.aborted = true)}>
+          <button type="button" className="btn" onClick={() => manager.cancel(captureKey)}>
             Annuler
           </button>
+          <span className="field-help" style={{ flexBasis: "100%" }}>
+            Tu peux fermer cette fenêtre : la capture continue et le fichier est téléchargé à la fin.
+          </span>
         </div>
       )}
     </fieldset>
+  );
+}
+
+/** Floating reminder of the captures running (or failed) on this board, whatever windows are open. */
+export function CaptureDock({ manager }: { manager: CaptureManager }) {
+  const list = useSyncExternalStore(manager.subscribe, manager.getSnapshot);
+  const shown = list.filter((e) => e.phase === "running" || e.phase === "error");
+  if (!shown.length) return null;
+  return (
+    <div className="capture-dock" data-testid="capture-dock">
+      {shown.map((e) =>
+        e.phase === "running" ? (
+          <div key={e.key} className="capture-chip" data-testid="capture-chip">
+            <span className="dot on" />
+            <span>
+              Capture {e.iface} · {e.bytes < 1024 ? `${e.bytes} o` : `${(e.bytes / 1024).toFixed(0)} Kio`}
+            </span>
+            <button className="btn btn-sm" disabled={e.stopping} onClick={() => manager.stop(e.key)}>
+              Arrêter
+            </button>
+          </div>
+        ) : e.phase === "error" ? (
+          <div key={e.key} className="capture-chip capture-chip-error" role="alert" data-testid="capture-chip-error">
+            <span>
+              Capture {e.iface} : {e.message}
+            </span>
+            <button className="btn btn-sm" onClick={() => manager.dismiss(e.key)}>
+              Fermer
+            </button>
+          </div>
+        ) : null,
+      )}
+    </div>
   );
 }

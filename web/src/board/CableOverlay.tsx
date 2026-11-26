@@ -5,6 +5,7 @@ import { AlertTriangle, Plus, X } from "lucide-react";
 import { Modal, toast } from "../components/ui.tsx";
 import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, vlanParts, type End, type EndInfo } from "./cables.ts";
 import type { FileClient } from "./fileTransfer.ts";
+import type { CaptureManager } from "./captureManager.ts";
 import { CapturePanel } from "./CapturePanel.tsx";
 import type { LinkState, LinkStates } from "./linkStatus.ts";
 
@@ -216,7 +217,7 @@ export function CableEndForm({
   onSave: (i: EndInfo) => void;
   onClose: () => void;
   /** A running local shell on the item's machine, when there is one: enables the capture. */
-  capture?: FileClient | null;
+  capture?: { client: FileClient; manager: CaptureManager; key: string } | null;
 }) {
   const [iface, setIface] = useState(info?.iface ?? "");
   const [ip, setIp] = useState(info?.ip ?? "");
@@ -300,7 +301,7 @@ export function CableEndForm({
             <Plus size={14} /> Ajouter un VLAN
           </button>
         </div>
-        {capture && <CapturePanel client={capture} cableIface={iface} />}
+        {capture && <CapturePanel client={capture.client} manager={capture.manager} captureKey={capture.key} cableIface={iface} />}
         {capture === null && iface.trim() && (
           <span className="field-help">
             Capture réseau (pcap) : ouvre d'abord un shell local sur la machine de cette extrémité ; la capture passe par lui. Les équipements Telnet / SSH

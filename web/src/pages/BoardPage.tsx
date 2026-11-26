@@ -34,6 +34,9 @@ const CodeEmbed = lazy(() => import("../board/CodeEmbed.tsx"));
 // Same for notebooks (Monaco again, plus the Markdown converter): same rule, same `host` prop.
 const NotebookEmbed = lazy(() => import("../board/NotebookEmbed.tsx"));
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
+import { capturesOf } from "../board/captureManager.ts";
+import { CaptureDock } from "../board/CapturePanel.tsx";
+import { saveBlob } from "../board/termTools.ts";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { FileClient } from "../board/fileTransfer.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
@@ -156,6 +159,8 @@ function Editor({ node }: { node: Node }) {
   themeRef.current = theme;
   const excalidrawTheme = useRef<string>(theme);
   const session = useMemo(() => new BoardSession(node.id, node.key!, node.epoch, node.role), [node.id, node.key, node.epoch, node.role]);
+  // Packet captures belong to the board, not to the cable-end window: closing it leaves them running.
+  const captures = useMemo(() => capturesOf(session, saveBlob, (text, error) => (error ? toast.error(text) : toast(text))), [session]);
   const [excalidraw, setExcalidraw] = useState<ExcalidrawImperativeAPI | null>(null);
   const [conn, setConn] = useState<ConnState>("connecting");
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -1258,6 +1263,7 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        <CaptureDock manager={captures} />
         {schema && <SchemaPanel report={schema} editor={editor} labelOf={schemaEndLabel} onFix={fixSchema} onRecheck={() => void runSchema()} onClose={() => setSchema(null)} />}
         {historyOpen && <HistoryPanel boardId={node.id} boardKey={node.key!} api={excalidraw} editor={editor} onClose={() => setHistoryOpen(false)} />}
         {editor && dock.length > 0 && (
@@ -1640,7 +1646,7 @@ function Editor({ node }: { node: Node }) {
               capture={(() => {
                 // A capture runs through a running local shell of the item, for editors.
                 const sh = session.canEdit && nd ? nd.shells.find((r) => { const t = session.terminals.get(r.terminalId); return t?.status === "running" && !isRemoteLabel(t.label); }) : undefined;
-                return sh ? new FileClient(session, sh.terminalId) : null;
+                return sh ? { client: new FileClient(session, sh.terminalId), manager: captures, key: `${cableEdit.cableId}:${cableEdit.end}` } : null;
               })()}
               onClose={() => setCableEdit(null)}
               onSave={(info) => {
