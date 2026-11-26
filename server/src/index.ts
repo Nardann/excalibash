@@ -9,6 +9,7 @@ import { currentSessionHash, pruneSessions, userFromRequest } from "./auth.ts";
 import { HttpError, publicUrl } from "./http.ts";
 import { announceSetup, authApi } from "./api/auth.ts";
 import { itemsApi } from "./api/items.ts";
+import { publicApi } from "./api/links.ts";
 import { machinesApi } from "./api/machines.ts";
 import { adminApi } from "./api/admin.ts";
 import { getItem, isTrashed, roleOn } from "./access.ts";
@@ -52,6 +53,8 @@ app.use((req, res, next) => {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   });
+  // Public links are for the people they were given to, not for search engines.
+  if (req.path.startsWith("/v/")) res.set("X-Robots-Tag", "noindex, nofollow");
   next();
 });
 
@@ -76,6 +79,7 @@ app.use("/api/machines", small, machinesApi);
 app.use("/api/pair", small, pairingAgentApi);
 app.use("/api/admin", small, adminApi);
 app.use("/api/account", small, accountApi);
+app.use("/api/public", publicApi);
 app.use("/api", (req, res, next) => (userFromRequest(req) ? large : small)(req, res, next), itemsApi);
 app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Introuvable" });

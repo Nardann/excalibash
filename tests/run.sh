@@ -8,7 +8,9 @@ cd "$(dirname "$0")/.."
 DATA=$(mktemp -d)
 PORT=${PORT:-6797}
 PROXY_PORT=${PROXY_PORT:-6799}
-TLS=off SMTP_TRANSPORT=log DATA_DIR="$DATA" PORT=$PORT PROXY_PORT=$PROXY_PORT node --disable-warning=ExperimentalWarning server/src/index.ts >"$DATA/server.log" 2>&1 &
+# Historique des tableaux : HISTORY_INTERVAL_MIN=0 = une version à chaque enregistrement (pas de délai minimum),
+# HISTORY_KEEP=3 pour tester la rétention.
+HISTORY_INTERVAL_MIN=0 HISTORY_KEEP=3 TLS=off SMTP_TRANSPORT=log DATA_DIR="$DATA" PORT=$PORT PROXY_PORT=$PROXY_PORT node --disable-warning=ExperimentalWarning server/src/index.ts >"$DATA/server.log" 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null || true; rm -rf "$DATA"' EXIT
 sleep 1.5

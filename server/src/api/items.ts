@@ -6,11 +6,14 @@ import { activeTerminalCount, dropBoardTerminals, dropTerminals, rekeyTerminal, 
 import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
 import { HttpError, blob, pid, publicUrl } from "../http.ts";
+import { purgeHistory } from "../history.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
 import { recheckBoardSessions } from "./machines.ts";
+import { linksApi } from "./links.ts";
 
 export const itemsApi = Router();
 itemsApi.use(requireUser);
+itemsApi.use(linksApi);
 
 type Entry = { id: string; v: number; n: number; c: string };
 
@@ -235,6 +238,27 @@ itemsApi.get("/items/:id/content", (req, res) => {
   res.json({ epoch: item.key_epoch, elements: JSON.parse(row.elements), files: JSON.parse(row.files) });
 });
 
+// ---- Board history (ciphertext copies; decrypted in the browser) -------------------------
+
+itemsApi.get("/items/:id/versions", (req, res) => {
+  const { item } = need(req, "viewer");
+  if (item.kind !== "board") throw new HttpError(400, "Ce n'est pas un tableau");
+  const rows = db.prepare("SELECT id, created_at, count, epoch FROM board_versions WHERE board_id = ? ORDER BY id DESC").all(item.id) as { id: number; created_at: number; count: number; epoch: number }[];
+  res.set("Cache-Control", "no-store").json(rows.map((r) => ({ id: r.id, createdAt: r.created_at, count: r.count, epoch: r.epoch })));
+});
+
+itemsApi.get("/items/:id/versions/:vid", (req, res) => {
+  const { item } = need(req, "viewer");
+  if (item.kind !== "board") throw new HttpError(400, "Ce n'est pas un tableau");
+  const v = db.prepare("SELECT epoch, hashes FROM board_versions WHERE id = ? AND board_id = ?").get(Number(req.params.vid), item.id) as { epoch: number; hashes: string } | undefined;
+  if (!v) throw new HttpError(404, "Version introuvable");
+  if (v.epoch !== item.key_epoch) throw new HttpError(409, "Version chiffrée avec d'anciennes clés");
+  const data = new Map((db.prepare("SELECT hash, data FROM board_entries WHERE board_id = ?").all(item.id) as { hash: string; data: string }[]).map((r) => [r.hash, r.data]));
+  const elements = (JSON.parse(v.hashes) as string[]).flatMap((h) => (data.has(h) ? [JSON.parse(data.get(h)!)] : []));
+  const row = db.prepare("SELECT files FROM boards WHERE id = ?").get(item.id) as { files: string };
+  res.set("Cache-Control", "no-store").json({ epoch: v.epoch, elements, files: JSON.parse(row.files) });
+});
+
 itemsApi.get("/items/:id/preview", (req, res) => {
   const { item } = need(req, "viewer");
   const row = db.prepare("SELECT preview FROM boards WHERE id = ?").get(item.id) as { preview: string | null } | undefined;
@@ -417,6 +441,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
 
   const now = Date.now();
   tx(() => {
+    // The revoked member may have seen public link tokens and keys: every link of the rotated boards dies with the old keys.
+    for (const b of boards) db.prepare("DELETE FROM board_links WHERE board_id = ?").run(b);
     db.prepare("DELETE FROM grants WHERE item_id = ? AND user_id = ?").run(item.id, revoked);
     for (const i of items) {
       const isRoot = i.id === item.id;
@@ -431,6 +457,8 @@ itemsApi.post("/items/:id/revoke", (req, res) => {
         b.id,
       );
     }
+    // Old versions are sealed under the previous key: they cannot be re-encrypted by the server.
+    purgeHistory(boards);
     for (const g of remaining) {
       db.prepare("UPDATE grants SET wrapped_key = ? WHERE item_id = ? AND user_id = ?").run(grantMap.get(key(g.item_id, g.user_id))!, g.item_id, g.user_id);
     }
