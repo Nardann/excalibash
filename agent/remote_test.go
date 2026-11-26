@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -95,10 +96,14 @@ func TestParseTarget(t *testing.T) {
 		`{"kind":"raw","host":"ts.local","port":7001}`:                    {Kind: "raw", Host: "ts.local", Port: 7001, HostKeyCheck: "tofu"},
 		`{"kind":"ssh","host":"h","port":2222,"hostKeyCheck":"off"}`:      {Kind: "ssh", Host: "h", Port: 2222, HostKeyCheck: "off"},
 		`{"kind":"ssh","host":"h","legacyKex":true,"legacyCiphers":true}`: {Kind: "ssh", Host: "h", Port: 22, LegacyKex: true, LegacyCiphers: true, HostKeyCheck: "tofu"},
+		`{"kind":"telnet","host":"sw","via":[{"host":"r1","user":"a"},{"kind":"ssh","host":"r2","port":2222}]}`: {
+			Kind: "telnet", Host: "sw", Port: 23, HostKeyCheck: "tofu",
+			Via: []target{{Kind: "ssh", Host: "r1", Port: 22, User: "a", HostKeyCheck: "tofu"}, {Kind: "ssh", Host: "r2", Port: 2222, HostKeyCheck: "tofu"}},
+		},
 	}
 	for in, want := range ok {
 		got, err := parseTarget(json.RawMessage(in))
-		if err != nil || *got != want {
+		if err != nil || !reflect.DeepEqual(*got, want) {
 			t.Errorf("parseTarget(%s) = %+v, %v; want %+v", in, got, err, want)
 		}
 	}
@@ -118,6 +123,11 @@ func TestParseTarget(t *testing.T) {
 		`{"kind":"ssh","host":"h","user":"` + strings.Repeat("u", 65) + `"}`,
 		`{"kind":"ssh","host":"h","hostKeyCheck":"yes"}`,
 		`{"kind":"ssh","host":"h","legacyKex":"true"}`,
+		`{"kind":"ssh","host":"h","via":[{"kind":"telnet","host":"r1"}]}`,
+		`{"kind":"ssh","host":"h","via":[{"host":"a b"}]}`,
+		`{"kind":"ssh","host":"h","via":[{"host":"r1","via":[{"host":"r0"}]}]}`,
+		`{"kind":"ssh","host":"h","via":"r1"}`,
+		`{"kind":"ssh","host":"h","via":[` + strings.TrimSuffix(strings.Repeat(`{"host":"r"},`, 9), ",") + `]}`,
 	}
 	for _, in := range bad {
 		if got, err := parseTarget(json.RawMessage(in)); err == nil {

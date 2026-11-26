@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -89,6 +90,34 @@ func (f *fakeSSH) serve(nc net.Conn, cfg *ssh.ServerConfig) {
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 	for nch := range chans {
+		// Jump host: forward the channel to the requested address (like sshd's direct-tcpip).
+		if nch.ChannelType() == "direct-tcpip" {
+			var d struct {
+				Host     string
+				Port     uint32
+				OrigHost string
+				OrigPort uint32
+			}
+			if ssh.Unmarshal(nch.ExtraData(), &d) != nil {
+				nch.Reject(ssh.Prohibited, "bad request")
+				continue
+			}
+			f.record("jump "+net.JoinHostPort(d.Host, itoa(d.Port)), false)
+			up, err := net.Dial("tcp", net.JoinHostPort(d.Host, itoa(d.Port)))
+			if err != nil {
+				nch.Reject(ssh.ConnectionFailed, err.Error())
+				continue
+			}
+			ch, creqs, err := nch.Accept()
+			if err != nil {
+				up.Close()
+				continue
+			}
+			go ssh.DiscardRequests(creqs)
+			go func() { io.Copy(ch, up); ch.CloseWrite(); ch.Close() }()
+			go func() { io.Copy(up, ch); up.Close() }()
+			continue
+		}
 		ch, creqs, err := nch.Accept()
 		if err != nil {
 			return
@@ -256,5 +285,76 @@ func TestSSHAbortAtPrompt(t *testing.T) {
 	}
 	if out := tm.output(); strings.Count(out, "password: ") != 1 || strings.Contains(out, "Authentification") {
 		t.Fatalf("Ctrl+C must stop authentication: %q", out)
+	}
+}
+
+// Two SSH jump hosts, then an SSH target: each hop asks for its own password in the terminal,
+// each one forwards to the next, and the shell is the target's.
+func TestSSHJumpHosts(t *testing.T) {
+	isolate(t)
+	hop1 := newFakeSSH(t, newSignerT(t), nil)
+	hop2 := newFakeSSH(t, newSignerT(t), nil)
+	dst := newFakeSSH(t, newSignerT(t), nil)
+	tm := startTerm(t, target{Kind: "ssh", Host: "127.0.0.1", Port: dst.port, HostKeyCheck: "tofu", Via: []target{
+		{Kind: "ssh", Host: "127.0.0.1", Port: hop1.port, User: "admin", HostKeyCheck: "tofu"},
+		{Kind: "ssh", Host: "127.0.0.1", Port: hop2.port, User: "admin", HostKeyCheck: "tofu"},
+	}})
+	prompts := func(n int) {
+		waitUntil(t, func() bool { return strings.Count(tm.output(), "password: ") >= n }, "%d password prompts, got %q", n, tm.output)
+	}
+	tm.waitFor(t, "Rebond 1/2")
+	prompts(1)
+	tm.send("secret\r")
+	tm.waitFor(t, "Rebond 2/2")
+	prompts(2)
+	tm.send("secret\r")
+	tm.waitFor(t, "login as (127.0.0.1): ")
+	tm.send("admin\r")
+	prompts(3)
+	tm.send("secret\r")
+	tm.waitFor(t, "welcome")
+	if _, w := hop1.state(); len(w) != 1 || w[0] != "jump 127.0.0.1:"+strconv.Itoa(hop2.port) {
+		t.Fatalf("hop 1 forwarded to %v", w)
+	}
+	if _, w := hop2.state(); len(w) != 1 || w[0] != "jump 127.0.0.1:"+strconv.Itoa(dst.port) {
+		t.Fatalf("hop 2 forwarded to %v", w)
+	}
+	tm.send("q")
+	if code := tm.exit(t); code != 3 {
+		t.Fatalf("exit code %d, want 3", code)
+	}
+}
+
+// A raw TCP target behind a jump host, and a hop that cannot reach the next address.
+func TestJumpToRawAndUnreachable(t *testing.T) {
+	isolate(t)
+	hop := newFakeSSH(t, newSignerT(t), nil)
+	ln, port := listen(t)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Write([]byte("raw-hello\r\n"))
+		io.Copy(c, c)
+	}()
+	tm := startTerm(t, target{Kind: "raw", Host: "127.0.0.1", Port: port, Via: []target{{Kind: "ssh", Host: "127.0.0.1", Port: hop.port, User: "admin", HostKeyCheck: "tofu"}}})
+	tm.waitFor(t, "password: ")
+	tm.send("secret\r")
+	tm.waitFor(t, "raw-hello")
+	tm.send("ping")
+	tm.waitFor(t, "ping")
+	tm.r.kill()
+	tm.exit(t)
+
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close() // nothing listens there any more
+	tm2 := startTerm(t, target{Kind: "raw", Host: "127.0.0.1", Port: dead, Via: []target{{Kind: "ssh", Host: "127.0.0.1", Port: hop.port, User: "admin", HostKeyCheck: "tofu"}}})
+	tm2.waitFor(t, "password: ")
+	tm2.send("secret\r")
+	tm2.waitFor(t, "ne peut pas joindre 127.0.0.1:"+strconv.Itoa(dead))
+	if code := tm2.exit(t); code == 0 {
+		t.Fatal("an unreachable target must end with an error")
 	}
 }

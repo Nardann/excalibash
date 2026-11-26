@@ -8,7 +8,16 @@ import { clearBroadcast, liveTargets, useBroadcastGroup } from "./broadcast.ts";
 
 export type DockItem = { id: string; open: boolean };
 /** `remote`: a Telnet / SSH device, through which nothing else can be reached. */
-export type DockGroup = { nodeId: string; title: string | null; shells: DockItem[]; webs: DockItem[]; remote?: boolean; machineName?: string };
+export type DockGroup = {
+  nodeId: string;
+  title: string | null;
+  shells: DockItem[];
+  webs: DockItem[];
+  remote?: boolean;
+  /** An SSH device: other devices can be reached by bouncing through it. */
+  bounce?: boolean;
+  machineName?: string;
+};
 type Kind = "terminal" | "web";
 
 const COLLAPSED_KEY = "eb-dock-collapsed";
@@ -115,8 +124,8 @@ export function WindowDock(p: {
                 <button title="Nouveau shell sur cette machine" onClick={(e) => p.onAddShell(g.nodeId, e.currentTarget)}>
                   <TerminalSquare size={14} />
                 </button>
-                {!g.remote && (
-                  <button title="Ajouter : Telnet / SSH ou site web" onClick={() => p.onAdd(g.nodeId)}>
+                {(!g.remote || g.bounce) && (
+                  <button title={g.remote ? "Rebondir depuis cet équipement vers un autre" : "Ajouter : Telnet / SSH ou site web"} onClick={() => p.onAdd(g.nodeId)}>
                     <Plus size={14} />
                   </button>
                 )}

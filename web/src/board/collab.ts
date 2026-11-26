@@ -32,7 +32,7 @@ const POINTER_INTERVAL = 50;
 /** Label of a remote session, e.g. "ssh admin@10.0.0.2:22 via web-01". */
 export function remoteLabel(t: RemoteTarget, machine: string): string {
   const host = t.host.includes(":") ? `[${t.host}]` : t.host;
-  return `${t.kind} ${t.user ? `${t.user}@` : ""}${host}:${t.port} via ${machine}`;
+  return `${t.kind} ${t.user ? `${t.user}@` : ""}${host}:${t.port} via ${[machine, ...(t.via ?? []).map((h) => h.host)].join(" → ")}`;
 }
 export const isRemoteLabel = (label: string) => /^(telnet|ssh|raw) \S+ via /.test(label);
 

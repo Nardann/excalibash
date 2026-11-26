@@ -56,22 +56,35 @@ func withLegacy(base []string, on bool, extra []string) []string {
 }
 
 func (r *remote) runSSH() int {
-	t := r.t
 	conn, ok := r.dial()
 	if !ok {
 		return 1
 	}
 	defer conn.Close()
+	client, ok := r.sshClient(conn, r.t)
+	if !ok {
+		return 1
+	}
+	defer client.Close()
+	return r.sshShell(client)
+}
 
+// sshClient opens an SSH connection to t over conn (TCP, or a channel through a jump host):
+// host key checked, login prompts in the terminal.
+func (r *remote) sshClient(conn net.Conn, t target) (*ssh.Client, bool) {
 	user := t.User
 	for tries := 0; user == ""; tries++ {
 		if tries == maxAuthTries {
-			return 1
+			return nil, false
 		}
-		r.printf("login as: ")
+		if len(r.t.Via) > 0 {
+			r.printf("login as (%s): ", t.Host)
+		} else {
+			r.printf("login as: ")
+		}
 		line, err := r.readLine(true)
 		if err != nil {
-			return 1
+			return nil, false
 		}
 		if line = strings.TrimSpace(line); targetUser.MatchString(line) {
 			user = line
@@ -89,7 +102,7 @@ func (r *remote) runSSH() int {
 		known, err := r.knownHosts()
 		if err != nil {
 			r.printf("Impossible d'ouvrir %s : %v\r\n", knownHostsPath(), err)
-			return 1
+			return nil, false
 		}
 		hostKeys = preferKnown(known, t.addr(), conn.RemoteAddr(), hostKeys)
 		check = r.tofu(known)
@@ -99,7 +112,7 @@ func (r *remote) runSSH() int {
 	base := ssh.SupportedAlgorithms()
 	cfg := &ssh.ClientConfig{
 		User:              user,
-		Auth:              r.authMethods(user, &aborted),
+		Auth:              r.authMethods(t, user, &aborted),
 		HostKeyCallback:   check,
 		HostKeyAlgorithms: hostKeys,
 	}
@@ -111,13 +124,15 @@ func (r *remote) runSSH() int {
 	c, chans, reqs, err := ssh.NewClientConn(conn, t.addr(), cfg)
 	if err != nil {
 		if r.ctx.Err() == nil && !aborted {
-			r.sshError(err)
+			r.sshError(t, err)
 		}
-		return 1
+		return nil, false
 	}
-	client := ssh.NewClient(c, chans, reqs)
-	defer client.Close()
+	return ssh.NewClient(c, chans, reqs), true
+}
 
+// sshShell runs the interactive shell of the session.
+func (r *remote) sshShell(client *ssh.Client) int {
 	sess, err := client.NewSession()
 	if err != nil {
 		r.printf("Ouverture de session SSH refusée : %v\r\n", err)
@@ -163,26 +178,26 @@ func (r *remote) runSSH() int {
 	}
 }
 
-func (r *remote) sshError(err error) {
+func (r *remote) sshError(t target, err error) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, errHostKey):
 		// already explained in the terminal
 	case strings.Contains(msg, "no common algorithm"):
-		r.printf("Négociation SSH impossible avec %s : %s\r\n", r.t.Host, msg)
-		if !r.t.LegacyKex || !r.t.LegacyHostKey || !r.t.LegacyCiphers {
+		r.printf("Négociation SSH impossible avec %s : %s\r\n", t.Host, msg)
+		if !t.LegacyKex || !t.LegacyHostKey || !t.LegacyCiphers {
 			r.printf("Essayer l'option “Équipement ancien” dans la configuration avancée.\r\n")
 		}
 	case strings.Contains(msg, "unable to authenticate"):
-		r.printf("Authentification refusée par %s.\r\n", r.t.Host)
+		r.printf("Authentification refusée par %s.\r\n", t.Host)
 	default:
-		r.printf("Connexion SSH impossible à %s : %s\r\n", r.t.addr(), msg)
+		r.printf("Connexion SSH impossible à %s : %s\r\n", t.addr(), msg)
 	}
 }
 
 // authMethods tries the agent user's unencrypted keys, then prompts in the terminal.
 // Ctrl+C at a prompt sets *aborted and skips the remaining methods.
-func (r *remote) authMethods(user string, aborted *bool) []ssh.AuthMethod {
+func (r *remote) authMethods(t target, user string, aborted *bool) []ssh.AuthMethod {
 	var methods []ssh.AuthMethod
 	if signers := defaultSigners(); len(signers) > 0 {
 		methods = append(methods, ssh.PublicKeys(signers...))
@@ -209,7 +224,7 @@ func (r *remote) authMethods(user string, aborted *bool) []ssh.AuthMethod {
 			return "", errAborted
 		}
 		refused()
-		r.printf("%s@%s's password: ", user, r.t.Host)
+		r.printf("%s@%s's password: ", user, t.Host)
 		return read(false)
 	})
 	interactive := ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
@@ -226,6 +241,10 @@ func (r *remote) authMethods(user string, aborted *bool) []ssh.AuthMethod {
 		}
 		answers := make([]string, len(questions))
 		for i, q := range questions {
+			// Through jump hosts, say which host asks: a password must not go to the wrong one.
+			if len(r.t.Via) > 0 {
+				r.printf("[%s] ", t.Host)
+			}
 			r.printf("%s", q)
 			a, err := read(echos[i])
 			if err != nil {
@@ -319,7 +338,7 @@ func (r *remote) tofu(known ssh.HostKeyCallback) ssh.HostKeyCallback {
 				r.printf("Impossible d'enregistrer la clé d'hôte dans %s : %v\r\n", knownHostsPath(), err)
 				return errHostKey
 			}
-			r.printf("\x1b[90mPremière connexion : clé d'hôte %s enregistrée.\r\nEmpreinte %s\x1b[0m\r\n", key.Type(), ssh.FingerprintSHA256(key))
+			r.printf("\x1b[90mPremière connexion à %s : clé d'hôte %s enregistrée.\r\nEmpreinte %s\x1b[0m\r\n", hostname, key.Type(), ssh.FingerprintSHA256(key))
 			return nil
 		case errors.As(err, &ke):
 			w := ke.Want[0]
