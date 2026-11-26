@@ -1,7 +1,7 @@
 import type { Request } from "express";
 import { db } from "./db.ts";
 import { emailEnabled, sendMail } from "./mailer.ts";
-import { publicUrl } from "./http.ts";
+import { mailLink } from "./http.ts";
 import type { MailBody } from "./mailTemplate.ts";
 
 /**
@@ -60,7 +60,7 @@ export function notify(req: Request, userIds: string[], event: NotifyEvent, subj
     .all(...ids) as { id: string; email: string; notify: string }[];
   const footer = {
     text: "Tu reçois cet email parce que cette notification est activée sur ton compte.",
-    link: { label: "Gérer mes notifications", url: `${publicUrl(req)}/account` },
+    link: mailLink(req, "/account", "Gérer mes notifications"),
   };
   for (const r of rows) {
     if (!readPrefs(r.notify)[event]) continue;

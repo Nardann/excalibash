@@ -161,14 +161,29 @@ export async function publicKeyOf(pkcs8: Uint8Array): Promise<Bytes> {
 
 /** The confirmation code an agent shows while pairing, as typed: "abcd-2345" → "ABCD2345". */
 export const normalizeConfirm = (code: string): string => code.toUpperCase().replace(/[^A-Z0-9]/g, "");
-export const CONFIRM_RE = /^[2-9A-HJKMNP-Z]{8}$/;
+const CONFIRM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 
 /**
- * Pairing tag: HMAC-SHA256(confirmation code, auth ‖ agentPub). The code goes from the machine's
+ * Whether a normalized confirmation code is well formed: 7 letters and a check letter,
+ * Σ (i+1)·index(c_i) mod 31 (same formula as the agent's confirmCheck). Catches a typo before
+ * the approval, which would otherwise leave a machine the agent refused.
+ */
+export function confirmValid(code: string): boolean {
+  if (code.length !== 8 || [...code].some((ch) => !CONFIRM_ALPHABET.includes(ch))) return false;
+  let sum = 0;
+  for (let i = 0; i < 7; i++) sum += (i + 1) * CONFIRM_ALPHABET.indexOf(code[i]!);
+  return CONFIRM_ALPHABET[sum % 31] === code[7];
+}
+
+/**
+ * Pairing tag: HMAC-SHA256(Argon2id(confirmation code, agentPub), auth ‖ agentPub). The code goes from the machine's
  * screen to this browser by hand, so the server cannot make an auth key the agent would accept.
  */
 export async function pairTag(confirm: string, auth: Uint8Array, agentPub: Uint8Array): Promise<Bytes> {
-  const k = await subtle.importKey("raw", utf8(normalizeConfirm(confirm)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  // Stretched first (salt: the agent's key): a tag obtained with a substituted key can't be used to
+  // search the code offline. Same parameters as the agent (agent/pair.go).
+  const stretched = await argon2id({ password: normalizeConfirm(confirm), salt: agentPub, ...KDF, hashLength: 32, outputType: "binary" });
+  const k = await subtle.importKey("raw", stretched as Bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const msg = new Uint8Array(auth.length + agentPub.length);
   msg.set(auth);
   msg.set(agentPub, auth.length);

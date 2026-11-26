@@ -178,8 +178,10 @@ export class FileClient {
             }
             const blob = new Blob(parts, { type: mime });
             blob.arrayBuffer().then(async (buf) => {
-              if (typeof body.size === "number" && body.size !== bytes) return finish(() => reject(new FileError("Transfert incomplet")));
-              if (body.sha256 && body.sha256 !== (await sha256(buf))) return finish(() => reject(new FileError("Empreinte SHA-256 incorrecte : fichier corrompu")));
+              // "end" is on the clear envelope: only the sealed last frame (with size and hash) proves the end.
+              if (body.end !== true || typeof body.size !== "number" || typeof body.sha256 !== "string") return finish(() => reject(new FileError("Transfert incomplet")));
+              if (body.size !== bytes) return finish(() => reject(new FileError("Transfert incomplet")));
+              if (body.sha256 !== (await sha256(buf))) return finish(() => reject(new FileError("Empreinte SHA-256 incorrecte : fichier corrompu")));
               finish(() => resolve({ name, blob }));
             });
           },

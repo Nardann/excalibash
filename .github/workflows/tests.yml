@@ -54,6 +54,14 @@ jobs:
           npm run build
           npm run build:mcp
 
+      # The notebook test starts a real Jupyter kernel through the agent.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Noyau Jupyter
+        run: python3 -m pip install ipykernel
+
       - name: Bout en bout
         run: ./tests/run.sh
 
