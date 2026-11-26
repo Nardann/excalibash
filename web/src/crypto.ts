@@ -230,6 +230,10 @@ export const AAD = {
   file: (boardId: string, fileId: string) => `eb:file:${boardId}:${fileId}`,
   preview: (boardId: string) => `eb:preview:${boardId}`,
   pointer: (boardId: string) => `eb:ptr:${boardId}`,
+  /** Board key wrapped under a public link key (epoch binds it to the current key generation). */
+  link: (boardId: string, epoch: number) => `eb:link:${boardId}:${epoch}`,
+  linkLabel: (boardId: string, publicId: string) => `eb:link-label:${boardId}:${publicId}`,
+  linkTitle: (boardId: string, publicId: string) => `eb:link-title:${boardId}:${publicId}`,
   termKey: (boardId: string, termId: string) => `eb:termkey:${boardId}:${termId}`,
   termLabel: (boardId: string, termId: string) => `eb:termlabel:${boardId}:${termId}`,
   termAgent: (termId: string) => `eb:term:${termId}`,
@@ -241,6 +245,9 @@ export const AAD = {
   /** Reachability probe asked of an agent by its owner, and its answer (agent/probe.go). */
   probe: (rid: string, ts: number) => `eb:probe:${rid}:${ts}`,
   probeRes: (rid: string) => `eb:probe-res:${rid}`,
+  /** File transfer and capture requests ridden on a local shell (agent/files.go), and their answers. */
+  fileReq: (termId: string, rid: string, ts: number) => `eb:file-req:${termId}:${rid}:${ts}`,
+  fileRes: (termId: string, rid: string, n: number) => `eb:file-res:${termId}:${rid}:${n}`,
   machine: (machineId: string) => `eb:machine:${machineId}`,
   machineName: (machineId: string) => `eb:machine:${machineId}:name`,
   machineAuth: (machineId: string) => `eb:machine-auth:${machineId}`,

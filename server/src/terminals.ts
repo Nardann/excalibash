@@ -212,6 +212,17 @@ export function terminalInput(boardId: string, id: string, frame: { s: string; k
   if (t && t.status === "running") sendAgent(t.machineId, { t: "input", id, ...frame });
 }
 
+/** The machine running a live terminal of this board (file transfers are relayed to it), if any. */
+export function terminalMachine(boardId: string, id: string): string | undefined {
+  const t = boardTerm(boardId, id);
+  return t && t.status === "running" ? t.machineId : undefined;
+}
+
+/** The machine a terminal belongs to, whatever its board. */
+export function terminalMachineOf(id: string): string | undefined {
+  return terms.get(id)?.machineId;
+}
+
 export function terminalResize(boardId: string, id: string, cols: number, rows: number): void {
   const t = boardTerm(boardId, id);
   if (!t) return;
@@ -357,6 +368,7 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
       case "ws.ack":
       case "ws.data":
       case "ws.close":
+      case "file.res":
         for (const fn of agentHooks.message) fn(machineId, msg);
         break;
       case "opened":

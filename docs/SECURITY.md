@@ -7,7 +7,7 @@ pas non plus se faire passer pour un utilisateur afin d'obtenir ses données.
 ## Ce que le serveur voit (métadonnées)
 
 Emails et noms d'affichage, la forme de l'arbre (qui est parent de qui, qui a accès à quoi),
-les dates (dont la dernière activité de chaque compte), pour chaque session ouverte la date de dernière
+les dates (dont la dernière activité de chaque compte), les liens publics d'un tableau (créateur, dates, expiration), pour chaque session ouverte la date de dernière
 utilisation, un libellé approximatif du navigateur et du système (« Firefox · Linux », 40 caractères au plus,
 déduit de l'User-Agent qui n'est jamais conservé tel quel) et un préfixe d'adresse IP (IPv4 en /24 « 192.168.1.x »,
 IPv6 en /48), les tailles, le nombre d'éléments, les ids
@@ -132,6 +132,33 @@ Chaque dossier et chaque tableau a sa propre clé `K` et un `id` généré par l
 
 `id`, `version` et `versionNonce` restent en clair : c'est ce qui permet au serveur de fusionner
 les modifications concurrentes (règle Excalidraw) sans rien lire du contenu.
+
+## Historique des tableaux
+
+Le serveur garde des versions passées d'un tableau **sans jamais rien déchiffrer** : il copie les
+chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
+
+- Stockage par tableau, adressé par le contenu : `board_entries(board_id, hash, data)` avec
+  `hash = SHA-256(chiffré sérialisé)`, et `board_versions` qui liste les empreintes dans l'ordre de la
+  scène. Un élément inchangé n'est stocké qu'une fois, quel que soit le nombre de versions.
+- Une version au plus toutes les `HISTORY_INTERVAL_MIN` minutes, à l'enregistrement du tableau, et une à
+  la fin de la session (départ du dernier client), seulement si la scène a changé. Rétention : les
+  `HISTORY_KEEP` dernières, la dernière de chacun des `HISTORY_DAYS` derniers jours, puis les plus
+  anciennes sautent au-delà de `HISTORY_MAX_MB` ; les chiffrés plus référencés sont supprimés.
+  `HISTORY_KEEP=0` désactive tout.
+- Lecture : `GET /api/items/:id/versions` et `/versions/:vid`, réservées à qui peut lire le tableau (un
+  lecteur peut consulter). Le déchiffrement, l'aperçu et la restauration se font dans le navigateur. Restaurer
+  est une modification de scène comme une autre : seuls les éditeurs peuvent l'écrire, le serveur le refuse
+  sinon.
+- Ce que cela révèle au serveur : les dates des versions, le nombre et la taille des éléments, ce qui a
+  changé d'une version à l'autre (ids et versions déjà visibles). Rien du contenu.
+- **Rotation des clés** : les versions sont chiffrées avec l'ancienne clé, que le serveur ne peut pas
+  remplacer. Elles sont donc **supprimées** avec la rotation (compromis : une personne révoquée ne peut plus rien lire
+  d'ancien, mais l'historique repart de zéro). La suppression définitive du tableau supprime aussi son historique.
+- Images : elles ne sont pas copiées. Une version renvoie les fichiers actuels du tableau ; une image retirée du
+  stockage de fichiers peut donc manquer dans une version ancienne.
+- La restauration laisse intacts les terminaux et sites (fenêtres) et les liens des machines, pour ne jamais
+  couper un shell en cours.
 
 ## Machines et terminaux
 
@@ -291,6 +318,45 @@ Ouvrir un shell, un tunnel ou une sonde exige `machineAuth` : partager une machi
   malveillant pourrait présenter à quelqu'un une « machine partagée par Alice » qui est en fait la sienne, et lire ce
   qui y serait tapé. Un lien de tableau, lui, est chiffré sous la clé du tableau, que le serveur n'a pas.
 
+## Fichiers et captures
+
+Envoyer un fichier dans le dossier d'un shell, en télécharger un, ou capturer le trafic d'une interface (pcap)
+passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`.
+
+- **Autorité = la clé du terminal.** Qui détient `K_t` peut déjà taper dans ce shell : le transfert ne donne aucun pouvoir
+  de plus. Les sessions Telnet, SSH et TCP brut sont refusées par l'agent (« transfert disponible seulement sur un shell
+  local »). Les lecteurs (viewer) sont refusés par le serveur, comme pour la saisie. Les captures sont lancées par
+  l'agent, donc avec les droits du compte de l'agent, comme le shell.
+- Trames : `file.req {term, rid, ts, d}` avec `d = box(K_t, opération, "eb:file-req:<term>:<rid>:<ts>")` ; réponses
+  `file.res {id, rid, n, d, end}` avec `d = box(K_t, corps, "eb:file-res:<term>:<rid>:<n>")`. `rid` est un identifiant
+  aléatoire de 128 bits. L'agent applique la clé **courante** du terminal (elle change au `rekey`), rejette
+  `|now − ts| > 5 min` et tout `(terminal, rid)` déjà vu : l'identifiant n'est enregistré qu'**après** authentification,
+  en une seule section critique (comme pour les tunnels web), dans une table bornée.
+- **Ce que voit le serveur** : la taille et le rythme des trames, la machine et le terminal concernés, le fait qu'un
+  transfert a lieu. **Il ne voit jamais** : noms de fichiers, chemins, contenus, noms d'interfaces, filtres. Il ne
+  renvoie une réponse qu'au socket qui a fait la requête (jamais en diffusion), ignore les `rid` inconnus, oublie une
+  requête sans réponse après 90 s, plafonne les requêtes en attente (32 par tableau) et la taille d'une trame
+  (400 Kio en base64), et annule un transfert si le socket du demandeur accumule plus de 8 Mio non lus.
+- **Limites** : 200 Mio par fichier, 192 Kio par morceau, 4 transferts simultanés par machine, 500 entrées par
+  listage, 60 s sans activité = abandon. Le flux est à fenêtre : l'agent n'envoie qu'une petite avance (8 morceaux)
+  avant les accusés du navigateur, ce qui borne la mémoire et arrête un téléchargement dont le demandeur a disparu.
+  Chaque fichier est vérifié par SHA-256 de bout en bout.
+- **Envoi** : le nom doit être un simple nom de fichier (ni `/`, `\`, NUL, ni `.` ou `..`, 255 octets au plus).
+  Le fichier est écrit dans `.<nom>.excalibash-part-<aléa>` (0600, `O_EXCL`) puis `fsync` et renommé ; un fichier existant
+  n'est jamais écrasé sans confirmation explicite (`overwrite`), et sans écrasement le renommage se fait par lien dur
+  pour qu'un fichier créé entre-temps ne soit pas remplacé. Un envoi abandonné ou expiré supprime son fichier temporaire.
+  Le fichier final est en 0600 (ou garde les droits du fichier remplacé). Le dossier de destination est celui du
+  shell (lu dans `/proc/<pid>/cwd` sous Linux ; sous macOS, faute de mieux, le dossier personnel du compte).
+- **Téléchargement** : fichiers ordinaires seulement (ni dossier, ni périphérique, ni tube).
+
+- **Capture** : l'agent lance `tcpdump -i <interface> -U -n -s 0 -w - -- <filtre>` directement, jamais via un shell.
+  L'interface doit correspondre à `^[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}$` ; le filtre est découpé en mots (32 au plus) de
+  `[A-Za-z0-9._:/!()&|<>=-]{1,64}` dont aucun ne commence par `-` (aucune option ne peut être injectée). Durée de 1 à
+  300 s, taille de 50 Mio au plus ; le groupe de processus est arrêté à la fin, à l'annulation ou à l'abandon. Il faut
+  que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'erreur de tcpdump est renvoyée.
+  « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
+  l'extrémité d'un câble dont l'interface est renseignée, sur une icône qui a un shell local en cours.
+
 ## Client MCP
 
 Le client MCP (`excalibash-mcp.mjs`, voir [MCP.md](MCP.md)) est un programme local qui ouvre une session
@@ -312,6 +378,39 @@ vérification de la clé publique, mêmes websockets de tableau et mêmes trames
   `--tableaux` limite les outils à des tableaux précis.
 - Le certificat d'une instance auto-signée se fait confiance via `NODE_EXTRA_CA_CERTS`, jamais en
   désactivant la vérification TLS.
+
+## Liens publics
+
+Un **lien public** donne la lecture d'**un seul tableau** à quiconque possède l'adresse
+`https://<instance>/v/<jeton>#<cléDuLien>`, sans compte. Seuls le propriétaire et les éditeurs du tableau
+peuvent en créer, lister et supprimer (les lecteurs et les administrateurs non membres n'ont aucun accès).
+Un tableau a 20 liens au plus.
+
+- `jeton` : 128 bits aléatoires (base64url), généré par le serveur et renvoyé **une seule fois** à la création.
+  Le serveur n'en stocke que le `SHA-256`. `cléDuLien` `K_l` : 256 bits aléatoires, générés par le navigateur du
+  créateur, **uniquement dans le fragment de l'URL**. Un navigateur n'envoie jamais le fragment (ni dans la requête,
+  ni dans `Referer`, d'ailleurs `Referrer-Policy: no-referrer`) : le serveur ne voit jamais `K_l`. La page publique
+  lit `location.hash`, ne l'écrit dans aucun stockage et ne le met dans aucune requête.
+- Le serveur stocke, par lien : `wrappedKey = box(K_l, K_b, "eb:link:<boardId>:<epoch>")`, le libellé
+  `box(K_b, libellé, "eb:link-label:<boardId>:<publicId>")` (vu par les éditeurs, ex. « Pour le jury »), le titre
+  `box(K_b, nom, "eb:link-title:<boardId>:<publicId>")` (le nom du tableau n'est pas servi autrement), la date de
+  création, l'expiration éventuelle, l'auteur et un identifiant public `publicId` (16 hex, choisi par le navigateur
+  pour entrer dans les AAD) qui sert à lister et supprimer.
+- `GET /api/public/<jeton>` sert le **chiffré** du tableau (éléments, images) et `wrappedKey` à qui connaît le jeton ;
+  le navigateur déchiffre `K_b` avec `K_l`, puis les éléments avec les AAD habituels. Un jeton inconnu, mal formé,
+  expiré, supprimé, ou un tableau à la corbeille répondent tous le même `404` (pas d'oracle). Limite : 60 requêtes par
+  minute et par IP, 300 par jeton. Réponse `Cache-Control: no-store`, `ETag` (`304` pour l'interrogation toutes les 15 s).
+- **Lecture seule par construction** : aucune route d'écriture n'accepte un jeton, et la page n'ouvre aucune websocket.
+  Les terminaux et les tunnels web ne sont jamais accessibles : leurs clés (`keyForBoard`) ne sont pas servies, et le
+  navigateur écarte les fenêtres et retire des tuiles de machines leurs shells, sites et cibles distantes.
+- **Rotation** : retirer un membre renouvelle les clés, et **tous les liens des tableaux concernés sont supprimés dans
+  la même transaction** (la personne retirée a pu voir jetons et clés). Supprimer le tableau, ou le vider de la
+  corbeille, supprime ses liens. Il faut créer de nouveaux liens après une rotation.
+- Ce que le serveur apprend : qu'un lien existe, qui l'a créé, quand, son expiration, et l'IP de ceux qui le lisent
+  (comme pour toute requête). Il ne voit ni `K_l`, ni le titre, ni le libellé, ni le contenu.
+- Limites : qui possède l'adresse complète lit le tableau, et peut la transmettre ; un lien ne se révoque que par suppression
+  (ou rotation). Le titre est figé à la création du lien. Comme pour le reste, un serveur malveillant qui sert du
+  JavaScript piégé sur `/v/…` pourrait lire le fragment : même limite que pour tout le code servi.
 
 ## HTTPS et certificat auto-signé
 
