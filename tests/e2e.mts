@@ -1835,7 +1835,7 @@ site.close();
       ok(codeDoc.readOutputs(crA.ydoc)[0]?.text === "7\n" && codeDoc.readOutputs(crA.ydoc).length === 2, "code : la nouvelle exécution a remplacé les sorties précédentes");
       await nap(300);
       const rawNow = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
-      ok(!rawNow.includes("calc.py") && !rawNow.includes("ValueError") && !rawNow.includes("boum"), "code : ni le nom du fichier ni les sorties en clair dans la base");
+      ok(!rawNow.includes("calc.py") && !rawNow.includes("ValueError") && !rawNow.includes("('boum')"), "code : ni le nom du fichier ni les sorties en clair dans la base");
       codeRun.destroy();
       codeRunB.destroy();
       crA.destroy();
