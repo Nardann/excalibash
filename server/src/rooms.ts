@@ -21,6 +21,7 @@ import {
   MAX_SNAPSHOT,
   appendUpdate,
   applySnapshot,
+  deleteDoc,
   docState,
   isB64,
   isDocId,
@@ -256,6 +257,7 @@ class Room implements BoardRoom {
       case "doc.up":
       case "doc.aw":
       case "doc.snap":
+      case "doc.del":
         this.onDoc(ws, client, msg, editor);
         break;
       case "file.req":
@@ -335,6 +337,24 @@ class Room implements BoardRoom {
         if (!r.ok) return fail(r.error);
         this.compactAsked.delete(doc);
         ws.send(JSON.stringify({ t: "doc.snapped", doc, upto: msg.upto }));
+        break;
+      }
+      case "doc.del": {
+        // Same rights as doc.up (editors, current key generation); no subscription needed since the
+        // window that owned the document is usually closed by then. Scoped to this board by the query.
+        if (!editor) return fail("Lecture seule");
+        if (msg.epoch !== this.epoch) return ws.send(JSON.stringify({ t: "rekey" }));
+        deleteDoc(this.boardId, doc);
+        // Subscribers (the sender included) learn it is gone and forget it.
+        const gone = JSON.stringify({ t: "doc.gone", doc });
+        const subs = this.docSubs.get(doc) ?? new Set<WebSocket>();
+        for (const peer of subs) {
+          this.clients.get(peer)?.docs.delete(doc);
+          if (peer.readyState === WebSocket.OPEN) peer.send(gone);
+        }
+        this.docSubs.delete(doc);
+        this.compactAsked.delete(doc);
+        if (!subs.has(ws)) ws.send(gone);
         break;
       }
       case "doc.aw": {

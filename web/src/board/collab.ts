@@ -3,6 +3,7 @@ import type { ExcalidrawImperativeAPI, Collaborator, SocketId, BinaryFiles, AppS
 import type { OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { Entry, RemoteTarget, Role, TerminalInfo, WebInfo, WebTarget } from "../api.ts";
 import { AAD, box, boxJson, boxText, newSymKey, randomId, toB64, unbox, unboxJson, unboxText, unwrapKey, utf8, wrapKey, type SymKey } from "../crypto.ts";
+import { discardDocs, docIds } from "./docGc.ts";
 import { decryptEntry, decryptFile, decryptPointer, encryptEntry, encryptFile, encryptPointer } from "./boardCrypto.ts";
 
 export type Peer = { id: string; userId: string; name: string; color: string; role: Role };
@@ -38,7 +39,7 @@ export type DocHandler = {
   onOpen: () => void;
   /** The socket was lost. */
   onClose: () => void;
-  /** doc.state / doc.up / doc.ack / doc.aw / doc.compact / doc.snapped / doc.err, in arrival order. */
+  /** doc.state / doc.up / doc.ack / doc.aw / doc.compact / doc.snapped / doc.gone / doc.err, in arrival order. */
   onMessage: (msg: any) => Promise<void> | void;
 };
 
@@ -146,6 +147,11 @@ export class BoardSession {
   /** Sends a raw doc.* frame; false when the socket is not open. */
   docSend(msg: object): boolean {
     return this.send(msg);
+  }
+
+  /** Asks the server to delete a shared document for good (editors only; subscribers get `doc.gone`). */
+  docDelete(doc: string): boolean {
+    return this.canEdit && this.send({ t: "doc.del", doc, epoch: this.epoch });
   }
 
   /** Routes the doc.* messages of `doc` to `handler`; it is told right away if the socket is already up. */
@@ -261,6 +267,7 @@ export class BoardSession {
       case "doc.aw":
       case "doc.compact":
       case "doc.snapped":
+      case "doc.gone":
       case "doc.err": {
         const h = typeof msg.doc === "string" ? this.docHandlers.get(msg.doc) : undefined;
         if (h) await h.onMessage(msg);
@@ -474,6 +481,8 @@ export class BoardSession {
         if (data?.node) {
           for (const sh of data.shells ?? []) this.closeTerminal(sh.terminalId);
           for (const w of data.webs ?? []) this.closeWeb(w.webId);
+          // Its code and notebook documents go with it (and the kernels of its notebooks).
+          void discardDocs(this, [...docIds(data.codes, false), ...docIds(data.notebooks, true)]);
         }
       }
       changed.push(e);

@@ -65,6 +65,11 @@ export function applySnapshot(boardId: string, docId: string, d: string, upto: n
   });
 }
 
+/** Permanently deletes a document (rows of its updates go with it through the foreign key). False when it did not exist. */
+export function deleteDoc(boardId: string, docId: string): boolean {
+  return db.prepare("DELETE FROM board_docs WHERE board_id = ? AND doc_id = ?").run(boardId, docId).changes > 0;
+}
+
 /** Everything a client needs to re-encrypt the documents of a board (key rotation). */
 export function listDocs(boardId: string) {
   const docs = db.prepare("SELECT doc_id, epoch, snap, snap_seq, last_seq FROM board_docs WHERE board_id = ? ORDER BY doc_id").all(boardId) as Pick<

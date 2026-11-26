@@ -54,6 +54,8 @@ class Shared {
   private errors = new Set<(m: string) => void>();
   /** The state of the server was received for the current socket: local updates may go out. */
   private live = false;
+  /** The document was deleted (window closed or node removed by an editor): nothing more is sent. */
+  private gone = false;
   private hasSynced = false;
   private appliedSeq = 0;
   private snapSeq = 0;
@@ -113,6 +115,7 @@ class Shared {
 
   private open() {
     this.live = false;
+    this.gone = false;
     const me = this.host.you;
     if (me) this.awareness.setLocalStateField("user", { name: me.name, color: me.color });
     this.host.docSend({ t: "doc.sub", doc: this.docId });
@@ -150,6 +153,14 @@ class Shared {
         }
         return;
       }
+      case "doc.gone":
+        this.gone = true;
+        this.live = false;
+        this.pending = [];
+        clearTimeout(this.updateTimer);
+        this.updateTimer = undefined;
+        this.fail("Ce document a été supprimé");
+        return;
       case "doc.compact":
         return this.compact();
       case "doc.snapped":
@@ -209,6 +220,10 @@ class Shared {
     clearTimeout(this.updateTimer);
     this.updateTimer = undefined;
     if (!this.pending.length) return;
+    if (this.gone) {
+      this.pending = [];
+      return;
+    }
     // Not synced or offline: dropped here, the diff against the server state after (re)subscribing covers it.
     if (!this.live || !this.host.canEdit) {
       this.pending = [];
