@@ -880,6 +880,7 @@ site.close();
   ok(pairOut.includes(fp), "l'empreinte affichée sur la machine est celle montrée dans le navigateur");
   const confirm = pairOut.match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1];
   ok(!!confirm, "la machine affiche un code de confirmation");
+  ok(c.confirmValid(c.normalizeConfirm(confirm!)) && !c.confirmValid("7KQ4FDX6") && c.confirmValid("7KQ4FDX5"), "le code de confirmation porte une lettre de contrôle (même calcul que l'agent)");
   await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, confirm!, "vm-tp"));
   const exit = await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
   ok(exit === 0, "l'agent est appairé et sa configuration enregistrée");

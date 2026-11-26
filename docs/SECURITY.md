@@ -243,9 +243,9 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   - le serveur crée un rendez-vous de 10 minutes, à usage unique, avec un code de 6 caractères ;
   - l'agent **génère sa propre paire X25519 sur la machine** et dépose sa clé publique ;
   - le navigateur du propriétaire affiche l'empreinte de cette clé, que l'humain compare avec celle affichée par la machine ;
-  - la machine affiche aussi un **code de confirmation** de 8 caractères (≈ 40 bits), que l'humain recopie dans le navigateur ; il ne passe jamais par le serveur ;
-  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé, suivi d'une étiquette `HMAC-SHA256(confirmation, machineAuth ‖ agentPub)` (`seal(agentPub, machineAuth ‖ tag, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
-  - le sceau seul est anonyme : le serveur connaît la clé publique de l'agent et le code, il pourrait donc sceller un `machineAuth` de son choix. Sans le code de confirmation, son étiquette est fausse et l'agent annule l'appairage. Il n'a qu'un essai par appairage ;
+  - la machine affiche aussi un **code de confirmation** de 8 caractères (7 aléatoires, ≈ 34 bits, et une lettre de contrôle qui fait repérer une faute de frappe dans le navigateur), que l'humain recopie dans le navigateur ; il ne passe jamais par le serveur ;
+  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé, suivi d'une étiquette `HMAC-SHA256(Argon2id(confirmation, sel = agentPub), machineAuth ‖ agentPub)` (`seal(agentPub, machineAuth ‖ tag, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
+  - le sceau seul est anonyme : le serveur connaît la clé publique de l'agent et le code, il pourrait donc sceller un `machineAuth` de son choix. Sans le code de confirmation, son étiquette est fausse et l'agent annule l'appairage. Il n'a qu'un essai par appairage. Les deux vérifications vont ensemble : un serveur qui substituerait sa clé (empreinte non comparée) obtiendrait une étiquette, mais l'Argon2id (64 Mio, 3 passes) rend la recherche du code hors ligne impraticable dans les 10 minutes de l'appairage ;
   - un serveur qui substituerait sa propre clé ferait apparaître une empreinte différente de celle de l'écran de la machine. Deviner un code n'apporte rien d'autre que ce même risque : le dépôt de clé est limité en débit, et un code n'accepte qu'une seule machine.
 - Chaque terminal a une clé `K_t` générée par le navigateur **de qui l'ouvre**, qui doit détenir `machineAuth` (le propriétaire de la machine, ou une personne à qui il l'a partagée).
   Le serveur stocke :
@@ -617,5 +617,17 @@ Un tableau a 20 liens au plus.
   l'appairer de nouveau.
 - **Images reconnaissables** : l'identifiant d'une image est l'empreinte SHA-1 de son contenu (choix
   d'Excalidraw), en clair. Le serveur peut tester si un tableau contient une image qu'il connaît déjà.
+- **Frappes supprimées** : les entrées d'un terminal sont numérotées (`k`) et l'agent refuse un numéro déjà vu,
+  mais pas un trou : le serveur peut retirer une trame (une touche, un morceau de collage) sans que l'agent le voie.
+  Un compteur contigu par terminal est prévu avec la mise à jour du protocole de l'agent (époque de `keyForAgent`).
+- **Élément racine** : la clé d'un élément à la racine vient d'un accès scellé de façon anonyme à son propriétaire.
+  Le serveur peut en remplacer un par une clé de son choix : l'élément paraît alors vide, et ce qui y serait écrit
+  ensuite lui serait lisible. Pour un élément dans un dossier, la clé venant du dossier parent l'emporte sur un accès
+  qui la contredirait. Le serveur peut aussi glisser dans une rotation un contact déjà épinglé ailleurs.
+- **Origine des tunnels** : l'adresse de l'origine proxy vient de `/api/config`. Un serveur qui en donnerait une autre
+  recevrait la clé du tunnel. L'identifiant d'un tunnel ne change pas quand sa clé est renouvelée : qui le connaît
+  peut encore envoyer du bruit (sans clé) jusqu'à la machine.
+- **Verrouillage d'un compte** : 8 tentatives de connexion par minute et par email, quelle que soit l'adresse.
+  Un inconnu peut empêcher quelqu'un de se connecter tant qu'il continue.
 - **Coffre ramené en arrière** : le serveur peut resservir une ancienne version du coffre (clés épinglées)
   ou n'en servir aucune ; un contact épinglé redevient alors « nouveau », sans alerte.

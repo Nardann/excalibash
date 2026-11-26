@@ -1,5 +1,5 @@
 import { isIPv4, isIPv6 } from "node:net";
-import { scryptSync, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
+import { scrypt, scryptSync, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Request, Response, NextFunction } from "express";
 import { db, serverSecret } from "./db.ts";
@@ -77,6 +77,41 @@ const DUMMY_HASH = hashSecret("excalibash-dummy");
 /** Same cost as a real check, so unknown emails cannot be told apart by timing. */
 export function burnVerify(secret: string): false {
   verifySecret(secret, DUMMY_HASH);
+  return false;
+}
+
+// The same, off the main thread (libuv pool), for routes anyone can call: a burst of logins must not
+// stall every board and terminal. At most a few at once; the others wait their turn.
+const SCRYPT_SLOTS = 4;
+let scryptBusy = 0;
+const scryptQueue: (() => void)[] = [];
+
+async function scryptAsync(secret: string, salt: Buffer, len: number): Promise<Buffer> {
+  if (scryptBusy >= SCRYPT_SLOTS) await new Promise<void>((r) => scryptQueue.push(r));
+  scryptBusy++;
+  try {
+    return await new Promise<Buffer>((resolve, reject) => scrypt(secret, salt, len, (e, k) => (e ? reject(e) : resolve(k))));
+  } finally {
+    scryptBusy--;
+    scryptQueue.shift()?.();
+  }
+}
+
+export async function hashSecretAsync(secret: string): Promise<string> {
+  const salt = randomBytes(16);
+  const hash = await scryptAsync(secret, salt, 32);
+  return `scrypt$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+export async function verifySecretAsync(secret: string, stored: string): Promise<boolean> {
+  const [, salt, hash] = stored.split("$");
+  if (!salt || !hash) return false;
+  const expected = Buffer.from(hash, "base64");
+  return timingSafeEqual(expected, await scryptAsync(secret, Buffer.from(salt, "base64"), expected.length));
+}
+
+export async function burnVerifyAsync(secret: string): Promise<false> {
+  await verifySecretAsync(secret, DUMMY_HASH);
   return false;
 }
 

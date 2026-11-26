@@ -158,8 +158,9 @@ itemsApi.post("/items/:id/move", (req, res) => {
     const keyWrap = blob(req.body.keyWrap, 200);
     tx(() => {
       db.prepare("UPDATE items SET parent_id = ?, key_wrap = ?, updated_at = ? WHERE id = ?").run(target.id, keyWrap, Date.now(), item.id);
-      // The owner reaches it through the new parent now.
-      db.prepare("DELETE FROM grants WHERE item_id = ? AND role = 'owner'").run(item.id);
+      // The owner reaches it through the new parent now. Only when the owner made the wrap: the server
+      // can't check one sent by an editor, and a bad one with no grant left would lock the owner out.
+      if (item.owner_id === uid) db.prepare("DELETE FROM grants WHERE item_id = ? AND role = 'owner'").run(item.id);
     });
   } else {
     if (item.owner_id !== uid) throw new HttpError(403, "Seul le propriétaire peut placer un élément à la racine");

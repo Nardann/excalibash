@@ -172,6 +172,9 @@ func TestUnderTarget(t *testing.T) {
 		{"/app", "/a/../../../etc", "/app/etc"},
 		{"", "/", "/"},
 		{"/app", "/", "/app/"},
+		{"/app", "/redirect/http://x", "/app/redirect/http://x"},
+		{"/app", "/a//b/./c", "/app/a//b/./c"},
+		{"/app", "/a/b/..", "/app/a/"},
 	} {
 		if got := underTarget(c.prefix, c.p); got != c.want {
 			t.Errorf("underTarget(%q, %q) = %q, want %q", c.prefix, c.p, got, c.want)

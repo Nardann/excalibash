@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // Pairing with a short code typed on the machine (no copy-paste needed). The agent makes its
@@ -35,8 +38,10 @@ const confirmLen = 8
 // newConfirmCode is a variable so tests can know the code the owner would read.
 var newConfirmCode = randomConfirmCode
 
+// randomConfirmCode: 7 random letters and a check letter, so a typo is caught in the browser
+// before anything is sent (a wrong code would otherwise leave a machine that never connects).
 func randomConfirmCode() string {
-	b := make([]byte, confirmLen)
+	b := make([]byte, confirmLen-1)
 	for i := range b {
 		var r [1]byte
 		for {
@@ -48,12 +53,26 @@ func randomConfirmCode() string {
 		}
 		b[i] = confirmAlphabet[int(r[0])%len(confirmAlphabet)]
 	}
-	return string(b)
+	return string(b) + string(confirmCheck(string(b)))
 }
 
-// pairTag binds the auth key to this agent's key under the confirmation code.
+// confirmCheck: Σ (i+1)·index(c_i) mod 31. With distinct weights and a prime modulus it catches
+// any single wrong letter and any swap of two neighbours. Same formula in web/src/crypto.ts.
+func confirmCheck(body string) byte {
+	sum := 0
+	for i := 0; i < len(body); i++ {
+		sum += (i + 1) * strings.IndexByte(confirmAlphabet, body[i])
+	}
+	return confirmAlphabet[sum%len(confirmAlphabet)]
+}
+
+// pairTag binds the auth key to this agent's key under the confirmation code. The code (~38 bits)
+// is first stretched with Argon2id, salted with the agent's key: a server that got a tag by
+// substituting its own key (an owner who skipped the fingerprint) can't search the code offline.
+// Same parameters as the account KDF and web/src/crypto.ts.
 func pairTag(confirm string, auth, pub []byte) []byte {
-	m := hmac.New(sha256.New, []byte(normalizeCode(confirm)))
+	k := argon2.IDKey([]byte(normalizeCode(confirm)), pub, 3, 64*1024, 1, 32)
+	m := hmac.New(sha256.New, k)
 	m.Write(auth)
 	m.Write(pub)
 	return m.Sum(nil)
@@ -98,9 +117,11 @@ func saveConfig(path string, c savedConfig) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// MkdirAll leaves an existing directory as it was.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
+	// MkdirAll leaves an existing directory as it was; tighten ours (not a --config ./x.json's).
+	if filepath.Base(dir) == "excalibash" {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
 	// A fresh file: WriteFile would keep the mode of a leftover .tmp, or follow a symlink planted there.
@@ -197,7 +218,7 @@ func pair(server, rawCode, name string, insecure bool, pin string) (savedConfig,
 			Token      string `json:"token"`
 			SealedAuth string `json:"sealedAuth"`
 		}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&res)
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 8<<10)).Decode(&res)
 		resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusAccepted:

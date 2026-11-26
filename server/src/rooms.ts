@@ -52,9 +52,13 @@ const AWARENESS_RATE = 10; // messages per second per socket
 // Every message: a generous bucket (cursors, typing, pastes) that still stops a flood.
 const MESSAGE_RATE = 300; // per second per socket
 const MESSAGE_BURST = 3000;
+// Elements of a board, deleted ones included (far above any real diagram).
+const MAX_ELEMENTS = 50_000;
+const MAX_ELEMENT_BYTES = 128 * 1024 * 1024;
 // Images of a board (encrypted, base64): beyond this, new ones are refused.
 const MAX_FILES = 2000;
-const MAX_FILES_BYTES = 512 * 1024 * 1024;
+// Stays well below V8's longest string (~512 MiB): flush() serializes them all in one JSON string.
+const MAX_FILES_BYTES = 256 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS = 64;
 const COMPACT_RETRY = 5000;
 
@@ -97,6 +101,8 @@ class Room implements BoardRoom {
   private docSubs = new Map<string, Set<WebSocket>>();
   /** When a compaction was last requested per document (not repeated while one is likely under way). */
   private compactAsked = new Map<string, number>();
+  /** Total size of the element ciphertexts (flush() serializes them in one string). */
+  private elementBytes = 0;
 
   constructor(boardId: string) {
     this.boardId = boardId;
@@ -106,6 +112,7 @@ class Room implements BoardRoom {
     for (const e of JSON.parse(row.elements) as Entry[]) {
       this.elements.set(e.id, e);
       this.order.push(e.id);
+      this.elementBytes += e.c.length;
     }
     this.files = JSON.parse(row.files);
   }
@@ -190,9 +197,23 @@ class Room implements BoardRoom {
         for (const e of msg.elements) {
           if (!isEntry(e)) continue;
           const entry: Entry = { id: e.id, v: e.v, n: e.n, c: e.c };
-          if (!isNewer(entry, this.elements.get(e.id))) continue;
-          if (!this.elements.has(e.id)) this.order.push(e.id);
+          const prev = this.elements.get(e.id);
+          if (!isNewer(entry, prev)) continue;
+          const grown = this.elementBytes + entry.c.length - (prev?.c.length ?? 0);
+          if (grown > MAX_ELEMENT_BYTES) {
+            deny("Ce tableau a atteint sa taille maximale");
+            break;
+          }
+          if (!prev) {
+            // Deleted elements stay (as tombstones): this bounds what one board can hold in memory.
+            if (this.order.length >= MAX_ELEMENTS) {
+              deny("Ce tableau a atteint sa limite d'éléments");
+              break;
+            }
+            this.order.push(e.id);
+          }
           this.elements.set(e.id, entry);
+          this.elementBytes = grown;
           accepted.push(entry);
         }
         if (accepted.length) {
@@ -404,7 +425,13 @@ class Room implements BoardRoom {
 
   private scheduleSave(): void {
     if (this.saveTimer) return;
-    this.saveTimer = setTimeout(() => this.flush(), SAVE_DELAY);
+    this.saveTimer = setTimeout(() => {
+      try {
+        this.flush();
+      } catch (e) {
+        console.error("[room] sauvegarde", this.boardId, e);
+      }
+    }, SAVE_DELAY);
   }
 
   /** Whether the board is still under the keys this room was opened with. */

@@ -36,7 +36,8 @@ let warnedHost = false;
 export function mailLink(req: Request, path: string, label: string): MailLink | undefined {
   if (config.publicUrl) return { label, url: config.publicUrl.replace(/\/$/, "") + path };
   const host = req.hostname?.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host && knownHostnames().includes(host)) return { label, url: publicUrl(req) + path };
+  // The URL is built from the very value checked (req.host follows X-Forwarded-Host like req.hostname).
+  if (host && knownHostnames().map((n) => n.toLowerCase()).includes(host)) return { label, url: `${req.protocol}://${req.host}${path}` };
   if (!warnedHost) {
     warnedHost = true;
     console.warn(`[mail] hôte « ${host} » inconnu : liens retirés des emails. Définir PUBLIC_URL.`);

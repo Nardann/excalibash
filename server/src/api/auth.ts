@@ -18,7 +18,9 @@ import {
   userCount,
   userFromRequest,
   verifySecret,
-  burnVerify,
+  verifySecretAsync,
+  burnVerifyAsync,
+  hashSecretAsync,
 } from "../auth.ts";
 import { HttpError, blob, mailLink, str } from "../http.ts";
 import { config } from "../config.ts";
@@ -137,6 +139,10 @@ authApi.post("/register", async (req, res) => {
   if (!EMAIL.test(email)) throw new HttpError(400, "Email invalide");
   if (!name) throw new HttpError(400, "Nom requis");
   if (!isClientId(b.id)) throw new HttpError(400, "Identifiant invalide");
+  // Hashed first (off the main thread): from the checks to the insert, nothing awaits, so two
+  // registrations can't both pass them (nor both become the first, admin, account).
+  const authHash = await hashSecretAsync(blob(b.authKey, 100));
+  const recoveryHash = await hashSecretAsync(blob(b.recoveryAuth, 100));
   const existing = findUserByEmail(email);
   if (existing && emailEnabled() && !flags(existing.id).email_verified) {
     throw new HttpError(409, "Un compte attend déjà la vérification de cet email : utilise « Renvoyer le code » ou réessaie dans 24 h");
@@ -151,12 +157,12 @@ authApi.post("/register", async (req, res) => {
     b.id,
     email,
     name,
-    hashSecret(blob(b.authKey, 100)),
+    authHash,
     blob(b.salt, 64),
     blob(b.publicKey, 100),
     blob(b.encPrivateKey, 400),
     blob(b.recoveryEncPrivateKey, 400),
-    hashSecret(blob(b.recoveryAuth, 100)),
+    recoveryHash,
     first ? 1 : 0,
     pickColor(userCount()),
     Date.now(),
@@ -219,14 +225,14 @@ authApi.post("/resend", async (req, res) => {
   res.json({ ok: true });
 });
 
-authApi.post("/login", (req, res) => {
+authApi.post("/login", async (req, res) => {
   const email = str(req.body.email);
   limit(`login:${req.ip}`, 20);
   limit(`login:${email.toLowerCase()}`, 8);
   const row = findUserByEmail(email);
   const authKey = String(req.body.authKey ?? "");
-  if (!row || !verifySecret(authKey, row.auth_hash)) {
-    if (!row) burnVerify(authKey);
+  if (!row || !(await verifySecretAsync(authKey, row.auth_hash))) {
+    if (!row) await burnVerifyAsync(authKey);
     throw new HttpError(401, "Email ou mot de passe incorrect");
   }
   if (!flags(row.id).email_verified) coded(403, "Vérifie ton email pour te connecter.", "EMAIL_NOT_VERIFIED");
@@ -243,13 +249,13 @@ authApi.post("/login", (req, res) => {
 });
 
 /** Step 1 of account recovery: prove the recovery key, receive the private key encrypted under it. */
-authApi.post("/recover", (req, res) => {
+authApi.post("/recover", async (req, res) => {
   const email = str(req.body.email);
   limit(`recover:${req.ip}`, 5);
   const row = findUserByEmail(email);
   const proof = String(req.body.recoveryAuth ?? "");
-  if (!row || !verifySecret(proof, row.recovery_auth_hash)) {
-    if (!row) burnVerify(proof);
+  if (!row || !(await verifySecretAsync(proof, row.recovery_auth_hash))) {
+    if (!row) await burnVerifyAsync(proof);
     throw new HttpError(401, "Email ou clé de récupération incorrecte");
   }
   checkSuspended(row.id);
@@ -257,18 +263,18 @@ authApi.post("/recover", (req, res) => {
 });
 
 /** Step 2: set a new password (re-encrypted private key), logging out every other session. */
-authApi.post("/recover/finish", (req, res) => {
+authApi.post("/recover/finish", async (req, res) => {
   const email = str(req.body.email);
   limit(`recover:${req.ip}`, 5);
   const row = findUserByEmail(email);
   const proof = String(req.body.recoveryAuth ?? "");
-  if (!row || !verifySecret(proof, row.recovery_auth_hash)) {
-    if (!row) burnVerify(proof);
+  if (!row || !(await verifySecretAsync(proof, row.recovery_auth_hash))) {
+    if (!row) await burnVerifyAsync(proof);
     throw new HttpError(401, "Email ou clé de récupération incorrecte");
   }
   checkSuspended(row.id);
   db.prepare("UPDATE users SET auth_hash = ?, kdf_salt = ?, enc_private_key = ? WHERE id = ?").run(
-    hashSecret(blob(req.body.authKey, 100)),
+    await hashSecretAsync(blob(req.body.authKey, 100)),
     blob(req.body.salt, 64),
     blob(req.body.encPrivateKey, 400),
     row.id,
