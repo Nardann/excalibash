@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
 	"os/exec"
 	"regexp"
@@ -16,11 +17,16 @@ import (
 // reach these addresses?". The request is boxed under the machine auth key (shared only with
 // the owner), so the server can neither read the addresses nor make the agent probe anything.
 // Each address is checked with the system's ping, given as a plain argument (never a shell).
+// A request with kind "ifaces" instead asks for the machine's network interfaces and addresses
+// (net.Interfaces, no command run), to compare them with the diagram.
 
 const (
 	maxProbeTargets = 32
 	probeParallel   = 8
 	probeTimeout    = 3 * time.Second
+	// Caps of the "ifaces" answer: a machine with more is truncated, never refused.
+	maxProbeIfaces = 256
+	maxIfaceAddrs  = 64
 )
 
 type probeHub struct {
@@ -62,13 +68,21 @@ func (p *probeHub) handle(msg message, out *outbox) {
 		return
 	}
 	var req struct {
+		Kind    string   `json:"kind"`
 		Targets []string `json:"targets"`
 	}
 	if json.Unmarshal(pt, &req) != nil || len(req.Targets) > maxProbeTargets {
 		return
 	}
-	results := probeAll(req.Targets, ping)
-	plain, _ := json.Marshal(map[string]any{"r": results})
+	var plain []byte
+	switch req.Kind {
+	case "", "ping":
+		plain, _ = json.Marshal(map[string]any{"r": probeAll(req.Targets, ping)})
+	case "ifaces":
+		plain, _ = json.Marshal(map[string]any{"ifaces": listIfaces(systemIfaces)})
+	default:
+		return
+	}
 	boxed, err := box(p.auth, plain, "eb:probe-res:"+msg.Rid)
 	if err != nil {
 		return
@@ -166,4 +180,59 @@ func ping(addr netip.Addr) probeResult {
 		}
 	}
 	return r
+}
+
+// ifaceInfo is one network interface as reported to the owner's browser.
+type ifaceInfo struct {
+	Name    string   `json:"name"`
+	Up      bool     `json:"up"`
+	Running bool     `json:"running"`
+	MTU     int      `json:"mtu"`
+	MAC     string   `json:"mac,omitempty"`
+	Addrs   []string `json:"addrs"`
+}
+
+// ifaceSource gives the interfaces and the addresses of each one (net.Interfaces + Addrs).
+type ifaceSource func() ([]net.Interface, func(net.Interface) ([]net.Addr, error), error)
+
+func systemIfaces() ([]net.Interface, func(net.Interface) ([]net.Addr, error), error) {
+	list, err := net.Interfaces()
+	return list, func(i net.Interface) ([]net.Addr, error) { return i.Addrs() }, err
+}
+
+// listIfaces describes the machine's interfaces, at most maxProbeIfaces of them with at most
+// maxIfaceAddrs addresses each, as "address/prefix". Nothing is executed.
+func listIfaces(src ifaceSource) []ifaceInfo {
+	out := []ifaceInfo{}
+	list, addrsOf, err := src()
+	if err != nil {
+		return out
+	}
+	for _, i := range list {
+		if len(out) >= maxProbeIfaces {
+			break
+		}
+		info := ifaceInfo{
+			Name:    i.Name,
+			Up:      i.Flags&net.FlagUp != 0,
+			Running: i.Flags&net.FlagRunning != 0,
+			MTU:     i.MTU,
+			MAC:     i.HardwareAddr.String(),
+			Addrs:   []string{},
+		}
+		addrs, _ := addrsOf(i)
+		for _, a := range addrs {
+			if len(info.Addrs) >= maxIfaceAddrs {
+				break
+			}
+			if n, ok := a.(*net.IPNet); ok {
+				ones, _ := n.Mask.Size()
+				info.Addrs = append(info.Addrs, n.IP.String()+"/"+strconv.Itoa(ones))
+			} else {
+				info.Addrs = append(info.Addrs, a.String())
+			}
+		}
+		out = append(out, info)
+	}
+	return out
 }

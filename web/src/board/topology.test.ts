@@ -114,6 +114,8 @@ const nameOf = (id: string) => names[id] ?? "Machine";
   ok(y.includes("VLAN 10 ip 10.0.10.1/24"), "containerlab: VLAN address as comment");
   const lines = vlanLines({ vlans: "10, 20, 30-35", vlanIps: { "10": "10.0.10.1/24" } });
   ok(lines.join("|") === "VLAN 20, 30-35|VLAN 10 10.0.10.1/24", `label: plain VLANs together, one line per VLAN with an address (${lines.join(" | ")})`);
+  const proto = vlanLines({ vlans: "constructor, __proto__", vlanIps: {} });
+  ok(proto.join("|") === "VLAN constructor, __proto__", `label: a VLAN named like an Object property finds no address (${proto.join(" | ")})`);
 }
 
 console.log(failures ? `\n${failures} ÉCHEC(S)` : "\nTOUT EST OK");

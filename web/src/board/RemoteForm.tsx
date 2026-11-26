@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Cable } from "lucide-react";
-import type { RemoteTarget } from "../api.ts";
+import { ArrowDown, Cable, Plus, X } from "lucide-react";
+import type { RemoteHop, RemoteTarget } from "../api.ts";
 import { useKeys } from "../auth.tsx";
 import { listMachines, type Machine } from "../vault.ts";
 import { Modal, toast } from "../components/ui.tsx";
@@ -47,8 +47,18 @@ export function MachineField({ label, choice }: { label: string; choice: ReturnT
   );
 }
 
+const hostPort = (h: { host: string; port: number; user?: string }) =>
+  `${h.user ? `${h.user}@` : ""}${h.host.includes(":") ? `[${h.host}]` : h.host}:${h.port}`;
+
 /** What the session amounts to, as a command the user could type on the machine. */
 function preview(t: RemoteTarget): string {
+  const jumps = t.via?.length ? t.via.map(hostPort).join(",") : "";
+  if (t.via?.length && t.kind !== "ssh") {
+    // Telnet / TCP from the last hop: an SSH session to it, then the command typed there.
+    const before = t.via.slice(0, -1).map(hostPort).join(",");
+    const then = t.kind === "telnet" ? `telnet ${t.host} ${t.port}` : `nc ${t.host} ${t.port}`;
+    return `ssh ${before ? `-J ${before} ` : ""}ssh://${hostPort(t.via.at(-1)!)}   # puis ${then}`;
+  }
   if (t.kind === "telnet") return `telnet ${t.host} ${t.port}`;
   if (t.kind === "raw") return `nc ${t.host} ${t.port}`;
   const opts = [
@@ -57,8 +67,28 @@ function preview(t: RemoteTarget): string {
     t.legacyCiphers && "-o Ciphers=+aes128-cbc,aes256-cbc,3des-cbc -o MACs=+hmac-sha1",
     t.hostKeyCheck === "off" && "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
   ].filter(Boolean);
-  return ["ssh", `${t.user ? `${t.user}@` : ""}${t.host}`, "-p", t.port, ...opts].join(" ");
+  return ["ssh", ...(jumps ? ["-J", jumps] : []), `${t.user ? `${t.user}@` : ""}${t.host}`, "-p", t.port, ...opts].join(" ");
 }
+
+/** One jump host as edited in the form. */
+type HopRow = { host: string; port: string; user: string; legacy: boolean };
+const hopRow = (h: RemoteHop): HopRow => ({
+  host: typeof h.host === "string" ? h.host : "",
+  port: Number.isInteger(h.port) ? String(h.port) : "22",
+  user: typeof h.user === "string" ? h.user : "",
+  legacy: !!(h.legacyKex || h.legacyHostKey || h.legacyCiphers),
+});
+const hopOk = (h: HopRow) => {
+  const p = Number(h.port);
+  return HOST_RE.test(h.host.trim().replace(/^\[|\]$/g, "")) && USER_RE.test(h.user.trim()) && Number.isInteger(p) && p > 0 && p < 65536;
+};
+const hopOf = (h: HopRow): RemoteHop => ({
+  host: h.host.trim().replace(/^\[|\]$/g, ""),
+  port: Number(h.port),
+  ...(h.user.trim() ? { user: h.user.trim() } : {}),
+  ...(h.legacy ? { legacyKex: true, legacyHostKey: true, legacyCiphers: true } : {}),
+});
+export const MAX_HOPS = 8;
 
 /** A Telnet / SSH / TCP session to a device reachable from one of the user's machines (lab switches, routers…). */
 export function RemoteForm({
@@ -68,8 +98,11 @@ export function RemoteForm({
   bare,
   defaultHost,
   defaultTarget,
+  defaultVia,
 }: {
   defaultMachineId: string | null;
+  /** Prefilled jump hosts (bouncing from a device icon: its own hops, then the device itself). */
+  defaultVia?: RemoteHop[];
   /** Prefilled device (the icon's own device, when adding a session to it). */
   defaultHost?: string;
   /**
@@ -92,6 +125,8 @@ export function RemoteForm({
   const [user, setUser] = useState(str(pre?.user));
   const [legacy, setLegacy] = useState({ legacyKex: false, legacyHostKey: false, legacyCiphers: false });
   const [hostKeyCheck, setHostKeyCheck] = useState<"tofu" | "off">("tofu");
+  const [hops, setHops] = useState<HopRow[]>(() => (defaultVia ?? pre?.via ?? []).slice(0, MAX_HOPS).map(hopRow));
+  const setHop = (i: number, patch: Partial<HopRow>) => setHops((hs) => hs.map((h, j) => (j === i ? { ...h, ...patch } : h)));
   const legacyAll = useRef<HTMLInputElement>(null);
 
   const legacyCount = Object.values(legacy).filter(Boolean).length;
@@ -106,10 +141,12 @@ export function RemoteForm({
   const hostOk = HOST_RE.test(cleanHost);
   const userOk = !ssh || USER_RE.test(cleanUser);
   const portOk = Number.isInteger(portNum) && portNum > 0 && portNum < 65536;
-  const valid = !!choice.machine && hostOk && userOk && portOk;
+  const hopsOk = hops.every(hopOk);
+  const valid = !!choice.machine && hostOk && userOk && portOk && hopsOk;
+  const via = hops.map(hopOf);
   const target: RemoteTarget = ssh
-    ? { kind, host: cleanHost, port: portNum, user: cleanUser, ...legacy, hostKeyCheck }
-    : { kind, host: cleanHost, port: portNum };
+    ? { kind, host: cleanHost, port: portNum, user: cleanUser, ...legacy, hostKeyCheck, ...(via.length ? { via } : {}) }
+    : { kind, host: cleanHost, port: portNum, ...(via.length ? { via } : {}) };
 
   const legacyOption = (key: keyof typeof legacy, label: string, help: string) => (
     <label className="check sub">
@@ -135,7 +172,39 @@ export function RemoteForm({
           if (valid) onCreate(choice.machine!, target);
         }}
       >
-        <MachineField label="Machine relais (une des tiennes)" choice={choice} />
+        <MachineField label="Machine relais" choice={choice} />
+        <div className="field hops">
+          {hops.length > 0 && <span>Rebonds SSH, dans l'ordre depuis la machine</span>}
+          {hops.map((h, i) => (
+            <div key={i}>
+              <div className="hop-row">
+                <ArrowDown size={14} className="hop-arrow" aria-hidden />
+                <input className="input" value={h.host} onChange={(e) => setHop(i, { host: e.target.value })} placeholder="routeur, 10.0.0.1" aria-label={`Hôte du rebond ${i + 1}`} spellCheck={false} />
+                <input className="input hop-port" value={h.port} inputMode="numeric" onChange={(e) => setHop(i, { port: e.target.value.replace(/\D/g, "") })} aria-label={`Port du rebond ${i + 1}`} />
+                <input className="input hop-user" value={h.user} onChange={(e) => setHop(i, { user: e.target.value })} placeholder="utilisateur" aria-label={`Utilisateur du rebond ${i + 1}`} autoComplete="off" spellCheck={false} />
+                <button type="button" className="btn btn-sm btn-icon" title="Retirer ce rebond" onClick={() => setHops((hs) => hs.filter((_, j) => j !== i))}>
+                  <X size={14} />
+                </button>
+              </div>
+              <label className="check sub hop-legacy">
+                <input type="checkbox" checked={h.legacy} onChange={(e) => setHop(i, { legacy: e.target.checked })} />
+                <span>Équipement ancien</span>
+              </label>
+              {(h.host.trim() || h.user.trim()) && !hopOk(h) && <span className="form-warn">Rebond {i + 1} invalide : hôte, port (1 à 65535) ou utilisateur.</span>}
+            </div>
+          ))}
+          {hops.length < MAX_HOPS && (
+            <button type="button" className="btn btn-sm hop-add" onClick={() => setHops((hs) => [...hs, { host: "", port: "22", user: "", legacy: false }])}>
+              <Plus size={14} /> {hops.length ? "Ajouter un rebond" : "Rebondir par un équipement SSH"}
+            </button>
+          )}
+          {hops.length > 0 && (
+            <span className="field-help">
+              La session passe par chaque rebond en SSH, puis l'équipement ci-dessous est joint depuis le dernier. Les mots de passe des rebonds se tapent dans le
+              terminal, l'un après l'autre.
+            </span>
+          )}
+        </div>
         <div className="web-form">
           <label className="field">
             Protocole
@@ -154,7 +223,7 @@ export function RemoteForm({
             </select>
           </label>
           <label className="field">
-            Hôte (vu depuis la machine)
+            {hops.length ? "Hôte (vu depuis le dernier rebond)" : "Hôte (vu depuis la machine)"}
             <input className="input" value={host} autoFocus onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.1" spellCheck={false} />
           </label>
           <label className="field">

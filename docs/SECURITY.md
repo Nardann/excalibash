@@ -217,6 +217,19 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
   `known_hosts`, à côté de la configuration de l'agent ; une clé différente bloque la connexion.
   La vérification peut être désactivée par session (option avancée, déconseillée). Les mots de passe
   se tapent dans le terminal : ils voyagent chiffrés jusqu'à l'agent et ne sont jamais stockés.
+- **Rebonds** : la cible peut passer par une chaîne de rebonds SSH (au plus 8, comme `ssh -J`). La liste est
+  scellée avec la cible, sous `machineAuth` : le serveur ne peut ni la lire ni la changer. L'agent ouvre une
+  connexion SSH vers le premier rebond, puis un canal `direct-tcpip` vers le suivant à travers elle, et ainsi de
+  suite ; la cible (SSH, Telnet ou TCP) est jointe depuis le dernier. Chaque rebond est authentifié dans le
+  terminal (les invites indiquent l'hôte qui les pose) et sa clé d'hôte est épinglée comme pour une cible. Les
+  clés sont retenues par adresse (`hôte:port`), quel que soit le chemin : une même adresse jointe par deux rebonds
+  différents (deux labos) partage son épingle, et un rebond malveillant pourrait faire épingler une fausse clé
+  pour une adresse encore jamais vue. La vérification de clé d'hôte ne peut pas être désactivée sur un rebond
+  depuis les données du tableau. Un rebond voit l'adresse du saut suivant ; il ne
+  voit pas le contenu d'une session SSH qui le traverse, mais voit en clair une session Telnet ou TCP qu'il relaie
+  vers la cible.
+- Un rebond proposé depuis l'icône d'un équipement vient des données du tableau (que tout éditeur peut écrire) :
+  il pré-remplit le formulaire, que l'utilisateur relit et valide, comme la cible d'un équipement.
 - L'option « Équipement ancien » n'ajoute des algorithmes faibles (`diffie-hellman-group1-sha1`,
   `ssh-rsa`, `ssh-dss`, CBC, `hmac-sha1`) qu'à la session qui la demande.
 
@@ -277,6 +290,18 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
 - Le serveur ne voit ni les adresses ni les résultats, et ne peut pas faire sonder quoi que ce soit : il ne
   détient pas `machineAuth`. Les résultats restent dans le navigateur de qui a demandé la sonde et ne sont pas
   partagés avec les autres membres du tableau.
+- **« Vérifier le schéma »** : la même requête de sonde peut porter `kind: "ifaces"` (absent = ping, comme avant). L'agent
+  répond alors `box(machineAuth, {ifaces}, "eb:probe-res:<rid>")` avec, pour chaque interface (au plus 256, 64 adresses
+  chacune), son nom, ses drapeaux up/running, son MTU, sa MAC et ses adresses `IP/préfixe`, lus par `net.Interfaces()` :
+  aucune commande n'est lancée. Même chemin que le ping : horodatage, `rid` à usage unique, `machineAuth`, une sonde à la fois
+  par machine. Cette réponse révèle la configuration réseau de la machine (noms, adresses, MAC) à qui peut déjà la sonder
+  (propriétaire, partage direct, ou membre du tableau si la machine y est partagée), pas plus que ce que ces personnes
+  obtiendraient avec un shell sur elle ; le serveur n'en voit rien. Il ne limite que la taille de la requête (8 ko, minuscule) ;
+  la réponse, bornée par les plafonds de l'agent (de l'ordre de quelques ko, au pire quelques centaines de ko), passe par le
+  même relais sans plafond propre au-delà de celui du WebSocket de l'agent. Le navigateur la compare au schéma ; le résultat
+  reste éphémère, n'est pas écrit dans le tableau et n'est pas partagé. Un ancien agent ignore `kind` et répond au format ping :
+  le navigateur le détecte (champ `ifaces` absent) et demande de mettre l'agent à jour. Le seul effet sur le tableau est la
+  correction rapide d'une extrémité, faite par l'éditeur à la main (annulable).
 - La machine mémorisée par une icône est une donnée du tableau, que tout éditeur peut écrire. Elle n'est retenue
   que si cette machine a un terminal ou un tunnel ouvert sur ce tableau, d'après le serveur. Un éditeur ne peut
   donc pas faire envoyer des pings depuis la machine d'un autre en trafiquant une icône.
