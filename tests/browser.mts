@@ -724,6 +724,81 @@ try {
   await A.page.unrouteAll({ behavior: "ignoreErrors" });
   await noConsoleErrors("page Machines : aucune erreur console");
 
+  // 8i. One-click agent update: the button on the Machines page and the board's « Mettre à jour les agents »
+  // (the instance's release is stubbed; the agent of this suite has no release key, so the real round trip ends in its refusal).
+  const stubLatest = (latest: { version: string | null; signed: boolean }) => A.page.route(/\/api\/agent\/latest$/, (route) => route.fulfill({ json: latest }));
+  const stubMachines = (patch: (m: any) => void) =>
+    A.page.route(/\/api\/machines$/, async (route) => {
+      const r = await route.fetch();
+      const j = await r.json();
+      for (const m of j.machines ?? []) patch(m);
+      await route.fulfill({ response: r, json: j });
+    });
+  await stubLatest({ version: "2.0.0", signed: true });
+  await stubMachines((m) => (m.agentVersion = "1.0.0"));
+  await A.page.goto("/machines");
+  const upBtn = A.page.getByTestId("update-agent").first();
+  await upBtn.waitFor({ timeout: 20000 });
+  ok(/Mettre à jour \(1\.0\.0 → 2\.0\.0\)/.test(await upBtn.innerText()) && !(await upBtn.isDisabled()), "page Machines : « Mettre à jour (1.0.0 → 2.0.0) » pour un agent en retard quand l'instance a une release signée");
+  await shot("machines-maj-un-clic");
+  await upBtn.click();
+  const oneDlg = A.page.getByTestId("update-dialog");
+  const warn = await oneDlg.getByTestId("update-warning").innerText();
+  ok(/redémarre l'agent/.test(warn) && /shells? ouverts? (seront interrompus|sera interrompu)|Aucun shell ouvert/.test(warn), `la confirmation prévient du redémarrage et compte les shells ouverts (${warn.split("\n").pop()})`);
+  await oneDlg.getByTestId("update-confirm").click();
+  const oneStatus = oneDlg.getByTestId("update-status").first();
+  await until("l'agent répond", async () => /échec/.test(await oneStatus.innerText()), 30000);
+  ok(/aucune clé de signature intégrée/.test(await oneStatus.innerText()), "un agent construit sans clé refuse : son message s'affiche (« échec : … aucune clé de signature intégrée »)");
+  await shot("machines-maj-echec");
+  await oneDlg.getByRole("button", { name: "Fermer" }).click();
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+
+  // No signed release on this instance: disabled, with the reason, next to the manual command.
+  await stubLatest({ version: null, signed: false });
+  await stubMachines((m) => ((m.agentVersion = "1.0.0"), (m.agentCaps = ["files"])));
+  await A.page.goto("/machines");
+  const offBtn = A.page.getByTestId("update-agent").first();
+  await offBtn.waitFor({ timeout: 20000 });
+  ok((await offBtn.isDisabled()) && /mise à jour automatique non configurée sur cette instance/.test((await offBtn.getAttribute("title")) ?? ""), "sans release signée : bouton désactivé, « mise à jour automatique non configurée sur cette instance »");
+  ok((await A.page.getByRole("button", { name: /Mettre à jour l'agent/ }).count()) > 0, "…et la commande manuelle reste proposée");
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+  // Release signed but the agent has no « update » function: disabled too, manual command.
+  await stubLatest({ version: "2.0.0", signed: true });
+  await stubMachines((m) => ((m.agentVersion = "1.0.0"), (m.agentCaps = ["files"])));
+  await A.page.goto("/machines");
+  const capBtn = A.page.getByTestId("update-agent").first();
+  await capBtn.waitFor({ timeout: 20000 });
+  ok((await capBtn.isDisabled()) && /trop ancien pour se mettre à jour seul/.test((await capBtn.getAttribute("title")) ?? ""), "agent sans la fonction « update » : bouton désactivé, infobulle et commande manuelle");
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+
+  // The board: the header button counts the outdated machines of the board and the dialog lists their status.
+  await stubLatest({ version: "2.0.0", signed: true });
+  await stubMachines((m) => (m.agentVersion = "1.0.0"));
+  await A.page.goto(boardUrl);
+  await A.page.locator(".excalidraw canvas").first().waitFor();
+  const boardBtn = A.page.getByTestId("update-agents-button");
+  await boardBtn.waitFor({ timeout: 30000 });
+  ok(/Mettre à jour les agents \(1\)/.test(await boardBtn.innerText()), "tableau : « Mettre à jour les agents (1) » dans l'en-tête");
+  await boardBtn.click();
+  const boardDlg = A.page.getByTestId("update-dialog");
+  const rowTxt = await boardDlg.locator("[data-testid^=update-row-]").first().innerText();
+  ok(/vm-tp/.test(rowTxt) && /1\.0\.0 → 2\.0\.0/.test(rowTxt) && /à mettre à jour/.test(rowTxt), `le dialogue liste la machine et son état (${rowTxt.replace(/\n/g, " · ")})`);
+  await shot("tableau-maj-agents");
+  await boardDlg.getByTestId("update-confirm").click();
+  await until("statut après la demande", async () => /échec/.test(await boardDlg.getByTestId("update-status").first().innerText()), 30000);
+  ok(true, "le statut passe à « échec : … » avec la raison donnée par l'agent");
+  await boardDlg.getByRole("button", { name: "Fermer" }).click();
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+  // Agent already at the latest version, or too old to update itself: no button on the board.
+  await stubLatest({ version: "2.0.0", signed: true });
+  await stubMachines((m) => ((m.agentVersion = "1.0.0"), (m.agentCaps = ["files"])));
+  await A.page.goto(boardUrl);
+  await A.page.locator(".excalidraw canvas").first().waitFor();
+  await A.page.waitForTimeout(3000);
+  ok((await A.page.getByTestId("update-agents-button").count()) === 0, "tableau : pas de bouton quand aucune machine n'est mettable à jour en un clic");
+  await A.page.unrouteAll({ behavior: "ignoreErrors" });
+  await noConsoleErrors("mise à jour des agents : aucune erreur console");
+
   await shot("fin");
 } catch (e) {
   console.log(`✘ ${(e as Error).message}`);

@@ -924,6 +924,152 @@ site.close();
   ok(upd.startsWith("#!/bin/sh") && upd.includes("excalibash-agent-$OS-$ARCH") && upd.includes("systemctl --user restart") && !/rm -rf|--token|EXCALIBASH_KEY|agent\.env/.test(upd), "/update.sh remplace le programme et relance le service, sans toucher à l'identité ni contenir de secret");
 }
 
+// Agent self-update (tests/run.sh builds a v1 agent with a throwaway release key, serves a signed v2 release
+// from AGENT_DIST_DIR, and gives us the tools). Real crypto end to end: the browser boxes the request under the
+// machine auth key, the server relays blind, the agent verifies the signature with the key compiled into it.
+if (process.env.UPDATE_V1_BIN && process.env.UPDATE_SIGN && process.env.UPDATE_KEY && process.env.UPDATE_DIST) {
+  const { approvePairing, listMachines: lm } = await import("../web/src/vault.ts");
+  const { execFileSync } = await import("node:child_process");
+  const { copyFileSync, chmodSync, mkdirSync, rmSync } = await import("node:fs");
+  const sign = (key: string, version: string) => execFileSync(process.env.UPDATE_SIGN!, ["sign", "--key", key, "--dist", process.env.UPDATE_DIST!, "--version", version], { stdio: "pipe" });
+  const home = mkdtempSync(join(tmpdir(), "eb-upd-"));
+  const exe = join(home, "excalibash-agent");
+  copyFileSync(process.env.UPDATE_V1_BIN, exe);
+  chmodSync(exe, 0o755);
+  const cfgPath = join(home, "agent.json");
+
+  // Pair a v1 agent (it runs from its own directory, so it can replace itself).
+  const pr = (await as(alice, () => api("POST", "/machines/pairings"))).body;
+  const pairProc = spawn(exe, ["--server", BASE, "--pair", pr.code.toLowerCase(), "--pair-only", "--config", cfgPath, "--name", "maj-agent"], { stdio: ["ignore", "ignore", "pipe"] });
+  let pairErr = "";
+  pairProc.stderr.on("data", (d) => (pairErr += d));
+  let claim: any = null;
+  for (let i = 0; i < 30 && !claim; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    const st = (await as(alice, () => api("GET", `/machines/pairings/${pr.code}`))).body;
+    if (st.status === "claimed") claim = st;
+  }
+  let confirmCode: string | undefined;
+  for (let i = 0; i < 30 && !confirmCode; i++) {
+    confirmCode = pairErr.match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1];
+    if (!confirmCode) await new Promise((r) => setTimeout(r, 200));
+  }
+  await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, confirmCode!, "maj-agent"));
+  await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
+  const upProc = spawn(exe, ["--config", cfgPath], { stdio: ["ignore", "ignore", "pipe"] });
+  let upLog = "";
+  upProc.stderr.on("data", (d) => (upLog += d));
+  const listUm = async () => (await as(alice, () => lm(alice.keys))).find((m) => m.name === "maj-agent");
+  const waitFor = async (cond: (m: any) => boolean, ms = 20_000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 300))) {
+      const m = await listUm();
+      if (m && cond(m)) return m;
+    }
+    return null;
+  };
+  const um = (await waitFor((m) => m.online && !!m.agentVersion))!;
+  ok(um?.agentVersion === "1.0.0" && um.agentCaps.includes("update"), "mise à jour : l'agent v1 annonce sa version et la fonction « update »");
+  const machineId = um.id;
+
+  const latest = await (await realFetch(`${BASE}/api/agent/latest`)).json();
+  ok(latest.version === "2.0.0" && latest.signed === true, "GET /api/agent/latest annonce la version signée publiée");
+  const dl = async (f: string) => realFetch(`${BASE}/downloads/${f}`);
+  ok((await dl("agent-manifest.json")).status === 200 && (await dl("agent-manifest.json.sig")).status === 200, "le manifeste et sa signature sont servis par /downloads");
+  ok((await dl("agent-manifest.json.bak")).status === 404 && (await dl("agent-manifest.json.sig.old")).status === 404 && (await dl("..%2Fserver.log")).status === 404, "/downloads : liste blanche stricte des noms");
+  ok(((await (await realFetch(`${BASE}/downloads`)).json()) as any).files.includes("agent-manifest.json"), "/downloads liste le manifeste");
+
+  /** POST /machines/:id/update with real crypto, then reads the boxed progress frames for at most `ms`. */
+  async function trigger(who: U, key: any, ms: number, o: { rid?: string; ts?: number; d?: string } = {}) {
+    const rid = o.rid ?? c.randomId();
+    const ts = o.ts ?? Date.now();
+    const d = o.d ?? (await c.boxJson(key, { op: "update" }, c.AAD.update(rid, ts)));
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ms);
+    const frames: any[] = [];
+    let raw = "";
+    let status = 0;
+    try {
+      const r = await realFetch(`${BASE}/api/machines/${machineId}/update`, { method: "POST", headers: { "content-type": "application/json", cookie: who.cookie }, body: JSON.stringify({ rid, ts, d }), signal: ctl.signal });
+      status = r.status;
+      if (status !== 200) return { status, frames, raw, rid, ts, d, error: ((await r.json().catch(() => ({}))) as any).error };
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        raw += dec.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.trim()) frames.push(await c.unboxJson(key, JSON.parse(line).d, c.AAD.updateRes(rid)));
+        }
+      }
+    } catch {
+      // aborted: the agent said nothing more
+    } finally {
+      clearTimeout(timer);
+    }
+    return { status, frames, raw, rid, ts, d, error: undefined as string | undefined };
+  }
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const cool = (ms = 1700) => pause(ms); // UPDATE_INTERVAL_MS=1500 on this server: one request per machine every 1.5 s here
+
+  // Who may ask, and how often.
+  ok((await trigger(bob, um.auth, 2000)).status === 404, "mise à jour : Bob ne peut pas la demander sur la machine d'Alice");
+  const wrongKey = await c.newSymKey();
+  const wrong = await trigger(alice, wrongKey, 1000);
+  ok(wrong.status === 200 && wrong.frames.length === 0 && wrong.raw === "", "une requête chiffrée avec une autre clé que machineAuth est ignorée par l'agent");
+  ok((await listUm())?.agentVersion === "1.0.0", "…l'agent reste en version 1.0.0");
+  const tooFast = await trigger(alice, um.auth, 1000);
+  ok(tooFast.status === 429, "mises à jour trop rapprochées refusées par le serveur (1 par intervalle et par machine)");
+  await cool();
+
+  // A manifest signed with another key is refused; the agent stays up on v1. The same request replayed is ignored.
+  const rogue = join(home, "rogue.key");
+  execFileSync(process.env.UPDATE_SIGN!, ["keygen", "--out", rogue], { stdio: "pipe" });
+  sign(rogue, "2.0.0");
+  const refused = await trigger(alice, um.auth, 15_000);
+  const last = refused.frames.at(-1);
+  ok(last?.phase === "error" && /signature/.test(last.msg) && refused.frames.every((f: any, i: number) => f.n === i + 1), `manifeste signé par une autre clé refusé : « ${last?.msg} »`);
+  ok(!refused.raw.includes("signature") && !refused.raw.includes("phase"), "le serveur ne relaie que des chiffrés (aucune phase ni message en clair)");
+  ok(refused.frames.some((f: any) => f.phase === "check"), "la progression commence par la vérification");
+  const stillV1 = await listUm();
+  ok(stillV1?.online && stillV1.agentVersion === "1.0.0", "…l'agent est toujours en ligne en 1.0.0");
+  await cool();
+  const replay = await trigger(alice, um.auth, 2500, { rid: refused.rid, ts: refused.ts, d: refused.d });
+  ok(replay.status === 200 && replay.frames.length === 0, "la même requête rejouée est ignorée par l'agent");
+  await cool();
+  const stale = await trigger(alice, um.auth, 2500, { ts: Date.now() - 6 * 60_000 });
+  ok(stale.frames.length === 0, "une requête de plus de 5 minutes est ignorée");
+  await cool();
+
+  // The real update: signed by the release key, v2 replaces v1, the process execs itself and reconnects.
+  sign(process.env.UPDATE_KEY!, "2.0.0");
+  const pid1 = upProc.pid;
+  const okRun = await trigger(alice, um.auth, 60_000);
+  const phases = okRun.frames.map((f: any) => f.phase).join(",");
+  ok(/^check,download,install,restarting$/.test(phases), `mise à jour réelle : ${phases}`);
+  const v2 = await waitFor((m) => m.online && m.agentVersion === "2.0.0", 30_000);
+  ok(!!v2 && v2.id === machineId, "l'agent revient en 2.0.0 avec le même identifiant de machine");
+  ok(upProc.exitCode === null && upProc.pid === pid1, "même processus (exec) : le service garde son PID");
+  ok(/excalibash-agent 2\.0\.0/.test(upLog), "l'agent journalise son redémarrage en 2.0.0");
+  await pause(1500);
+  ok(!existsSync(join(home, ".excalibash-agent.old")) && !existsSync(join(home, ".excalibash-agent.new")), "après connexion réussie, l'ancien binaire est supprimé");
+  ok((v2 as any)?.agentNote == null, "pas de note « mise à jour annulée »");
+  await cool();
+  const again = await trigger(alice, v2!.auth, 15_000);
+  ok(again.frames.at(-1)?.phase === "error" && /déjà à jour/.test(again.frames.at(-1).msg), "même version : réinstallation refusée par l'agent");
+
+  upProc.kill();
+  await as(alice, () => api("DELETE", `/machines/${machineId}`));
+  rmSync(home, { recursive: true, force: true });
+} else {
+  console.log("⚠ mise à jour des agents : ignorée (UPDATE_V1_BIN / UPDATE_SIGN / UPDATE_KEY / UPDATE_DIST absents, voir tests/run.sh)");
+}
+
 // Active sessions: list, revoke one (cuts its websocket), isolation between users, coarse metadata only.
 {
   const UA = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0 RAWUA-MARKER";
