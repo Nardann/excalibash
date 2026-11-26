@@ -9,13 +9,16 @@ const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
 import * as sd from "../web/src/board/sharedDoc.ts";
+import * as codeDoc from "../web/src/board/codeDoc.ts";
+import * as mf from "../web/src/board/machineFiles.ts";
+import { FileClient } from "../web/src/board/fileTransfer.ts";
 import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
 import { Awareness, encodeAwarenessUpdate } from "../web/node_modules/y-protocols/awareness.js";
 
@@ -1567,6 +1570,95 @@ site.close();
     }
     ok(reply?.t === "doc.err" && reply.error === "document trop gros" && n > 10, "documents : un document ne dépasse pas 8 Mio");
     s2.ws.close();
+  }
+  // Code window, without a browser: what CodeEmbed does with the document (Y.Text "content" + Y.Map "meta"),
+  // the real FileClient over the real agent's local shell (board B, terminal tid2), and the server blind throughout.
+  {
+    const cdocId = sd.newDocId();
+    const hA3 = docHost(alice, D, kA, "editor");
+    const hB3 = docHost(bob, D, kB, "editor");
+    const ca = sd.openSharedDoc(hA3.host, cdocId);
+    const cb = sd.openSharedDoc(hB3.host, cdocId);
+    await Promise.all([ca.synced, cb.synced]);
+    // The file channel of the shell: frames sealed with the terminal key, like BoardSession.fileRequest.
+    // (Alice's first socket on board B was cut by the session tests above: a fresh one.)
+    const sf = boardSocket(alice, B);
+    await sf.open;
+    await sf.next((m) => m.t === "init");
+    const waiting = new Map<string, { on: (n: number, body: any, end: boolean) => void; fail: (m: string) => void; last: number }>();
+    let chain: Promise<void> = Promise.resolve();
+    sf.ws.on("message", (raw: any) => {
+      chain = chain.then(async () => {
+        const m = JSON.parse(raw.toString());
+        const w = waiting.get(m.rid);
+        if (!w || (m.t !== "file.res" && m.t !== "file.err")) return;
+        if (m.t === "file.err") return void (waiting.delete(m.rid), w.fail(m.message));
+        if (m.n <= w.last) return;
+        const body = JSON.parse(c.fromUtf8(await c.unbox(kt2, m.d, c.AAD.fileRes(tid2, m.rid, m.n))));
+        w.last = m.n;
+        if (m.end) waiting.delete(m.rid);
+        w.on(m.n, body, m.end === true);
+      });
+    });
+    const fileHost = {
+      async fileRequest(term: string, op: object, on?: any, fail?: any) {
+        const rid = c.randomId();
+        const ts = Date.now();
+        if (on) waiting.set(rid, { on, fail: fail ?? (() => {}), last: -1 });
+        sf.send({ t: "file.req", term, rid, ts, d: await c.box(kt2, c.utf8(JSON.stringify(op)), c.AAD.fileReq(term, rid, ts)), ...(on ? {} : { nr: true }) });
+        return rid;
+      },
+      fileDrop: (rid: string) => void waiting.delete(rid),
+    };
+    const client = new FileClient(fileHost as any, tid2);
+    const cwd = (await client.ls()).cwd;
+
+    // Alice creates a blank document and types.
+    ok(codeDoc.initBlank(ca.ydoc, "demo.py"), "code : un document neuf reçoit son nom");
+    ca.ydoc.getText("content").insert(0, "print('salut')\n");
+    const sameText = await until(() => cb.ydoc.getText("content").toString() === "print('salut')\n" && codeDoc.readMeta(cb.ydoc.getMap("meta")).name === "demo.py");
+    ok(sameText && codeDoc.readMeta(cb.ydoc.getMap("meta")).language === "python", "code : Bob voit le même contenu et les mêmes métadonnées (langage Python)");
+    ok(codeDoc.isDirty(await codeDoc.sha256Hex("print('salut')\n"), codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha), "code : jamais enregistré = modifié");
+
+    // Save through the shell's file channel: a new file is written without asking.
+    let asked: string[] = [];
+    const confirm = (answer: boolean) => async (reason: string) => (asked.push(reason), answer);
+    const saved = await mf.saveMachineFile(client, "demo.py", ca.ydoc.getText("content").toString(), { baseSha: undefined, confirm: confirm(true) });
+    ok(!!saved && saved.path === join(cwd, "demo.py") && readFileSync(join(cwd, "demo.py"), "utf8") === "print('salut')\n" && asked.length === 0, "code : enregistrer écrit demo.py dans le dossier du shell (agent réel), sans question");
+    codeDoc.markSaved(ca.ydoc, { path: saved!.path, sha: saved!.sha, by: "Alice" });
+    const bobMeta = await until(() => codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha === saved!.sha);
+    ok(bobMeta && !codeDoc.isDirty(await codeDoc.sha256Hex(cb.ydoc.getText("content").toString()), codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha), "code : après enregistrement, le document n'est plus modifié, pour Bob aussi");
+
+    // Reading it back gives the same text and the same fingerprint.
+    const back = await mf.openMachineFile(client, "demo.py");
+    ok(back.text === "print('salut')\n" && back.sha === saved!.sha, "code : rouvrir le fichier de la machine redonne le même texte et la même empreinte");
+
+    // Conflict: the file changed on the machine behind our back.
+    writeFileSync(join(cwd, "demo.py"), "modifié ailleurs\n");
+    cb.ydoc.getText("content").insert(0, "# par Bob\n");
+    const bobMetaNow = codeDoc.readMeta(cb.ydoc.getMap("meta"));
+    const refused = await mf.saveMachineFile(client, bobMetaNow.path!, cb.ydoc.getText("content").toString(), { baseSha: bobMetaNow.savedSha, confirm: confirm(false) });
+    ok(refused === null && asked.join() === "changed" && readFileSync(join(cwd, "demo.py"), "utf8") === "modifié ailleurs\n", "code : fichier modifié sur la machine, écraser refusé : rien n'est écrit");
+    asked = [];
+    const forced = await mf.saveMachineFile(client, bobMetaNow.path!, cb.ydoc.getText("content").toString(), { baseSha: bobMetaNow.savedSha, confirm: confirm(true) });
+    ok(!!forced && asked.join() === "changed" && readFileSync(join(cwd, "demo.py"), "utf8") === "# par Bob\nprint('salut')\n", "code : écraser confirmé écrit le contenu partagé");
+    // "Save as" onto an existing file asks too; a folder is refused.
+    asked = [];
+    const exists = await mf.saveMachineFile(client, "demo.py", "x", { baseSha: undefined, confirm: confirm(false) });
+    const dirErr = await mf.saveMachineFile(client, ".", "x", { confirm: confirm(true) }).then(() => "", (e: any) => String(e.message));
+    ok(exists === null && asked.join() === "exists" && dirErr !== "", "code : « enregistrer sous » sur un fichier existant demande confirmation ; un dossier est refusé");
+
+    // The server never saw the code.
+    await until(() => upRows(D, cdocId) > 0);
+    await nap(300);
+    const codeDump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+    const codeRaw = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+    ok(upRows(D, cdocId) > 0 && !codeDump.includes("salut") && !codeRaw.includes("salut") && !codeDump.includes("demo.py") && !codeRaw.includes("par Bob"), "code : aucun texte ni nom de fichier en clair dans la base");
+    sf.ws.close();
+    ca.destroy();
+    cb.destroy();
+    hA3.close();
+    hB3.close();
   }
   ok(errors.length === 0, `documents : aucune erreur côté client${errors.length ? ` (${errors.join("; ")})` : ""}`);
 }

@@ -77,9 +77,9 @@ export const newPublicCache = (): PublicCache => ({ elements: new Map(), files: 
 /** Terminal and site windows never appear in a public view, and node tiles lose their shells, sites and machine links. */
 function publicElement(el: any): any | null {
   const cd = el?.customData;
-  if (el?.isDeleted || cd?.terminalId || cd?.webId) return null;
+  if (el?.isDeleted || cd?.terminalId || cd?.webId || cd?.codeId) return null;
   if (cd?.node) {
-    const { shells: _s, webs: _w, machineId: _m, machineName: _n, remote: _r, ...rest } = cd;
+    const { shells: _s, webs: _w, codes: _c, machineId: _m, machineName: _n, remote: _r, ...rest } = cd;
     return { ...el, customData: rest };
   }
   return el;

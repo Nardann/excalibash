@@ -21,7 +21,7 @@ const GAP = 3;
 const sameAnchor = (a: Anchor, b: Anchor) => (a.group ? a.group === b.group : !!a.id && a.id === b.id);
 
 /** Terminal / web windows come and go with their icon: cables attach to the icon instead. */
-const isWindow = (el: El) => !!cd(el).nodeId && !!(cd(el).terminalId || cd(el).webId);
+const isWindow = (el: El) => !!cd(el).nodeId && !!(cd(el).terminalId || cd(el).webId || cd(el).codeId);
 const canAnchor = (el: El) => !el.isDeleted && !cableOf(el) && !isWindow(el) && el.type !== "selection";
 
 /** Axis-aligned bounds, points included for lines and arrows. */

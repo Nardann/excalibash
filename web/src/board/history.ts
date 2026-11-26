@@ -8,7 +8,7 @@ import { isWindow } from "./nodes.ts";
 type Api = ExcalidrawImperativeAPI;
 
 /** Fields of a machine tile that tie it to live shells, sites and machines: never taken from the past. */
-const LIVE_KEYS = ["shells", "webs", "machineId", "machineName", "remote"] as const;
+const LIVE_KEYS = ["shells", "webs", "codes", "machineId", "machineName", "remote"] as const;
 
 const nonce = () => crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
 
@@ -40,6 +40,7 @@ export function restoreVersion(api: Api, snapshot: readonly any[], files: Record
       for (const k of LIVE_KEYS) delete data[k];
       data.shells = [];
       data.webs = [];
+      data.codes = [];
       Object.assign(data, kept);
     }
     const next = bumped(s, data === s.customData ? {} : { customData: data }, c?.version ?? 0);
@@ -49,7 +50,7 @@ export function restoreVersion(api: Api, snapshot: readonly any[], files: Record
   // Elements that did not exist then disappear, except tiles that still own live shells or sites.
   for (const c of current) {
     if (pastIds.has(c.id) || c.isDeleted || isWindow(c)) continue;
-    if (cd(c).node && (cd(c).shells?.length || cd(c).webs?.length)) continue;
+    if (cd(c).node && (cd(c).shells?.length || cd(c).webs?.length || cd(c).codes?.length)) continue;
     replaced.set(c.id, bumped(c, { isDeleted: true }, c.version));
   }
   const changed = replaced.size + added.length;

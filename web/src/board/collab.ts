@@ -51,7 +51,7 @@ export function remoteLabel(t: RemoteTarget, machine: string): string {
   const host = t.host.includes(":") ? `[${t.host}]` : t.host;
   return `${t.kind} ${t.user ? `${t.user}@` : ""}${host}:${t.port} via ${[machine, ...(t.via ?? []).map((h) => h.host)].join(" → ")}`;
 }
-export const isRemoteLabel = (label: string) => /^(telnet|ssh|raw) \S+ via |^Noyau Jupyter \S+ via /.test(label);
+export { isRemoteLabel } from "./shellLabel.ts";
 
 export const terminalIdOf = (el: { customData?: Record<string, any> } | null | undefined): string | undefined =>
   el?.customData?.terminalId;

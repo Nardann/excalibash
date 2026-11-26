@@ -197,6 +197,15 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   le dernier `seq` de chacun n'ont pas bougé depuis la lecture (sinon 409 et le navigateur recommence, aucune modification
   n'est perdue). Les abonnés sont déconnectés par le code 4409 comme pour le reste du tableau.
 - La suppression définitive d'un tableau supprime ses documents.
+- **Fenêtres de code** : le document est un `Y.Text` (contenu) et un `Y.Map` (nom, langage, chemin sur la machine, empreinte
+  SHA-256 du dernier état lu ou écrit), donc chiffré comme n'importe quel document : le serveur ne voit ni le code, ni le
+  nom du fichier, ni son chemin. Monaco et ses workers sont servis par l'application elle-même (fichiers du même
+  domaine, sans `eval` ni `blob:` : la CSP est inchangée). Un fichier de la machine est lu et écrit par le canal de fichiers du
+  shell local (voir « Fichiers et captures »), jamais par le serveur : « Enregistrer » relit d'abord le fichier de la
+  machine et demande confirmation s'il a changé depuis l'ouverture. « Exécuter dans le terminal » ne tape dans un shell
+  qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
+  membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
+  du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
 
 ## Machines et terminaux
 
