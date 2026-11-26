@@ -15,6 +15,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
+import * as sd from "../web/src/board/sharedDoc.ts";
+import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
+import { Awareness, encodeAwarenessUpdate } from "../web/node_modules/y-protocols/awareness.js";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:6797";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:6799";
@@ -1243,6 +1246,329 @@ site.close();
   await session(alice, hKey, [box("ha", 7, "HISTSECRET_NEW")]);
   const fresh = await versions();
   ok(fresh.length === 1 && fresh[0].epoch === 1 && (await getV(fresh[0].id)).elements.length > 0, "historique : une nouvelle version repart avec les nouvelles clés");
+}
+
+// Shared documents (Yjs): the server stores and relays ciphertext of CRDT updates, snapshots survive key rotation.
+{
+  const D = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Documents partagés"));
+  await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, bobPub, "editor"));
+  await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+  const keyOf = async (u: U, id = D) => (await tree(u)).get(id)!.key!;
+  const kA = await keyOf(alice);
+  const kB = await keyOf(bob);
+  const kC = await keyOf(carol);
+  const docId = sd.newDocId();
+  const until = async (cond: () => boolean, ms = 6000) => {
+    for (const t = Date.now(); Date.now() - t < ms; ) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return cond();
+  };
+  const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const docsRows = (b: string) => rw.prepare("SELECT * FROM board_docs WHERE board_id = ? ORDER BY doc_id").all(b) as any[];
+  const upRows = (b: string, d: string) => (rw.prepare("SELECT COUNT(*) AS n FROM board_doc_updates WHERE board_id = ? AND doc_id = ?").get(b, d) as any).n as number;
+
+  /** A DocHost over a real board socket (what BoardSession is in the browser). */
+  function docHost(u: U, boardId: string, key: c.SymKey, role: "editor" | "viewer") {
+    const handlers = new Map<string, any>();
+    const peerListeners = new Set<() => void>();
+    let sock: ReturnType<typeof boardSocket>;
+    let you: any = null;
+    let epoch = 0;
+    let connected = false;
+    let inbox: Promise<void> = Promise.resolve();
+    const attach = () => {
+      sock = boardSocket(u, boardId);
+      sock.ws.on("message", (raw: any) => {
+        inbox = inbox.then(async () => {
+          const m = JSON.parse(raw.toString());
+          if (m.t === "init") {
+            you = m.you;
+            epoch = m.epoch;
+            connected = true;
+            for (const h of handlers.values()) h.onOpen();
+          } else if (m.t === "peer.join" || m.t === "peer.leave") for (const f of peerListeners) f();
+          else if (typeof m.t === "string" && m.t.startsWith("doc.")) await handlers.get(m.doc)?.onMessage(m);
+        });
+      });
+    };
+    attach();
+    const host = {
+      boardId,
+      key,
+      get canEdit() {
+        return role !== "viewer";
+      },
+      get currentEpoch() {
+        return epoch;
+      },
+      get you() {
+        return you;
+      },
+      docSend(m: object) {
+        if (sock.ws.readyState !== 1) return false;
+        sock.ws.send(JSON.stringify(m));
+        return true;
+      },
+      docRegister(doc: string, h: any) {
+        handlers.set(doc, h);
+        if (connected) h.onOpen();
+        return () => handlers.delete(doc);
+      },
+      on(_e: "peers", fn: () => void) {
+        peerListeners.add(fn);
+        return () => peerListeners.delete(fn);
+      },
+    };
+    return {
+      host,
+      get closed() {
+        return sock.closed;
+      },
+      /** Loses the connection (the tab goes offline). */
+      drop() {
+        connected = false;
+        sock.ws.close();
+        for (const h of handlers.values()) h.onClose();
+      },
+      reconnect() {
+        attach();
+      },
+      close() {
+        sock.ws.close();
+      },
+    };
+  }
+
+  /** Reads a document the way a fresh subscriber does: doc.state, decrypted and merged. */
+  async function readDoc(u: U, boardId: string, key: c.SymKey, doc: string, aadEpoch?: number) {
+    const s = boardSocket(u, boardId);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc });
+    const st = await s.next((m) => m.t === "doc.state");
+    const y = new Y.Doc();
+    for (const part of [...(st.snap ? [st.snap] : []), ...st.ups]) Y.applyUpdate(y, await c.unbox(key, part.d, c.AAD.doc(boardId, doc, aadEpoch ?? init.epoch)));
+    s.ws.close();
+    return { text: y.getText("t").toString(), state: st };
+  }
+  const upFrame = async (boardId: string, key: c.SymKey, doc: string, epoch: number, update: Uint8Array) => ({
+    t: "doc.up",
+    doc,
+    epoch,
+    d: await c.box(key, update, c.AAD.doc(boardId, doc, epoch)),
+  });
+
+  // Two editors and a viewer, through the real shared-document client.
+  const hA = docHost(alice, D, kA, "editor");
+  const hB = docHost(bob, D, kB, "editor");
+  const hC = docHost(carol, D, kC, "viewer");
+  const dA = sd.openSharedDoc(hA.host, docId);
+  const dB = sd.openSharedDoc(hB.host, docId);
+  const dC = sd.openSharedDoc(hC.host, docId);
+  await Promise.all([dA.synced, dB.synced, dC.synced]);
+  ok(!dA.readOnly && !dB.readOnly && dC.readOnly, "documents : un lecteur est en lecture seule côté client");
+  ok(sd.openSharedDoc(hA.host, docId).ydoc === dA.ydoc, "documents : deux fenêtres du même document partagent un seul Y.Doc");
+  const tA = dA.ydoc.getText("t");
+  const tB = dB.ydoc.getText("t");
+  const tC = dC.ydoc.getText("t");
+  tA.insert(0, "ALPHA_SECRET_CODE ");
+  tB.insert(0, "BRAVO_SECRET_CODE ");
+  const converged = await until(() => tA.toString() === tB.toString() && tA.length === 36 && tC.toString() === tA.toString());
+  ok(converged && tA.toString().includes("ALPHA_SECRET_CODE") && tA.toString().includes("BRAVO_SECRET_CODE"), "documents : deux éditeurs écrivent en même temps, tous convergent vers le même texte (lecteur compris)");
+  const final = tA.toString();
+
+  // Viewer: local edits are never sent, and the server refuses a forged doc.up.
+  const before = docsRows(D)[0];
+  tC.insert(0, "HACK_VIEWER ");
+  const raw = boardSocket(carol, D);
+  await raw.open;
+  const rawInit = await raw.next((m) => m.t === "init");
+  raw.send({ t: "doc.sub", doc: docId });
+  await raw.next((m) => m.t === "doc.state");
+  const hack = new Y.Doc();
+  hack.getText("t").insert(0, "HACK_RAW ");
+  raw.send(await upFrame(D, kC, docId, rawInit.epoch, Y.encodeStateAsUpdate(hack)));
+  const refused = await raw.next((m) => m.t === "doc.err");
+  raw.send({ t: "doc.snap", doc: docId, epoch: rawInit.epoch, d: await c.box(kC, Y.encodeStateAsUpdate(hack), c.AAD.doc(D, docId, rawInit.epoch)), upto: 1 });
+  const refusedSnap = await raw.next((m) => m.t === "doc.err");
+  await nap(300);
+  const after = docsRows(D)[0];
+  ok(refused.error === "Lecture seule" && refusedSnap.error === "Lecture seule" && after.last_seq === before.last_seq && after.bytes === before.bytes && tA.toString() === final, "documents : le serveur refuse doc.up et doc.snap d'un lecteur sans toucher au document");
+  raw.ws.close();
+
+  // A fresh subscriber gets the whole state.
+  const fresh = await readDoc(bob, D, kB, docId);
+  ok(fresh.text === final, "documents : un nouvel abonné reçoit l'état complet par doc.state");
+  const wrong = await readDoc(bob, D, kB, docId, 7).then(() => true, () => false);
+  ok(!wrong, "documents : l'AAD lie la mise à jour à son epoch");
+
+  // The database only holds ciphertext.
+  const dump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+  ok(docsRows(D).length === 1 && !dump.includes("SECRET_CODE") && !dump.includes("ALPHA") && !dump.includes("BRAVO"), "documents : aucun texte en clair dans la base");
+
+  // Awareness: relayed to the others, never stored.
+  dA.awareness.setLocalStateField("cursor", { anchor: 3, note: "AW_SECRET_MARK" });
+  const sawAw = await until(() => (dB.awareness.getStates().get(dA.awareness.clientID) as any)?.cursor?.note === "AW_SECRET_MARK" && (dC.awareness.getStates().get(dA.awareness.clientID) as any)?.cursor?.note === "AW_SECRET_MARK");
+  ok(sawAw && (dB.awareness.getStates().get(dA.awareness.clientID) as any)?.user?.name === "Alice", "documents : la présence (curseur, nom) est relayée à l'autre éditeur et au lecteur");
+  dC.awareness.setLocalStateField("cursor", { anchor: 1 });
+  ok(await until(() => (dA.awareness.getStates().get(dC.awareness.clientID) as any)?.cursor?.anchor === 1), "documents : un lecteur peut aussi publier sa présence");
+  await nap(200);
+  const rawFiles = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+  ok(!rawFiles.includes("AW_SECRET_MARK") && !rawFiles.includes("SECRET_CODE"), "documents : la présence n'est jamais stockée (fichiers de la base)");
+
+  // Awareness is rate limited per socket.
+  {
+    const x = boardSocket(alice, D);
+    const y = boardSocket(bob, D);
+    await Promise.all([x.open, y.open]);
+    await x.next((m) => m.t === "init");
+    await y.next((m) => m.t === "init");
+    const aw = new Awareness(new Y.Doc());
+    aw.setLocalState({ junk: 1 });
+    const d = await c.box(kA, encodeAwarenessUpdate(aw, [aw.clientID]), c.AAD.docAwareness(D, docId, 0));
+    x.send({ t: "doc.sub", doc: docId });
+    y.send({ t: "doc.sub", doc: docId });
+    await x.next((m) => m.t === "doc.state");
+    await y.next((m) => m.t === "doc.state");
+    for (let i = 0; i < 60; i++) x.send({ t: "doc.aw", doc: docId, d });
+    await nap(500);
+    let relayed = 0;
+    while (await y.next((m) => m.t === "doc.aw", 50).then(() => true, () => false)) relayed++;
+    ok(relayed >= 1 && relayed <= 16, `documents : la présence est limitée en débit par socket (${relayed} relayées sur 60)`);
+    x.ws.close();
+    y.ws.close();
+  }
+
+  // Offline edits merge on reconnection (the diff against the server state is pushed).
+  hB.drop();
+  tB.insert(0, "OFFLINE_EDIT ");
+  tA.insert(tA.length, " ONLINE_EDIT");
+  hB.reconnect();
+  const merged = await until(() => tA.toString() === tB.toString() && tA.toString().includes("OFFLINE_EDIT") && tA.toString().includes("ONLINE_EDIT"), 8000);
+  ok(merged && tC.toString().includes("OFFLINE_EDIT"), "documents : après une reconnexion, les modifications faites hors ligne sont fusionnées");
+  const errors: string[] = [];
+  dA.onError((m) => errors.push(m));
+
+  // Compaction: > 200 updates make the server ask for a snapshot; updates are then folded into it.
+  const cdoc = sd.newDocId();
+  {
+    const s = boardSocket(alice, D);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc: cdoc });
+    await s.next((m) => m.t === "doc.state");
+    const local = new Y.Doc();
+    const frames: any[] = [];
+    local.on("update", async (u: Uint8Array) => frames.push(u));
+    const t = local.getText("t");
+    for (let i = 0; i < 230; i++) t.insert(t.length, `l${i}:COMPACT_SECRET `);
+    for (const u of frames) s.send(await upFrame(D, kA, cdoc, init.epoch, u));
+    let last = 0;
+    while (last < 230) last = (await s.next((m) => m.t === "doc.ack", 8000)).seq;
+    const ask = await s.next((m) => m.t === "doc.compact", 3000).then((m) => m, () => null);
+    ok(ask?.doc === cdoc && upRows(D, cdoc) === 230, "documents : au-delà de 200 mises à jour, le serveur demande une compaction (doc.compact)");
+    s.send({ t: "doc.snap", doc: cdoc, epoch: init.epoch, upto: 230, d: await c.box(kA, Y.encodeStateAsUpdate(local), c.AAD.doc(D, cdoc, init.epoch)) });
+    await s.next((m) => m.t === "doc.snapped");
+    const row = docsRows(D).find((r) => r.doc_id === cdoc);
+    ok(upRows(D, cdoc) === 0 && row.snap_seq === 230 && row.last_seq === 230, "documents : après doc.snap, les lignes de mises à jour ont disparu (instantané seul)");
+    s.send(await upFrame(D, kA, cdoc, init.epoch, (() => { const u = new Y.Doc(); Y.applyUpdate(u, Y.encodeStateAsUpdate(local)); let out!: Uint8Array; u.on("update", (x: Uint8Array) => (out = x)); u.getText("t").insert(0, "AFTER "); return out; })()));
+    const ack = await s.next((m) => m.t === "doc.ack");
+    ok(ack.seq === 231, "documents : la numérotation continue après la compaction");
+    s.send({ t: "doc.snap", doc: cdoc, epoch: init.epoch, upto: 5, d: await c.box(kA, Y.encodeStateAsUpdate(local), c.AAD.doc(D, cdoc, init.epoch)) });
+    ok((await s.next((m) => m.t === "doc.err")).error === "instantané périmé", "documents : un instantané qui ne couvre rien de nouveau est refusé");
+    const reread = await readDoc(bob, D, kB, cdoc);
+    ok(reread.text.startsWith("AFTER l0:COMPACT_SECRET") && reread.text.includes("l229:COMPACT_SECRET") && reread.state.snap && reread.state.ups.length === 1, "documents : un nouvel abonné relit le même texte après compaction");
+    s.ws.close();
+  }
+
+  // Identifiers and sizes.
+  {
+    const s = boardSocket(alice, D);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc: "../../etc" });
+    ok((await s.next((m) => m.t === "doc.err")).error === "identifiant de document invalide", "documents : identifiant invalide refusé");
+    const big = sd.newDocId();
+    s.send({ t: "doc.sub", doc: big });
+    await s.next((m) => m.t === "doc.state");
+    s.send({ t: "doc.up", doc: big, epoch: init.epoch, d: "A".repeat(512 * 1024 + 1) });
+    ok((await s.next((m) => m.t === "doc.err")).error === "mise à jour invalide", "documents : une trame de plus de 512 Kio est refusée");
+    s.send({ t: "doc.up", doc: big, epoch: init.epoch + 5, d: "AAAA" });
+    ok((await s.next((m) => m.t === "rekey")).t === "rekey", "documents : une mise à jour avec un mauvais epoch demande de recharger");
+    s.ws.close();
+  }
+
+  // Rotation: revoke the viewer. The documents are re-encrypted (not purged) under the new key and epoch.
+  const rowsBefore = docsRows(D);
+  ok(rowsBefore.length === 2 && rowsBefore.every((r) => r.epoch === 0), "documents : deux documents sur le tableau, epoch 0 avant la rotation");
+  const textMain = tA.toString();
+  const closedA = hA.closed;
+  await as(alice, async () => lib.revokeAccess(ctxOf(alice, await tree(alice)), D, carol.user.id));
+  ok((await Promise.race([closedA, nap(4000).then(() => 0)])) === 4409, "documents : la rotation coupe les abonnés (4409)");
+  const rowsAfter = docsRows(D);
+  ok(rowsAfter.length === 2 && rowsAfter.every((r) => r.epoch === 1 && r.snap && upRows(D, r.doc_id) === 0 && r.snap_seq === r.last_seq), "documents : après la rotation, chaque document est un instantané d'epoch 1");
+  const kA2 = await keyOf(alice);
+  const afterRot = await readDoc(alice, D, kA2, docId);
+  ok(afterRot.text === textMain, "documents : le document reste lisible avec la nouvelle clé après rotation");
+  const afterBob = await readDoc(bob, D, await keyOf(bob), cdoc);
+  ok(afterBob.text.startsWith("AFTER l0:COMPACT_SECRET") && afterBob.text.includes("l229:"), "documents : l'éditeur restant relit aussi l'autre document");
+  const oldKey = await readDoc(alice, D, kA, docId).then(() => true, () => false);
+  ok(!oldKey, "documents : l'ancienne clé ne déchiffre plus rien");
+  ok((await as(carol, () => api("GET", `/items/${D}/docs`))).status === 404, "documents : le membre révoqué n'accède plus aux documents");
+  const listed = (await as(alice, () => api("GET", `/items/${D}/docs`))).body;
+  ok(listed.length === 2 && listed.every((d: any) => d.epoch === 1 && d.ups.length === 0), "documents : GET /items/:id/docs liste les documents chiffrés");
+  hB.close();
+  hC.close();
+  dA.destroy();
+
+  // Document count cap per board.
+  {
+    const E = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Beaucoup de documents"));
+    const kE = await keyOf(alice, E);
+    const s = boardSocket(alice, E);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    const one = new Y.Doc();
+    one.getText("t").insert(0, "x");
+    const u = Y.encodeStateAsUpdate(one);
+    let accepted = 0;
+    let lastErr = "";
+    for (let i = 0; i < 65; i++) {
+      const id = sd.newDocId();
+      s.send({ t: "doc.sub", doc: id });
+      await s.next((m) => m.t === "doc.state");
+      s.send(await upFrame(E, kE, id, init.epoch, u));
+      const r = await s.next((m) => m.t === "doc.ack" || m.t === "doc.err");
+      if (r.t === "doc.ack") accepted++;
+      else lastErr = r.error;
+      s.send({ t: "doc.unsub", doc: id });
+    }
+    ok(accepted === 64 && lastErr === "trop de documents" && docsRows(E).length === 64, "documents : 64 documents au plus par tableau");
+    s.ws.close();
+
+    // Stored size cap (8 MiB of ciphertext per document).
+    const F = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Gros document"));
+    const kF = await keyOf(alice, F);
+    const doc = sd.newDocId();
+    const s2 = boardSocket(alice, F);
+    await s2.open;
+    await s2.next((m) => m.t === "init");
+    s2.send({ t: "doc.sub", doc });
+    await s2.next((m) => m.t === "doc.state");
+    let reply: any = null;
+    let n = 0;
+    for (; n < 30 && (!reply || reply.t === "doc.ack"); n++) {
+      const part = new Y.Doc();
+      part.getText("t").insert(0, Array.from({ length: 5 }, () => c.toB64(c.randomBytes(45_000))).join("").slice(0, 300_000));
+      s2.send(await upFrame(F, kF, doc, init.epoch, Y.encodeStateAsUpdate(part)));
+      reply = await s2.next((m) => m.t === "doc.ack" || m.t === "doc.err", 10000);
+    }
+    ok(reply?.t === "doc.err" && reply.error === "document trop gros" && n > 10, "documents : un document ne dépasse pas 8 Mio");
+    s2.ws.close();
+  }
+  ok(errors.length === 0, `documents : aucune erreur côté client${errors.length ? ` (${errors.join("; ")})` : ""}`);
 }
 
 // Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).

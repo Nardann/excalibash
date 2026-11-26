@@ -29,6 +29,19 @@ type Events = {
   error: (message: string) => void;
 };
 
+/**
+ * What sharedDoc.ts registers per shared document: the session routes the doc.* messages of that
+ * document to it and tells it when the socket is (re)opened or lost.
+ */
+export type DocHandler = {
+  /** The socket is up and `init` was received (also after every reconnection): (re)subscribe. */
+  onOpen: () => void;
+  /** The socket was lost. */
+  onClose: () => void;
+  /** doc.state / doc.up / doc.ack / doc.aw / doc.compact / doc.snapped / doc.err, in arrival order. */
+  onMessage: (msg: any) => Promise<void> | void;
+};
+
 const SEND_INTERVAL = 50;
 const POINTER_INTERVAL = 50;
 
@@ -91,6 +104,10 @@ export class BoardSession {
   private fileWaiters = new Map<string, { term: string; last: number; on: FileFrameHandler; fail: (message: string) => void }>();
   private fileOutbox: Promise<void> = Promise.resolve();
   private pendingCreates = new Map<string, { resolve: (t: TerminalInfo) => void; reject: (e: Error) => void }>();
+  /** Shared documents bound to this session (sharedDoc.ts), by document id. */
+  private docHandlers = new Map<string, DocHandler>();
+  /** True between `init` and the loss of the socket. */
+  private connected = false;
   /** Input frames: sender id + strictly increasing counter, checked by the agent. */
   private readonly sender = randomId().slice(0, 12);
   private inputCounter = 0;
@@ -116,6 +133,27 @@ export class BoardSession {
 
   get canEdit() {
     return this.role !== "viewer";
+  }
+
+  /** Current key epoch (binds ciphertexts to the key generation). */
+  get currentEpoch() {
+    return this.epoch;
+  }
+
+  // ---- Shared documents hooks (see sharedDoc.ts) ----------------------------------------
+
+  /** Sends a raw doc.* frame; false when the socket is not open. */
+  docSend(msg: object): boolean {
+    return this.send(msg);
+  }
+
+  /** Routes the doc.* messages of `doc` to `handler`; it is told right away if the socket is already up. */
+  docRegister(doc: string, handler: DocHandler): () => void {
+    this.docHandlers.set(doc, handler);
+    if (this.connected) handler.onOpen();
+    return () => {
+      if (this.docHandlers.get(doc) === handler) this.docHandlers.delete(doc);
+    };
   }
 
   on<K extends keyof Events>(event: K, fn: Events[K]): () => void {
@@ -164,6 +202,8 @@ export class BoardSession {
       this.fileWaiters.clear();
       for (const w of waiting) w.fail("Connexion perdue");
       this.ws = null;
+      this.connected = false;
+      for (const h of this.docHandlers.values()) h.onClose();
       this.peers.clear();
       this.collaborators.clear();
       this.api?.updateScene({ collaborators: new Map() });
@@ -199,6 +239,8 @@ export class BoardSession {
         await this.setTerminals(msg.terminals);
         await this.setWebs(msg.webs ?? []);
         this.emit("peers", [...this.peers.values()]);
+        this.connected = true;
+        for (const h of this.docHandlers.values()) h.onOpen();
         this.emit("init", msg);
         if (this.api) await this.applyInit(msg);
         else this.pendingInit = msg;
@@ -212,6 +254,17 @@ export class BoardSession {
       case "rekey":
         this.emit("closed", 4409);
         break;
+      case "doc.state":
+      case "doc.up":
+      case "doc.ack":
+      case "doc.aw":
+      case "doc.compact":
+      case "doc.snapped":
+      case "doc.err": {
+        const h = typeof msg.doc === "string" ? this.docHandlers.get(msg.doc) : undefined;
+        if (h) await h.onMessage(msg);
+        break;
+      }
       case "peer.join":
         this.peers.set(msg.peer.id, msg.peer);
         this.emit("peers", [...this.peers.values()]);

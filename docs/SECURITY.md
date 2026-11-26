@@ -160,6 +160,44 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
 - La restauration laisse intacts les terminaux et sites (fenêtres) et les liens des machines, pour ne jamais
   couper un shell en cours.
 
+## Documents partagés (code et notebooks)
+
+Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128 bits tiré au hasard par le navigateur, rattaché
+à **un** tableau. Le serveur ne comprend rien à son contenu : il ordonne, stocke et relaie des chiffrés.
+
+| Donnée | AAD |
+|---|---|
+| Mise à jour ou instantané Yjs : `box(K_b, octets)` | `eb:doc:<boardId>:<docId>:<epoch>` |
+| Présence (curseurs, noms, sélections) : `box(K_b, octets)` | `eb:doc-aw:<boardId>:<docId>:<epoch>` |
+
+- Sur la socket du tableau : `doc.sub` (tout membre, lecteurs compris) → `doc.state {snap?, ups}` puis la socket reste abonnée ;
+  `doc.up` (éditeurs) est numéroté (`seq` strictement croissant par document), relayé aux autres abonnés et acquitté
+  (`doc.ack`) ; `doc.aw` (tout membre) est relayé sans être stocké, au plus 10 messages par seconde et par socket ;
+  `doc.snap` (éditeurs) est une compaction faite par le navigateur : l'instantané remplace l'ancien et toutes les mises à
+  jour jusqu'à `upto`, en une transaction. Le serveur demande la compaction (`doc.compact`) à un éditeur quand un document
+  dépasse 200 mises à jour ou 1 Mio de mises à jour.
+- Plafonds : une trame de mise à jour 512 Kio, la présence 32 Kio, un instantané 4 Mio, un document 8 Mio
+  (instantané compris, au-delà `doc.up` est refusé), 64 documents par tableau, 64 documents ouverts par socket.
+  Les identifiants sont validés strictement (22 caractères base64url).
+- **Ce que le serveur voit** : le nombre de documents d'un tableau, la taille et la date de chaque mise à jour, leur rythme
+  et le nombre de mises à jour en attente de compaction, qui est abonné. **Il ne voit jamais** le texte, le code, les
+  cellules, les curseurs ni les noms affichés dans la présence.
+- **Lecteurs** : ils reçoivent l'état et la présence, mais le serveur refuse leurs `doc.up` et `doc.snap`
+  (« Lecture seule ») sans rien changer au document stocké. Comme pour les terminaux, ils ont la clé : c'est une
+  restriction d'accès, pas une garantie cryptographique.
+- **Intégrité** : un chiffré déplacé vers un autre document, un autre tableau ou une autre génération de clés
+  ne s'authentifie pas (AAD). Une mise à jour qui échoue à l'authentification est ignorée par le navigateur, qui renonce
+  alors à compacter ce document plutôt que d'effacer ce qu'il n'a pas pu lire. Le serveur peut en revanche **retenir,
+  retarder ou supprimer** des mises à jour (déni de service) ; il ne peut pas en fabriquer. Comme pour l'historique,
+  une mise à jour authentique rejouée est sans effet (Yjs est idempotent).
+- **Rotation des clés** : les documents contiennent le travail des gens, ils ne sont donc **pas supprimés**. Le navigateur du
+  propriétaire récupère chaque document (`GET /api/items/:id/docs`), le déchiffre avec l'ancienne clé, fusionne instantané
+  et mises à jour en un seul état et le re-chiffre en instantané sous la nouvelle clé et le nouvel epoch. Le serveur remplace
+  les lignes de tous les documents du tableau dans la transaction de rotation, et seulement si l'ensemble des documents et
+  le dernier `seq` de chacun n'ont pas bougé depuis la lecture (sinon 409 et le navigateur recommence, aucune modification
+  n'est perdue). Les abonnés sont déconnectés par le code 4409 comme pour le reste du tableau.
+- La suppression définitive d'un tableau supprime ses documents.
+
 ## Machines et terminaux
 
 - Ajout d'une machine : **le navigateur** génère la clé privée X25519 de l'agent (32 octets). Elle

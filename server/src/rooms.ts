@@ -15,12 +15,36 @@ import {
 } from "./terminals.ts";
 import { fileRequest } from "./files.ts";
 import { HistoryTracker } from "./history.ts";
+import {
+  MAX_AWARENESS,
+  MAX_FRAME,
+  MAX_SNAPSHOT,
+  appendUpdate,
+  applySnapshot,
+  docState,
+  isB64,
+  isDocId,
+} from "./docs.ts";
 import { closeTunnel, createTunnel, listBoardTunnels, tunnelExists } from "./tunnels.ts";
 
 /** Encrypted element: only the merge metadata is readable by the server. */
 type Entry = { id: string; v: number; n: number; c: string };
 
-type Client = { id: string; user: User; role: Role; session?: string };
+type Client = {
+  id: string;
+  user: User;
+  role: Role;
+  session?: string;
+  /** Shared documents this socket is subscribed to. */
+  docs: Set<string>;
+  /** Awareness rate limit: token bucket. */
+  awTokens: number;
+  awAt: number;
+};
+
+const AWARENESS_RATE = 10; // messages per second per socket
+const MAX_SUBSCRIPTIONS = 64;
+const COMPACT_RETRY = 5000;
 
 const SAVE_DELAY = 1500;
 const MAX_CIPHERTEXT = 2 * 1024 * 1024;
@@ -57,6 +81,10 @@ class Room implements BoardRoom {
   private saveTimer: NodeJS.Timeout | undefined;
   private dirtyFiles = false;
   private history: HistoryTracker;
+  /** Sockets subscribed to each shared document. */
+  private docSubs = new Map<string, Set<WebSocket>>();
+  /** When a compaction was last requested per document (not repeated while one is likely under way). */
+  private compactAsked = new Map<string, number>();
 
   constructor(boardId: string) {
     this.boardId = boardId;
@@ -81,7 +109,7 @@ class Room implements BoardRoom {
   }
 
   join(ws: WebSocket, user: User, role: Role, session?: string): void {
-    const client: Client = { id: newId(6), user, role, session };
+    const client: Client = { id: newId(6), user, role, session, docs: new Set(), awTokens: AWARENESS_RATE, awAt: Date.now() };
     this.clients.set(ws, client);
     ws.send(
       JSON.stringify({
@@ -114,6 +142,7 @@ class Room implements BoardRoom {
 
     ws.on("close", () => {
       this.clients.delete(ws);
+      for (const doc of client.docs) this.unsubscribe(ws, client, doc);
       this.broadcast(JSON.stringify({ t: "peer.leave", id: client.id }));
       if (this.clients.size === 0) {
         this.flush();
@@ -222,6 +251,13 @@ class Room implements BoardRoom {
           terminalInput(this.boardId, String(msg.id), { s: msg.s, k: msg.k, ts: msg.ts, d: msg.d });
         }
         break;
+      case "doc.sub":
+      case "doc.unsub":
+      case "doc.up":
+      case "doc.aw":
+      case "doc.snap":
+        this.onDoc(ws, client, msg, editor);
+        break;
       case "file.req":
         fileRequest(ws, this.boardId, editor, msg);
         break;
@@ -234,6 +270,84 @@ class Room implements BoardRoom {
       case "term.restart":
         if (editor) terminalRestart(this.boardId, String(msg.id));
         break;
+    }
+  }
+
+  // ---- Shared documents (opaque ciphertext: the server only orders, stores and relays) ----------
+
+  private unsubscribe(ws: WebSocket, client: Client, doc: string): void {
+    client.docs.delete(doc);
+    const subs = this.docSubs.get(doc);
+    subs?.delete(ws);
+    if (subs && !subs.size) {
+      this.docSubs.delete(doc);
+      this.compactAsked.delete(doc);
+    }
+  }
+
+  private onDoc(ws: WebSocket, client: Client, msg: any, editor: boolean): void {
+    const doc = msg.doc;
+    const fail = (error: string) => ws.send(JSON.stringify({ t: "doc.err", doc: typeof doc === "string" ? doc.slice(0, 64) : "", error }));
+    if (!isDocId(doc)) return fail("identifiant de document invalide");
+    const relay = (data: object) => {
+      const text = JSON.stringify(data);
+      for (const peer of this.docSubs.get(doc) ?? []) if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(text);
+    };
+
+    switch (msg.t) {
+      case "doc.sub": {
+        if (!client.docs.has(doc)) {
+          if (client.docs.size >= MAX_SUBSCRIPTIONS) return fail("trop de documents ouverts");
+          client.docs.add(doc);
+          let subs = this.docSubs.get(doc);
+          if (!subs) this.docSubs.set(doc, (subs = new Set()));
+          subs.add(ws);
+        }
+        // Same tick as the subscription: no update can slip between the state and the live relay.
+        ws.send(JSON.stringify({ t: "doc.state", doc, ...docState(this.boardId, doc) }));
+        break;
+      }
+      case "doc.unsub":
+        this.unsubscribe(ws, client, doc);
+        break;
+      case "doc.up": {
+        if (!editor) return fail("Lecture seule");
+        if (msg.epoch !== this.epoch) return ws.send(JSON.stringify({ t: "rekey" }));
+        if (!client.docs.has(doc)) return fail("document non ouvert");
+        if (!isB64(msg.d, MAX_FRAME)) return fail("mise à jour invalide");
+        const r = appendUpdate(this.boardId, doc, this.epoch, msg.d);
+        if (!r.ok) return fail(r.error);
+        relay({ t: "doc.up", doc, d: msg.d, seq: r.seq });
+        ws.send(JSON.stringify({ t: "doc.ack", doc, seq: r.seq }));
+        const now = Date.now();
+        if (r.compact && now - (this.compactAsked.get(doc) ?? 0) > COMPACT_RETRY) {
+          // The writer is an editor that has the document loaded: it is the one asked to compact.
+          this.compactAsked.set(doc, now);
+          ws.send(JSON.stringify({ t: "doc.compact", doc }));
+        }
+        break;
+      }
+      case "doc.snap": {
+        if (!editor) return fail("Lecture seule");
+        if (msg.epoch !== this.epoch) return ws.send(JSON.stringify({ t: "rekey" }));
+        if (!isB64(msg.d, MAX_SNAPSHOT)) return fail("instantané invalide");
+        const r = applySnapshot(this.boardId, doc, msg.d, msg.upto);
+        if (!r.ok) return fail(r.error);
+        this.compactAsked.delete(doc);
+        ws.send(JSON.stringify({ t: "doc.snapped", doc, upto: msg.upto }));
+        break;
+      }
+      case "doc.aw": {
+        if (!client.docs.has(doc) || !isB64(msg.d, MAX_AWARENESS)) return;
+        // Relayed only, never stored; at most AWARENESS_RATE messages per second per socket.
+        const now = Date.now();
+        client.awTokens = Math.min(AWARENESS_RATE, client.awTokens + ((now - client.awAt) / 1000) * AWARENESS_RATE);
+        client.awAt = now;
+        if (client.awTokens < 1) return;
+        client.awTokens--;
+        relay({ t: "doc.aw", doc, d: msg.d, from: client.id });
+        break;
+      }
     }
   }
 
