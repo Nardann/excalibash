@@ -1006,6 +1006,11 @@ input.board-title {
 .board-canvas .excalidraw {
   --color-primary: #4f46e5;
 }
+/* Windows (terminal, code, notebook) can overflow the canvas: focusing their input must not scroll the clipped canvas
+   (overflow: hidden can still be scrolled by the browser to reveal a caret, which shifts the whole board). */
+.board-canvas .excalidraw.excalidraw-container {
+  overflow: clip;
+}
 .public-title {
   min-width: 0;
   overflow: hidden;
