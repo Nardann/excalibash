@@ -9,12 +9,21 @@ const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createMachine } from "../web/src/vault.ts";
 import { encryptEntry, decryptEntry } from "../web/src/board/boardCrypto.ts";
+import * as sd from "../web/src/board/sharedDoc.ts";
+import * as codeDoc from "../web/src/board/codeDoc.ts";
+import * as mf from "../web/src/board/machineFiles.ts";
+import * as nbDoc from "../web/src/board/notebookDoc.ts";
+import { NotebookRunner } from "../web/src/board/notebookRunner.ts";
+import { LineSplitter, parseEvent } from "../web/src/board/kernelProtocol.ts";
+import { FileClient } from "../web/src/board/fileTransfer.ts";
+import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
+import { Awareness, encodeAwarenessUpdate } from "../web/node_modules/y-protocols/awareness.js";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:6797";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:6799";
@@ -1243,6 +1252,596 @@ site.close();
   await session(alice, hKey, [box("ha", 7, "HISTSECRET_NEW")]);
   const fresh = await versions();
   ok(fresh.length === 1 && fresh[0].epoch === 1 && (await getV(fresh[0].id)).elements.length > 0, "historique : une nouvelle version repart avec les nouvelles clés");
+}
+
+// Shared documents (Yjs): the server stores and relays ciphertext of CRDT updates, snapshots survive key rotation.
+{
+  const D = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Documents partagés"));
+  await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, bobPub, "editor"));
+  await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+  const keyOf = async (u: U, id = D) => (await tree(u)).get(id)!.key!;
+  const kA = await keyOf(alice);
+  const kB = await keyOf(bob);
+  const kC = await keyOf(carol);
+  const docId = sd.newDocId();
+  const until = async (cond: () => boolean, ms = 6000) => {
+    for (const t = Date.now(); Date.now() - t < ms; ) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return cond();
+  };
+  const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const docsRows = (b: string) => rw.prepare("SELECT * FROM board_docs WHERE board_id = ? ORDER BY doc_id").all(b) as any[];
+  const upRows = (b: string, d: string) => (rw.prepare("SELECT COUNT(*) AS n FROM board_doc_updates WHERE board_id = ? AND doc_id = ?").get(b, d) as any).n as number;
+
+  /** A DocHost over a real board socket (what BoardSession is in the browser). */
+  function docHost(u: U, boardId: string, key: c.SymKey, role: "editor" | "viewer") {
+    const handlers = new Map<string, any>();
+    const peerListeners = new Set<() => void>();
+    let sock: ReturnType<typeof boardSocket>;
+    let you: any = null;
+    let epoch = 0;
+    let connected = false;
+    let inbox: Promise<void> = Promise.resolve();
+    const attach = () => {
+      sock = boardSocket(u, boardId);
+      sock.ws.on("message", (raw: any) => {
+        inbox = inbox.then(async () => {
+          const m = JSON.parse(raw.toString());
+          if (m.t === "init") {
+            you = m.you;
+            epoch = m.epoch;
+            connected = true;
+            for (const h of handlers.values()) h.onOpen();
+          } else if (m.t === "peer.join" || m.t === "peer.leave") for (const f of peerListeners) f();
+          else if (typeof m.t === "string" && m.t.startsWith("doc.")) await handlers.get(m.doc)?.onMessage(m);
+        });
+      });
+    };
+    attach();
+    const host = {
+      boardId,
+      key,
+      get canEdit() {
+        return role !== "viewer";
+      },
+      get currentEpoch() {
+        return epoch;
+      },
+      get you() {
+        return you;
+      },
+      docSend(m: object) {
+        if (sock.ws.readyState !== 1) return false;
+        sock.ws.send(JSON.stringify(m));
+        return true;
+      },
+      docRegister(doc: string, h: any) {
+        handlers.set(doc, h);
+        if (connected) h.onOpen();
+        return () => handlers.delete(doc);
+      },
+      on(_e: "peers", fn: () => void) {
+        peerListeners.add(fn);
+        return () => peerListeners.delete(fn);
+      },
+    };
+    return {
+      host,
+      get closed() {
+        return sock.closed;
+      },
+      /** Loses the connection (the tab goes offline). */
+      drop() {
+        connected = false;
+        sock.ws.close();
+        for (const h of handlers.values()) h.onClose();
+      },
+      reconnect() {
+        attach();
+      },
+      close() {
+        sock.ws.close();
+      },
+    };
+  }
+
+  /** Reads a document the way a fresh subscriber does: doc.state, decrypted and merged. */
+  async function readDoc(u: U, boardId: string, key: c.SymKey, doc: string, aadEpoch?: number) {
+    const s = boardSocket(u, boardId);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc });
+    const st = await s.next((m) => m.t === "doc.state");
+    const y = new Y.Doc();
+    for (const part of [...(st.snap ? [st.snap] : []), ...st.ups]) Y.applyUpdate(y, await c.unbox(key, part.d, c.AAD.doc(boardId, doc, aadEpoch ?? init.epoch)));
+    s.ws.close();
+    return { text: y.getText("t").toString(), state: st };
+  }
+  const upFrame = async (boardId: string, key: c.SymKey, doc: string, epoch: number, update: Uint8Array) => ({
+    t: "doc.up",
+    doc,
+    epoch,
+    d: await c.box(key, update, c.AAD.doc(boardId, doc, epoch)),
+  });
+
+  // Two editors and a viewer, through the real shared-document client.
+  const hA = docHost(alice, D, kA, "editor");
+  const hB = docHost(bob, D, kB, "editor");
+  const hC = docHost(carol, D, kC, "viewer");
+  const dA = sd.openSharedDoc(hA.host, docId);
+  const dB = sd.openSharedDoc(hB.host, docId);
+  const dC = sd.openSharedDoc(hC.host, docId);
+  await Promise.all([dA.synced, dB.synced, dC.synced]);
+  ok(!dA.readOnly && !dB.readOnly && dC.readOnly, "documents : un lecteur est en lecture seule côté client");
+  ok(sd.openSharedDoc(hA.host, docId).ydoc === dA.ydoc, "documents : deux fenêtres du même document partagent un seul Y.Doc");
+  const tA = dA.ydoc.getText("t");
+  const tB = dB.ydoc.getText("t");
+  const tC = dC.ydoc.getText("t");
+  tA.insert(0, "ALPHA_SECRET_CODE ");
+  tB.insert(0, "BRAVO_SECRET_CODE ");
+  const converged = await until(() => tA.toString() === tB.toString() && tA.length === 36 && tC.toString() === tA.toString());
+  ok(converged && tA.toString().includes("ALPHA_SECRET_CODE") && tA.toString().includes("BRAVO_SECRET_CODE"), "documents : deux éditeurs écrivent en même temps, tous convergent vers le même texte (lecteur compris)");
+  const final = tA.toString();
+
+  // Viewer: local edits are never sent, and the server refuses a forged doc.up.
+  const before = docsRows(D)[0];
+  tC.insert(0, "HACK_VIEWER ");
+  const raw = boardSocket(carol, D);
+  await raw.open;
+  const rawInit = await raw.next((m) => m.t === "init");
+  raw.send({ t: "doc.sub", doc: docId });
+  await raw.next((m) => m.t === "doc.state");
+  const hack = new Y.Doc();
+  hack.getText("t").insert(0, "HACK_RAW ");
+  raw.send(await upFrame(D, kC, docId, rawInit.epoch, Y.encodeStateAsUpdate(hack)));
+  const refused = await raw.next((m) => m.t === "doc.err");
+  raw.send({ t: "doc.snap", doc: docId, epoch: rawInit.epoch, d: await c.box(kC, Y.encodeStateAsUpdate(hack), c.AAD.doc(D, docId, rawInit.epoch)), upto: 1 });
+  const refusedSnap = await raw.next((m) => m.t === "doc.err");
+  await nap(300);
+  const after = docsRows(D)[0];
+  ok(refused.error === "Lecture seule" && refusedSnap.error === "Lecture seule" && after.last_seq === before.last_seq && after.bytes === before.bytes && tA.toString() === final, "documents : le serveur refuse doc.up et doc.snap d'un lecteur sans toucher au document");
+  raw.ws.close();
+
+  // A fresh subscriber gets the whole state.
+  const fresh = await readDoc(bob, D, kB, docId);
+  ok(fresh.text === final, "documents : un nouvel abonné reçoit l'état complet par doc.state");
+  const wrong = await readDoc(bob, D, kB, docId, 7).then(() => true, () => false);
+  ok(!wrong, "documents : l'AAD lie la mise à jour à son epoch");
+
+  // The database only holds ciphertext.
+  const dump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+  ok(docsRows(D).length === 1 && !dump.includes("SECRET_CODE") && !dump.includes("ALPHA") && !dump.includes("BRAVO"), "documents : aucun texte en clair dans la base");
+
+  // Awareness: relayed to the others, never stored.
+  dA.awareness.setLocalStateField("cursor", { anchor: 3, note: "AW_SECRET_MARK" });
+  const sawAw = await until(() => (dB.awareness.getStates().get(dA.awareness.clientID) as any)?.cursor?.note === "AW_SECRET_MARK" && (dC.awareness.getStates().get(dA.awareness.clientID) as any)?.cursor?.note === "AW_SECRET_MARK");
+  ok(sawAw && (dB.awareness.getStates().get(dA.awareness.clientID) as any)?.user?.name === "Alice", "documents : la présence (curseur, nom) est relayée à l'autre éditeur et au lecteur");
+  dC.awareness.setLocalStateField("cursor", { anchor: 1 });
+  ok(await until(() => (dA.awareness.getStates().get(dC.awareness.clientID) as any)?.cursor?.anchor === 1), "documents : un lecteur peut aussi publier sa présence");
+  await nap(200);
+  const rawFiles = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+  ok(!rawFiles.includes("AW_SECRET_MARK") && !rawFiles.includes("SECRET_CODE"), "documents : la présence n'est jamais stockée (fichiers de la base)");
+
+  // Awareness is rate limited per socket.
+  {
+    const x = boardSocket(alice, D);
+    const y = boardSocket(bob, D);
+    await Promise.all([x.open, y.open]);
+    await x.next((m) => m.t === "init");
+    await y.next((m) => m.t === "init");
+    const aw = new Awareness(new Y.Doc());
+    aw.setLocalState({ junk: 1 });
+    const d = await c.box(kA, encodeAwarenessUpdate(aw, [aw.clientID]), c.AAD.docAwareness(D, docId, 0));
+    x.send({ t: "doc.sub", doc: docId });
+    y.send({ t: "doc.sub", doc: docId });
+    await x.next((m) => m.t === "doc.state");
+    await y.next((m) => m.t === "doc.state");
+    for (let i = 0; i < 60; i++) x.send({ t: "doc.aw", doc: docId, d });
+    await nap(500);
+    let relayed = 0;
+    while (await y.next((m) => m.t === "doc.aw", 50).then(() => true, () => false)) relayed++;
+    ok(relayed >= 1 && relayed <= 16, `documents : la présence est limitée en débit par socket (${relayed} relayées sur 60)`);
+    x.ws.close();
+    y.ws.close();
+  }
+
+  // Offline edits merge on reconnection (the diff against the server state is pushed).
+  hB.drop();
+  tB.insert(0, "OFFLINE_EDIT ");
+  tA.insert(tA.length, " ONLINE_EDIT");
+  hB.reconnect();
+  const merged = await until(() => tA.toString() === tB.toString() && tA.toString().includes("OFFLINE_EDIT") && tA.toString().includes("ONLINE_EDIT"), 8000);
+  ok(merged && tC.toString().includes("OFFLINE_EDIT"), "documents : après une reconnexion, les modifications faites hors ligne sont fusionnées");
+  const errors: string[] = [];
+  dA.onError((m) => errors.push(m));
+
+  // Compaction: > 200 updates make the server ask for a snapshot; updates are then folded into it.
+  const cdoc = sd.newDocId();
+  {
+    const s = boardSocket(alice, D);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc: cdoc });
+    await s.next((m) => m.t === "doc.state");
+    const local = new Y.Doc();
+    const frames: any[] = [];
+    local.on("update", async (u: Uint8Array) => frames.push(u));
+    const t = local.getText("t");
+    for (let i = 0; i < 230; i++) t.insert(t.length, `l${i}:COMPACT_SECRET `);
+    for (const u of frames) s.send(await upFrame(D, kA, cdoc, init.epoch, u));
+    let last = 0;
+    while (last < 230) last = (await s.next((m) => m.t === "doc.ack", 8000)).seq;
+    const ask = await s.next((m) => m.t === "doc.compact", 3000).then((m) => m, () => null);
+    ok(ask?.doc === cdoc && upRows(D, cdoc) === 230, "documents : au-delà de 200 mises à jour, le serveur demande une compaction (doc.compact)");
+    s.send({ t: "doc.snap", doc: cdoc, epoch: init.epoch, upto: 230, d: await c.box(kA, Y.encodeStateAsUpdate(local), c.AAD.doc(D, cdoc, init.epoch)) });
+    await s.next((m) => m.t === "doc.snapped");
+    const row = docsRows(D).find((r) => r.doc_id === cdoc);
+    ok(upRows(D, cdoc) === 0 && row.snap_seq === 230 && row.last_seq === 230, "documents : après doc.snap, les lignes de mises à jour ont disparu (instantané seul)");
+    s.send(await upFrame(D, kA, cdoc, init.epoch, (() => { const u = new Y.Doc(); Y.applyUpdate(u, Y.encodeStateAsUpdate(local)); let out!: Uint8Array; u.on("update", (x: Uint8Array) => (out = x)); u.getText("t").insert(0, "AFTER "); return out; })()));
+    const ack = await s.next((m) => m.t === "doc.ack");
+    ok(ack.seq === 231, "documents : la numérotation continue après la compaction");
+    s.send({ t: "doc.snap", doc: cdoc, epoch: init.epoch, upto: 5, d: await c.box(kA, Y.encodeStateAsUpdate(local), c.AAD.doc(D, cdoc, init.epoch)) });
+    ok((await s.next((m) => m.t === "doc.err")).error === "instantané périmé", "documents : un instantané qui ne couvre rien de nouveau est refusé");
+    const reread = await readDoc(bob, D, kB, cdoc);
+    ok(reread.text.startsWith("AFTER l0:COMPACT_SECRET") && reread.text.includes("l229:COMPACT_SECRET") && reread.state.snap && reread.state.ups.length === 1, "documents : un nouvel abonné relit le même texte après compaction");
+    s.ws.close();
+  }
+
+  // Identifiers and sizes.
+  {
+    const s = boardSocket(alice, D);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    s.send({ t: "doc.sub", doc: "../../etc" });
+    ok((await s.next((m) => m.t === "doc.err")).error === "identifiant de document invalide", "documents : identifiant invalide refusé");
+    const big = sd.newDocId();
+    s.send({ t: "doc.sub", doc: big });
+    await s.next((m) => m.t === "doc.state");
+    s.send({ t: "doc.up", doc: big, epoch: init.epoch, d: "A".repeat(512 * 1024 + 1) });
+    ok((await s.next((m) => m.t === "doc.err")).error === "mise à jour invalide", "documents : une trame de plus de 512 Kio est refusée");
+    s.send({ t: "doc.up", doc: big, epoch: init.epoch + 5, d: "AAAA" });
+    ok((await s.next((m) => m.t === "rekey")).t === "rekey", "documents : une mise à jour avec un mauvais epoch demande de recharger");
+    s.ws.close();
+  }
+
+  // Rotation: revoke the viewer. The documents are re-encrypted (not purged) under the new key and epoch.
+  const rowsBefore = docsRows(D);
+  ok(rowsBefore.length === 2 && rowsBefore.every((r) => r.epoch === 0), "documents : deux documents sur le tableau, epoch 0 avant la rotation");
+  const textMain = tA.toString();
+  const closedA = hA.closed;
+  await as(alice, async () => lib.revokeAccess(ctxOf(alice, await tree(alice)), D, carol.user.id));
+  ok((await Promise.race([closedA, nap(4000).then(() => 0)])) === 4409, "documents : la rotation coupe les abonnés (4409)");
+  const rowsAfter = docsRows(D);
+  ok(rowsAfter.length === 2 && rowsAfter.every((r) => r.epoch === 1 && r.snap && upRows(D, r.doc_id) === 0 && r.snap_seq === r.last_seq), "documents : après la rotation, chaque document est un instantané d'epoch 1");
+  const kA2 = await keyOf(alice);
+  const afterRot = await readDoc(alice, D, kA2, docId);
+  ok(afterRot.text === textMain, "documents : le document reste lisible avec la nouvelle clé après rotation");
+  const afterBob = await readDoc(bob, D, await keyOf(bob), cdoc);
+  ok(afterBob.text.startsWith("AFTER l0:COMPACT_SECRET") && afterBob.text.includes("l229:"), "documents : l'éditeur restant relit aussi l'autre document");
+  const oldKey = await readDoc(alice, D, kA, docId).then(() => true, () => false);
+  ok(!oldKey, "documents : l'ancienne clé ne déchiffre plus rien");
+  ok((await as(carol, () => api("GET", `/items/${D}/docs`))).status === 404, "documents : le membre révoqué n'accède plus aux documents");
+  const listed = (await as(alice, () => api("GET", `/items/${D}/docs`))).body;
+  ok(listed.length === 2 && listed.every((d: any) => d.epoch === 1 && d.ups.length === 0), "documents : GET /items/:id/docs liste les documents chiffrés");
+  hB.close();
+  hC.close();
+  dA.destroy();
+
+  // Document count cap per board.
+  {
+    const E = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Beaucoup de documents"));
+    const kE = await keyOf(alice, E);
+    const s = boardSocket(alice, E);
+    await s.open;
+    const init = await s.next((m) => m.t === "init");
+    const one = new Y.Doc();
+    one.getText("t").insert(0, "x");
+    const u = Y.encodeStateAsUpdate(one);
+    let accepted = 0;
+    let lastErr = "";
+    for (let i = 0; i < 65; i++) {
+      const id = sd.newDocId();
+      s.send({ t: "doc.sub", doc: id });
+      await s.next((m) => m.t === "doc.state");
+      s.send(await upFrame(E, kE, id, init.epoch, u));
+      const r = await s.next((m) => m.t === "doc.ack" || m.t === "doc.err");
+      if (r.t === "doc.ack") accepted++;
+      else lastErr = r.error;
+      s.send({ t: "doc.unsub", doc: id });
+    }
+    ok(accepted === 64 && lastErr === "trop de documents" && docsRows(E).length === 64, "documents : 64 documents au plus par tableau");
+    s.ws.close();
+
+    // Stored size cap (8 MiB of ciphertext per document).
+    const F = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Gros document"));
+    const kF = await keyOf(alice, F);
+    const doc = sd.newDocId();
+    const s2 = boardSocket(alice, F);
+    await s2.open;
+    await s2.next((m) => m.t === "init");
+    s2.send({ t: "doc.sub", doc });
+    await s2.next((m) => m.t === "doc.state");
+    let reply: any = null;
+    let n = 0;
+    for (; n < 30 && (!reply || reply.t === "doc.ack"); n++) {
+      const part = new Y.Doc();
+      part.getText("t").insert(0, Array.from({ length: 5 }, () => c.toB64(c.randomBytes(45_000))).join("").slice(0, 300_000));
+      s2.send(await upFrame(F, kF, doc, init.epoch, Y.encodeStateAsUpdate(part)));
+      reply = await s2.next((m) => m.t === "doc.ack" || m.t === "doc.err", 10000);
+    }
+    ok(reply?.t === "doc.err" && reply.error === "document trop gros" && n > 10, "documents : un document ne dépasse pas 8 Mio");
+    s2.ws.close();
+  }
+  // Code window, without a browser: what CodeEmbed does with the document (Y.Text "content" + Y.Map "meta"),
+  // the real FileClient over the real agent's local shell (board B, terminal tid2), and the server blind throughout.
+  {
+    const cdocId = sd.newDocId();
+    const hA3 = docHost(alice, D, kA, "editor");
+    const hB3 = docHost(bob, D, kB, "editor");
+    const ca = sd.openSharedDoc(hA3.host, cdocId);
+    const cb = sd.openSharedDoc(hB3.host, cdocId);
+    await Promise.all([ca.synced, cb.synced]);
+    // The file channel of the shell: frames sealed with the terminal key, like BoardSession.fileRequest.
+    // (Alice's first socket on board B was cut by the session tests above: a fresh one.)
+    const sf = boardSocket(alice, B);
+    await sf.open;
+    await sf.next((m) => m.t === "init");
+    const waiting = new Map<string, { on: (n: number, body: any, end: boolean) => void; fail: (m: string) => void; last: number }>();
+    let chain: Promise<void> = Promise.resolve();
+    sf.ws.on("message", (raw: any) => {
+      chain = chain.then(async () => {
+        const m = JSON.parse(raw.toString());
+        const w = waiting.get(m.rid);
+        if (!w || (m.t !== "file.res" && m.t !== "file.err")) return;
+        if (m.t === "file.err") return void (waiting.delete(m.rid), w.fail(m.message));
+        if (m.n <= w.last) return;
+        const body = JSON.parse(c.fromUtf8(await c.unbox(kt2, m.d, c.AAD.fileRes(tid2, m.rid, m.n))));
+        w.last = m.n;
+        if (m.end) waiting.delete(m.rid);
+        w.on(m.n, body, m.end === true);
+      });
+    });
+    const fileHost = {
+      async fileRequest(term: string, op: object, on?: any, fail?: any) {
+        const rid = c.randomId();
+        const ts = Date.now();
+        if (on) waiting.set(rid, { on, fail: fail ?? (() => {}), last: -1 });
+        sf.send({ t: "file.req", term, rid, ts, d: await c.box(kt2, c.utf8(JSON.stringify(op)), c.AAD.fileReq(term, rid, ts)), ...(on ? {} : { nr: true }) });
+        return rid;
+      },
+      fileDrop: (rid: string) => void waiting.delete(rid),
+    };
+    const client = new FileClient(fileHost as any, tid2);
+    const cwd = (await client.ls()).cwd;
+
+    // Alice creates a blank document and types.
+    ok(codeDoc.initBlank(ca.ydoc, "demo.py"), "code : un document neuf reçoit son nom");
+    ca.ydoc.getText("content").insert(0, "print('salut')\n");
+    const sameText = await until(() => cb.ydoc.getText("content").toString() === "print('salut')\n" && codeDoc.readMeta(cb.ydoc.getMap("meta")).name === "demo.py");
+    ok(sameText && codeDoc.readMeta(cb.ydoc.getMap("meta")).language === "python", "code : Bob voit le même contenu et les mêmes métadonnées (langage Python)");
+    ok(codeDoc.isDirty(await codeDoc.sha256Hex("print('salut')\n"), codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha), "code : jamais enregistré = modifié");
+
+    // Save through the shell's file channel: a new file is written without asking.
+    let asked: string[] = [];
+    const confirm = (answer: boolean) => async (reason: string) => (asked.push(reason), answer);
+    const saved = await mf.saveMachineFile(client, "demo.py", ca.ydoc.getText("content").toString(), { baseSha: undefined, confirm: confirm(true) });
+    ok(!!saved && saved.path === join(cwd, "demo.py") && readFileSync(join(cwd, "demo.py"), "utf8") === "print('salut')\n" && asked.length === 0, "code : enregistrer écrit demo.py dans le dossier du shell (agent réel), sans question");
+    codeDoc.markSaved(ca.ydoc, { path: saved!.path, sha: saved!.sha, by: "Alice" });
+    const bobMeta = await until(() => codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha === saved!.sha);
+    ok(bobMeta && !codeDoc.isDirty(await codeDoc.sha256Hex(cb.ydoc.getText("content").toString()), codeDoc.readMeta(cb.ydoc.getMap("meta")).savedSha), "code : après enregistrement, le document n'est plus modifié, pour Bob aussi");
+
+    // Reading it back gives the same text and the same fingerprint.
+    const back = await mf.openMachineFile(client, "demo.py");
+    ok(back.text === "print('salut')\n" && back.sha === saved!.sha, "code : rouvrir le fichier de la machine redonne le même texte et la même empreinte");
+
+    // Conflict: the file changed on the machine behind our back.
+    writeFileSync(join(cwd, "demo.py"), "modifié ailleurs\n");
+    cb.ydoc.getText("content").insert(0, "# par Bob\n");
+    const bobMetaNow = codeDoc.readMeta(cb.ydoc.getMap("meta"));
+    const refused = await mf.saveMachineFile(client, bobMetaNow.path!, cb.ydoc.getText("content").toString(), { baseSha: bobMetaNow.savedSha, confirm: confirm(false) });
+    ok(refused === null && asked.join() === "changed" && readFileSync(join(cwd, "demo.py"), "utf8") === "modifié ailleurs\n", "code : fichier modifié sur la machine, écraser refusé : rien n'est écrit");
+    asked = [];
+    const forced = await mf.saveMachineFile(client, bobMetaNow.path!, cb.ydoc.getText("content").toString(), { baseSha: bobMetaNow.savedSha, confirm: confirm(true) });
+    ok(!!forced && asked.join() === "changed" && readFileSync(join(cwd, "demo.py"), "utf8") === "# par Bob\nprint('salut')\n", "code : écraser confirmé écrit le contenu partagé");
+    // "Save as" onto an existing file asks too; a folder is refused.
+    asked = [];
+    const exists = await mf.saveMachineFile(client, "demo.py", "x", { baseSha: undefined, confirm: confirm(false) });
+    const dirErr = await mf.saveMachineFile(client, ".", "x", { confirm: confirm(true) }).then(() => "", (e: any) => String(e.message));
+    ok(exists === null && asked.join() === "exists" && dirErr !== "", "code : « enregistrer sous » sur un fichier existant demande confirmation ; un dossier est refusé");
+
+    // The server never saw the code.
+    await until(() => upRows(D, cdocId) > 0);
+    await nap(300);
+    const codeDump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+    const codeRaw = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+    ok(upRows(D, cdocId) > 0 && !codeDump.includes("salut") && !codeRaw.includes("salut") && !codeDump.includes("demo.py") && !codeRaw.includes("par Bob"), "code : aucun texte ni nom de fichier en clair dans la base");
+
+    // ---- Notebook: shared cells, ONE Jupyter kernel session on Alice's machine (real agent + real ipykernel) ----
+    const nbId = sd.newDocId();
+    const na = sd.openSharedDoc(hA3.host, nbId);
+    const nbBob = sd.openSharedDoc(hB3.host, nbId);
+    const bobErrors: string[] = [];
+    nbBob.onError((m) => bobErrors.push(m));
+    await Promise.all([na.synced, nbBob.synced]);
+    nbDoc.initBlankNotebook(na.ydoc, "demo.ipynb");
+    const first = nbDoc.cellViews(na.ydoc)[0].id;
+    nbDoc.findCell(na.ydoc, first)!.source.insert(0, "x = 41");
+    const second = nbDoc.insertCell(na.ydoc, { type: "code", source: "print(x + 1)", at: { after: first } });
+    const bobSees = await until(() => nbDoc.cellViews(nbBob.ydoc).length === 2 && nbDoc.findCell(nbBob.ydoc, second)?.source.toString() === "print(x + 1)" && nbDoc.readMeta(nbBob.ydoc.getMap("meta")).name === "demo.ipynb");
+    ok(bobSees, "notebook : Bob reçoit les cellules et le nom, chiffrés");
+
+    // Alice starts the kernel session on her machine: a "jupyter" target sealed under the machine key (like RemoteForm).
+    const sAl = boardSocket(alice, D);
+    const sBo = boardSocket(bob, D);
+    await Promise.all([sAl.open, sBo.open]);
+    await sAl.next((m) => m.t === "init");
+    const bobInit = await sBo.next((m) => m.t === "init");
+    const kid = c.randomId();
+    const kk = await c.newSymKey();
+    sAl.send({
+      t: "term.create", reqId: "nbk", id: kid, machineId: machine.id, cols: 80, rows: 24,
+      keyForBoard: await c.wrapKey(kA, kk, c.AAD.termKey(D, kid)),
+      keyForAgent: await c.boxJson(mAlice.auth, { k: c.toB64(kk.raw), target: { kind: "jupyter", host: "", port: 0 } }, c.AAD.termAgent(kid)),
+      encLabel: await c.boxText(kA, "Noyau Jupyter python3 via laptop-alice", c.AAD.termLabel(D, kid)),
+    });
+    const madeK = await sAl.next((m) => (m.t === "term.created" && m.reqId === "nbk") || (m.t === "error" && m.reqId === "nbk"), 10000);
+    ok(madeK.t === "term.created", `notebook : le noyau Jupyter démarre sur la machine (${madeK.message ?? "ok"})`);
+    nbDoc.setKernelTerm(na.ydoc, kid);
+    ok(await until(() => nbDoc.kernelTermOf(nbBob.ydoc) === kid), "notebook : l'identifiant de la session de noyau est partagé par le document");
+    // Bob gets the terminal key from the board like for any shared terminal.
+    const termForBob = await sBo.next((m) => m.t === "term" && m.terminal.id === kid, 8000).catch(() => null);
+    const bobTermInfo = termForBob?.terminal ?? bobInit.terminals?.find((t: any) => t.id === kid);
+    const kkBob = bobTermInfo ? await c.unwrapKey(kB, bobTermInfo.keyForBoard, c.AAD.termKey(D, kid)) : null;
+    ok(!!kkBob && c.toB64(kkBob.raw) === c.toB64(kk.raw), "notebook : Bob récupère la clé de la session de noyau par la clé du tableau");
+
+    /** What BoardSession offers a runner, over a raw socket: subscribe (replay then data, decrypted in order) and input. */
+    const kGens = new Map<string, string>();
+    function kernelPort(sock: ReturnType<typeof boardSocket>, key: c.SymKey, sender: string, taps: ((d: Uint8Array) => void)[] = []) {
+      const listeners = new Set<{ onReplay(d: Uint8Array): void; onData(d: Uint8Array): void }>();
+      let chain: Promise<void> = Promise.resolve();
+      let last = { gen: "", seq: -1 };
+      const take = (gen: string, seq: number) => {
+        if (last.gen === gen && seq <= last.seq) return false;
+        last = { gen, seq };
+        kGens.set(sender, gen);
+        return true;
+      };
+      sock.ws.on("message", (raw: any) => {
+        chain = chain.then(async () => {
+          const m = JSON.parse(raw.toString());
+          if (m.id !== kid) return;
+          if (m.t === "term.replay") {
+            const parts: Uint8Array[] = [];
+            for (const ch of m.chunks) if (take(ch.gen, ch.seq)) parts.push(await c.unbox(key, ch.d, c.AAD.termOut(kid, ch.gen, ch.seq)));
+            const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+            let o = 0;
+            for (const p of parts) (all.set(p, o), (o += p.length));
+            for (const l of listeners) l.onReplay(all);
+          } else if (m.t === "term.data" && take(m.gen, m.seq)) {
+            const d = await c.unbox(key, m.d, c.AAD.termOut(kid, m.gen, m.seq));
+            for (const t of taps) t(d);
+            for (const l of listeners) l.onData(d);
+          }
+        });
+      });
+      let out: Promise<void> = Promise.resolve();
+      return {
+        subscribe(term: string, l: any) {
+          listeners.add(l);
+          sock.send({ t: "term.sub", id: term });
+          return () => listeners.delete(l);
+        },
+        input(term: string, data: Uint8Array) {
+          out = out.then(async () => {
+            for (let i = 0; i < 400 && !kGens.has(sender); i++) await nap(25);
+            const k = ++counter;
+            const ts = Date.now();
+            sock.send({ t: "term.input", id: term, s: sender, k, ts, d: await c.box(key, data, c.AAD.termIn(term, kGens.get(sender)!, sender, k, ts)) });
+          });
+        },
+      };
+    }
+    // Bob also taps the raw stream: he must see the very same events as the executor.
+    const bobSplit = new LineSplitter();
+    const bobEvents: any[] = [];
+    const portA = kernelPort(sAl, kk, "nb-alice");
+    const portB = kernelPort(sBo, kkBob!, "nb-bob", [(d) => bobSplit.push(d).forEach((l) => { const e = parseEvent(l); if (e) bobEvents.push(e); })]);
+    const runA = new NotebookRunner(na.ydoc, portA, { awareness: na.awareness, canEdit: true });
+    const runB = new NotebookRunner(nbBob.ydoc, portB, { awareness: nbBob.awareness, canEdit: true });
+    runA.attach(kid);
+    runB.attach(kid);
+    const waitIdle = async (cell: string) => until(() => !nbDoc.findCell(na.ydoc, cell)?.running, 40000);
+
+    const r1 = runA.run(first);
+    ok(r1.ok && nbDoc.findCell(nbBob.ydoc, first) !== undefined && (await until(() => nbDoc.findCell(nbBob.ydoc, first)!.running === (r1.ok ? r1.execId : ""), 4000)), "notebook : Bob voit la cellule « en cours » dès que Alice la lance");
+    const done1 = await waitIdle(first);
+    ok(done1 && nbDoc.findCell(na.ydoc, first)!.executionCount === 1, `notebook : « x = 41 » s'exécute sur le noyau (${runA.fatal ?? runA.status})`);
+    const r2 = runA.run(second);
+    ok(r2.ok, "notebook : « print(x + 1) » est envoyé par la saisie chiffrée du terminal");
+    const done2 = await waitIdle(second);
+    const out2 = nbDoc.findCell(na.ydoc, second)!;
+    ok(done2 && out2.outputs.some((o) => o.output_type === "stream" && o.text === "42\n") && out2.executionCount === 2, "notebook : le noyau garde son état (x) : la sortie « 42 » est écrite par Alice");
+    const bobGot = await until(() => nbDoc.findCell(nbBob.ydoc, second)?.outputs.some((o) => o.output_type === "stream" && o.text === "42\n") === true && !nbDoc.findCell(nbBob.ydoc, second)!.running, 8000);
+    ok(bobGot && nbDoc.findCell(nbBob.ydoc, second)!.outputs.length === 1, "notebook : le document de Bob reçoit « 42 » (une seule fois : seul l'exécuteur écrit)");
+    const bobSaw = bobEvents.some((e) => e.ev === "stream" && e.id === (r2.ok ? r2.execId : "") && e.text === "42\n") && bobEvents.some((e) => e.ev === "done" && e.id === (r2.ok ? r2.execId : ""));
+    ok(bobSaw && runB.localRuns.length === 0, "notebook : Bob, abonné au même noyau, voit les mêmes événements (stream, done) sans rien écrire");
+    // Bob can run too (any editor): the kernel is shared, so the variable is there.
+    const third = nbDoc.insertCell(nbBob.ydoc, { type: "code", source: "print(x * 2)", at: "end" });
+    await until(() => nbDoc.findCell(na.ydoc, third) !== undefined);
+    const r3 = runB.run(third);
+    ok(r3.ok && (await until(() => nbDoc.findCell(na.ydoc, third)?.outputs.some((o) => o.text === "82\n") === true && !nbDoc.findCell(na.ydoc, third)!.running, 40000)), "notebook : Bob exécute à son tour dans le même noyau, Alice voit « 82 »");
+    // An error, rendered as data.
+    const bad = nbDoc.insertCell(na.ydoc, { type: "code", source: "1/0", at: "end" });
+    runA.run(bad);
+    ok(await until(() => nbDoc.findCell(na.ydoc, bad)?.outputs.some((o) => o.output_type === "error" && o.ename === "ZeroDivisionError") === true && !nbDoc.findCell(na.ydoc, bad)!.running, 40000), "notebook : une exception arrive comme sortie d'erreur (ZeroDivisionError)");
+
+    // Save the .ipynb on the machine through the sealed file channel.
+    const nbText = nbDoc.exportIpynb(na.ydoc);
+    const nbSaved = await mf.saveMachineFile(client, "demo.ipynb", nbText, { baseSha: undefined, confirm: confirm(true), limit: nbDoc.MAX_NOTEBOOK_BYTES });
+    nbDoc.markSaved(na.ydoc, { path: nbSaved!.path, sha: nbSaved!.sha, by: "Alice" });
+    const onDisk = JSON.parse(readFileSync(join(cwd, "demo.ipynb"), "utf8"));
+    const diskCell = onDisk.cells.find((x: any) => x.source.join("") === "print(x + 1)");
+    ok(onDisk.nbformat === 4 && onDisk.cells.length === 4 && diskCell?.outputs?.[0]?.text?.join("") === "42\n" && diskCell.execution_count === 2, "notebook : demo.ipynb est un nbformat 4 valide sur le disque, avec la sortie « 42 »");
+    const reopened = await mf.openMachineFile(client, "demo.ipynb", nbDoc.MAX_NOTEBOOK_BYTES);
+    const reParsed = nbDoc.parseIpynb(reopened.text);
+    ok(reopened.sha === nbSaved!.sha && reParsed.cells.length === 4 && reParsed.warnings.length === 0, "notebook : le fichier de la machine se relit et s'analyse sans réserve");
+
+    // Blind server: neither code nor outputs in clear in the database.
+    await until(() => upRows(D, nbId) > 0);
+    await nap(300);
+    const nbDump = JSON.stringify(rw.prepare("SELECT * FROM board_docs").all()) + JSON.stringify(rw.prepare("SELECT * FROM board_doc_updates").all());
+    const nbRaw = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+    const clearTexts = ["print(x + 1)", "print(x * 2)", "ZeroDivisionError", "x = 41", "demo.ipynb", "output_type", "42\\n", "82\\n"];
+    ok(upRows(D, nbId) > 0 && clearTexts.every((t) => !nbDump.includes(t) && !nbRaw.includes(t)), "notebook : ni le code, ni les sorties (42, 82, erreur), ni le nom du fichier en clair dans la base");
+
+    // The kernel session is closed with the notebook; the document is deleted for good (doc.del).
+    sAl.send({ t: "term.close", id: kid });
+    ok((await until(() => upRows(D, nbId) > 0)) && docsRows(D).some((r) => r.doc_id === nbId), "notebook : le document est bien stocké avant suppression");
+    // A viewer (Carol) and a wrong epoch can't delete; an editor can.
+    // (Carol was removed from this board by the rotation test above: she comes back as a viewer.)
+    await as(alice, async () => lib.shareItem(ctxOf(alice, await tree(alice)), D, { id: carol.user.id, email: "carol@test.local", publicKey: carol.user.publicKey }, "viewer"));
+    // Re-sharing drops the board sockets: the two editors reconnect and resubscribe (the hosts do it on init).
+    hA3.reconnect();
+    hB3.reconnect();
+    const sCarol = boardSocket(carol, D);
+    await sCarol.open;
+    await sCarol.next((m) => m.t === "init");
+    sCarol.send({ t: "doc.del", doc: nbId, epoch: 0 });
+    const carolDel = await sCarol.next((m) => m.t === "doc.err" || m.t === "doc.gone" || m.t === "rekey", 4000).catch(() => null);
+    ok(carolDel?.t === "doc.err" && carolDel.error === "Lecture seule" && docsRows(D).some((r) => r.doc_id === nbId), "documents : un lecteur ne peut pas supprimer un document (« Lecture seule »)");
+    sCarol.ws.close();
+    const sDel = boardSocket(alice, D);
+    await sDel.open;
+    const delInit = await sDel.next((m) => m.t === "init");
+    sDel.send({ t: "doc.del", doc: nbId, epoch: delInit.epoch + 1 });
+    ok((await sDel.next((m) => m.t === "rekey" || m.t === "doc.gone", 4000).catch(() => ({ t: "?" }))).t === "rekey" && docsRows(D).some((r) => r.doc_id === nbId), "documents : un doc.del d'une autre génération de clés est refusé (rekey), rien n'est supprimé");
+    sDel.send({ t: "doc.del", doc: "not-a-doc-id", epoch: delInit.epoch });
+    ok((await sDel.next((m) => m.t === "doc.err", 4000).catch(() => ({ error: "?" }))).error === "identifiant de document invalide", "documents : doc.del valide l'identifiant");
+    const otherDocs = docsRows(D).filter((r) => r.doc_id !== nbId).length;
+    await nap(1200);
+    const wasGone = bobErrors.length;
+    sDel.send({ t: "doc.del", doc: nbId, epoch: delInit.epoch });
+    const goneBob = await until(() => bobErrors.length > wasGone && bobErrors.some((e) => /supprimé/.test(e)), 6000);
+    ok(goneBob && !docsRows(D).some((r) => r.doc_id === nbId) && upRows(D, nbId) === 0 && docsRows(D).filter((r) => r.doc_id !== nbId).length === otherDocs, "documents : doc.del supprime les lignes du document (et d'elles seules) et prévient les abonnés (doc.gone)");
+    sDel.send({ t: "doc.sub", doc: nbId });
+    const reSub = await sDel.next((m) => m.t === "doc.state", 4000);
+    ok(!reSub.snap && reSub.ups.length === 0, "documents : un document supprimé se réabonne vide");
+    sDel.ws.close();
+    runA.destroy();
+    runB.destroy();
+    na.destroy();
+    nbBob.destroy();
+    sAl.ws.close();
+    sBo.ws.close();
+    sf.ws.close();
+    ca.destroy();
+    cb.destroy();
+    hA3.close();
+    hB3.close();
+  }
+  ok(errors.length === 0, `documents : aucune erreur côté client${errors.length ? ` (${errors.join("; ")})` : ""}`);
 }
 
 // Unauthenticated hardening (after the MCP tests: the login rate limit below would lock Alice out).

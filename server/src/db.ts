@@ -230,6 +230,31 @@ CREATE TABLE IF NOT EXISTS machine_boards (
 CREATE INDEX IF NOT EXISTS machine_boards_board ON machine_boards(board_id);
 `);
 
+// Shared documents (Yjs): the server stores ciphertext of CRDT updates and snapshots, nothing else.
+// seq is monotonic per document (last_seq survives compaction); updates with seq <= snap_seq were
+// folded into the snapshot. bytes = ciphertext length of the snapshot plus the remaining updates.
+db.exec(`
+CREATE TABLE IF NOT EXISTS board_docs (
+  board_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  doc_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  snap TEXT,
+  snap_seq INTEGER NOT NULL DEFAULT 0,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (board_id, doc_id)
+);
+CREATE TABLE IF NOT EXISTS board_doc_updates (
+  board_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  d TEXT NOT NULL,
+  PRIMARY KEY (board_id, doc_id, seq),
+  FOREIGN KEY (board_id, doc_id) REFERENCES board_docs(board_id, doc_id) ON DELETE CASCADE
+);
+`);
+
 export function newId(bytes = 12): string {
   return randomBytes(bytes).toString("base64url");
 }

@@ -12,7 +12,7 @@ export function FormFrame({ bare, onClose, children }: { bare?: boolean; onClose
 
 export const HOST_RE = /^[A-Za-z0-9._:-]{1,253}$/;
 const USER_RE = /^[A-Za-z0-9._@-]{0,64}$/;
-const DEFAULT_PORT: Record<RemoteTarget["kind"], string> = { telnet: "23", ssh: "22", raw: "" };
+const DEFAULT_PORT: Record<RemoteTarget["kind"], string> = { telnet: "23", ssh: "22", raw: "", jupyter: "" };
 
 /** The machines of the user, with one picked (the given default, else the first one). */
 export function useMachineChoice(defaultId: string | null) {
@@ -60,6 +60,7 @@ function preview(t: RemoteTarget): string {
     return `ssh ${before ? `-J ${before} ` : ""}ssh://${hostPort(t.via.at(-1)!)}   # puis ${then}`;
   }
   if (t.kind === "telnet") return `telnet ${t.host} ${t.port}`;
+  if (t.kind === "jupyter") return `jupyter kernel${t.kernel ? ` --kernel=${t.kernel}` : ""}${t.cwd ? ` (dans ${t.cwd})` : ""}`;
   if (t.kind === "raw") return `nc ${t.host} ${t.port}`;
   const opts = [
     t.legacyKex && "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
@@ -116,7 +117,7 @@ export function RemoteForm({
   onCreate: (m: Machine, target: RemoteTarget) => void;
 }) {
   const choice = useMachineChoice(defaultMachineId);
-  const pre = defaultTarget && (["telnet", "ssh", "raw"] as const).includes(defaultTarget.kind) ? defaultTarget : undefined;
+  const pre = defaultTarget && (["telnet", "ssh", "raw"] as string[]).includes(defaultTarget.kind) ? defaultTarget : undefined;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const [kind, setKind] = useState<RemoteTarget["kind"]>(pre?.kind ?? "ssh");
   const [host, setHost] = useState(str(pre?.host) || defaultHost || "");

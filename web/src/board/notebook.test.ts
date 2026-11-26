@@ -1,0 +1,498 @@
+// Unit tests of the notebook rules (pure, no framework):
+//   node --experimental-strip-types web/src/board/notebook.test.ts     (or: npx tsx web/src/board/notebook.test.ts)
+import * as Y from "yjs";
+import {
+  MAX_CELLS,
+  MAX_OUTPUT_BYTES,
+  NotebookFormatError,
+  applyKernelEvents,
+  beginRun,
+  cellViews,
+  deleteCell,
+  exportIpynb,
+  fillNotebook,
+  findCell,
+  initBlankNotebook,
+  insertCell,
+  kernelCwd,
+  moveCell,
+  newWriteState,
+  parseIpynb,
+  readMeta,
+  removeDuplicates,
+  setCellType,
+  setKernelTerm,
+  splitLines,
+} from "./notebookDoc.ts";
+import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDoc, frameHeight, parseAnsi, stripAnsi, markdownFrame } from "./notebookRender.ts";
+import { NotebookRunner } from "./notebookRunner.ts";
+import { LineSplitter } from "./kernelProtocol.ts";
+import { MAX_NOTEBOOKS, nodeDataOf } from "./nodeData.ts";
+
+let failures = 0;
+const ok = (cond: unknown, msg: string) => {
+  console.log(`${cond ? "✔" : "✘"} ${msg}`);
+  if (!cond) failures++;
+};
+const el = (customData: unknown) => ({ customData }) as any;
+const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const noPause = () => Promise.resolve();
+const throwsFormat = (f: () => unknown) => {
+  try {
+    f();
+    return false;
+  } catch (e) {
+    return e instanceof NotebookFormatError;
+  }
+};
+
+/** Two documents that exchange their updates (immediately, or when `sync()` is called). */
+function pair() {
+  const a = new Y.Doc();
+  const b = new Y.Doc();
+  let live = true;
+  const pending: [Y.Doc, Uint8Array][] = [];
+  a.on("update", (u: Uint8Array, o: unknown) => o !== "net" && (live ? Y.applyUpdate(b, u, "net") : pending.push([b, u])));
+  b.on("update", (u: Uint8Array, o: unknown) => o !== "net" && (live ? Y.applyUpdate(a, u, "net") : pending.push([a, u])));
+  return {
+    a,
+    b,
+    offline: () => (live = false),
+    sync: () => {
+      live = true;
+      for (const [d, u] of pending.splice(0)) Y.applyUpdate(d, u, "net");
+    },
+  };
+}
+const ids = (d: Y.Doc) => cellViews(d).map((c) => c.id);
+const text = (d: Y.Doc, id: string) => findCell(d, id)!.source.toString();
+
+// A notebook as Jupyter writes it (nbformat 4.5): sources as string[], text outputs as string[], sorted keys, 1-space indent.
+const SAMPLE = {
+  cells: [
+    { cell_type: "markdown", id: "intro", metadata: {}, source: ["# Titre\n", "\n", "Du *texte*."] },
+    {
+      cell_type: "code",
+      execution_count: 2,
+      id: "calc",
+      metadata: { tags: ["demo"] },
+      outputs: [
+        { name: "stdout", output_type: "stream", text: ["42\n", "fin\n"] },
+        { data: { "text/plain": ["'é'"] }, execution_count: 2, metadata: {}, output_type: "execute_result" },
+        { data: { "application/json": { a: [1, 2] }, "image/png": "iVBORw0KGgo=", "text/html": ["<b>gras</b>"] }, metadata: {}, output_type: "display_data" },
+        { ename: "ValueError", evalue: "x", output_type: "error", traceback: ["\u001b[0;31mValueError\u001b[0m"] },
+      ],
+      source: ["x = 41\n", "print(x + 1)"],
+    },
+    { cell_type: "code", execution_count: null, id: "vide", metadata: {}, outputs: [], source: [] },
+    { cell_type: "raw", id: "brut", metadata: { format: "text/plain" }, source: ["texte brut"] },
+  ],
+  metadata: { kernelspec: { display_name: "Python 3", language: "python", name: "python3" }, language_info: { name: "python", version: "3.12" } },
+  nbformat: 4,
+  nbformat_minor: 5,
+};
+const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
+
+// 1. .ipynb import / export
+{
+  ok(JSON.stringify(splitLines("a\nb\n\nc")) === '["a\\n","b\\n","\\n","c"]' && splitLines("").length === 0 && JSON.stringify(splitLines("x\n")) === '["x\\n"]', "ipynb : coupe en lignes comme Jupyter (fins de ligne gardées, vide = [])");
+  const nb = parseIpynb(SAMPLE_TEXT);
+  ok(nb.cells.length === 4 && nb.cells[0].source === "# Titre\n\nDu *texte*." && nb.cells[3].source === "texte brut", "ipynb : source en string[] ou en string, jointe");
+  ok(parseIpynb('{"nbformat":4,"cells":[{"cell_type":"raw","metadata":{},"source":"a\\nb"}],"metadata":{}}').cells[0].source === "a\nb", "ipynb : source donnée en simple chaîne");
+  ok(nb.cells[1].source === "x = 41\nprint(x + 1)" && nb.cells[1].executionCount === 2 && nb.cells[2].executionCount === null && nb.cells[2].source === "", "ipynb : execution_count (nombre ou null), source vide");
+  ok(nb.cells[1].outputs[0].text === "42\nfin\n" && nb.cells[1].outputs[1].data["text/plain"] === "'é'", "ipynb : les sorties texte en tableau sont jointes");
+  ok(nb.cells[1].outputs[2].data["application/json"] === '{"a":[1,2]}' && nb.cells[1].outputs[2].data["image/png"] === "iVBORw0KGgo=", "ipynb : un JSON de sortie devient du texte, une image reste en base64");
+  ok(nb.cells[1].id === "calc" && nb.kernel === "python3" && nb.minor === 5, "ipynb : identifiants de cellule, noyau et version mineure conservés");
+
+  const d = new Y.Doc();
+  await fillNotebook(d, nb, { name: "demo.ipynb", path: "/tmp/demo.ipynb", sha: "a".repeat(64), pause: noPause });
+  ok(exportIpynb(d) === SAMPLE_TEXT, "ipynb : import puis export redonnent exactement le fichier (clés triées, indentation 1, retour final)");
+  const again = new Y.Doc();
+  await fillNotebook(again, parseIpynb(exportIpynb(d)), { name: "demo.ipynb", sha: "b".repeat(64), pause: noPause });
+  ok(exportIpynb(again) === SAMPLE_TEXT, "ipynb : l'aller-retour est stable");
+  ok(readMeta(d.getMap("meta")).path === "/tmp/demo.ipynb" && readMeta(d.getMap("meta")).savedSha === "a".repeat(64), "ipynb : le chemin et l'empreinte du fichier sont dans les métadonnées");
+
+  // Older minor versions without cell ids, attachments, unknown outputs and cell types.
+  const old = JSON.stringify({
+    cells: [
+      { cell_type: "code", execution_count: 1, metadata: {}, outputs: [{ output_type: "weird" }, { output_type: "stream", name: "stderr", text: "e" }], source: "1" },
+      { cell_type: "markdown", metadata: {}, source: "![x](attachment:a.png)", attachments: { "a.png": { "image/png": "AAAA" } } },
+      { cell_type: "alien", source: "?" },
+    ],
+    metadata: {},
+    nbformat: 4,
+    nbformat_minor: 2,
+  });
+  const o = parseIpynb(old);
+  ok(o.cells.length === 2 && o.cells[0].id.length === 36 && o.cells[0].id !== o.cells[1].id, "ipynb : sans identifiants (nbformat < 4.5), de nouveaux sont créés");
+  ok(o.warnings.some((w) => /pièces jointes/.test(w)) && o.warnings.some((w) => /inconnu/.test(w)) && o.cells[0].outputs.length === 1, "ipynb : pièces jointes, sorties et cellules inconnues ignorées avec avertissement");
+  const od = new Y.Doc();
+  await fillNotebook(od, o, { name: "vieux.ipynb", sha: "c".repeat(64), pause: noPause });
+  ok(JSON.parse(exportIpynb(od)).nbformat_minor === 5 && JSON.parse(exportIpynb(od)).cells.every((c: any) => typeof c.id === "string"), "ipynb : l'export est du nbformat 4.5 avec identifiants");
+
+  ok(throwsFormat(() => parseIpynb("pas du json")) && throwsFormat(() => parseIpynb("[]")) && throwsFormat(() => parseIpynb('{"nbformat":3,"cells":[]}')) && throwsFormat(() => parseIpynb('{"nbformat":4}')), "ipynb : refuse ce qui n'est pas un notebook nbformat 4");
+  ok(throwsFormat(() => parseIpynb(JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: Array.from({ length: MAX_CELLS + 1 }, () => ({ cell_type: "raw", metadata: {}, source: "" })) }))), "ipynb : trop de cellules refusé");
+
+  // A huge output is replaced by a note instead of blowing the size of an update.
+  const big = parseIpynb(JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [{ cell_type: "code", id: "g", execution_count: 1, metadata: {}, source: "", outputs: [{ output_type: "display_data", metadata: {}, data: { "image/png": "A".repeat(400_000), "text/plain": ["<Figure>"] } }] }] }));
+  const out = big.cells[0].outputs[0];
+  ok(JSON.stringify(out).length < MAX_OUTPUT_BYTES && !("image/png" in out.data) && /trop volumineuse/.test(out.data["text/plain"]) && out.data["text/plain"].startsWith("<Figure>"), "ipynb : une sortie énorme est remplacée par une note (le texte reste)");
+
+  // Big notebooks are filled in several updates.
+  const many = Array.from({ length: 40 }, (_, i) => ({ id: `c${i}`, type: "code" as const, source: "x".repeat(20_000), outputs: [], executionCount: null, metadata: {} }));
+  const big2 = new Y.Doc();
+  let updates = 0;
+  big2.on("update", () => updates++);
+  await fillNotebook(big2, { cells: many, metadata: {}, minor: 5, warnings: [] }, { name: "gros.ipynb", sha: "d".repeat(64), pause: noPause });
+  ok(cellViews(big2).length === 40 && updates >= 4, `ipynb : 800 Kio de code arrivent en ${updates} mises à jour, pas en une seule`);
+  const doc2 = new Y.Doc();
+  await fillNotebook(doc2, parseIpynb(SAMPLE_TEXT), { name: "a.ipynb", sha: "e".repeat(64), pause: noPause });
+  await fillNotebook(doc2, { cells: [{ id: "nouveau", type: "raw", source: "n", outputs: [], executionCount: null, metadata: {} }], metadata: {}, minor: 5, warnings: [] }, { name: "a.ipynb", sha: "f".repeat(64), replace: true, pause: noPause });
+  ok(ids(doc2).join() === "nouveau", "ipynb : « recharger » remplace toutes les cellules");
+  ok(kernelCwd("/home/x/nb/a.ipynb") === "/home/x/nb" && kernelCwd("/a.ipynb") === "/" && kernelCwd("rel/a.ipynb") === undefined && kernelCwd(undefined) === undefined, "noyau : le dossier de travail est celui du notebook (chemin absolu seulement)");
+}
+
+// 2. Cell operations under concurrent edits
+{
+  const { a, b, offline, sync } = pair();
+  initBlankNotebook(a);
+  const first = ids(a)[0];
+  ok(ids(b).join() === first && readMeta(b.getMap("meta")).name === "sans-titre.ipynb" && !initBlankNotebook(b), "cellules : un notebook neuf a une cellule vide, il ne s'initialise qu'une fois");
+
+  // Concurrent inserts above / below the same cell, plus typing inside it.
+  offline();
+  const up = insertCell(a, { type: "code", source: "A", at: { before: first } });
+  const down = insertCell(b, { type: "markdown", source: "B", at: { after: first } });
+  findCell(b, first)!.source.insert(0, "x = 1");
+  findCell(a, first)!.source.insert(0, "# ");
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).length === 3 && ids(a)[0] === up && ids(a)[2] === down, "cellules : insertions simultanées au-dessus et au-dessous, même ordre partout");
+  ok(text(a, first) === text(b, first) && /x = 1/.test(text(a, first)) && /# /.test(text(a, first)), "cellules : la frappe simultanée dans la cellule est fusionnée, pas écrasée");
+
+  // Delete while somebody types in another cell.
+  offline();
+  deleteCell(a, up);
+  findCell(b, down)!.source.insert(1, "!");
+  sync();
+  ok(ids(a).join() === ids(b).join() && !ids(a).includes(up) && text(a, down) === "B!", "cellules : suppression d'une cellule pendant la frappe dans une autre");
+
+  // Concurrent delete and edit of the SAME cell: the delete wins on both sides.
+  offline();
+  deleteCell(a, down);
+  findCell(b, down)!.source.insert(0, "perdu");
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).length === 1, "cellules : supprimer et modifier la même cellule converge");
+
+  // Move, and the duplicate left by two simultaneous moves.
+  const c2 = insertCell(a, { type: "code", source: "2", at: "end" });
+  const c3 = insertCell(a, { type: "code", source: "3", at: "end" });
+  ok(moveCell(a, c3, -1) && ids(b).join() === [first, c3, c2].join() && text(b, c3) === "3", "cellules : monter une cellule (copie fidèle, même identifiant)");
+  ok(!moveCell(a, first, -1) && !moveCell(a, c2, 1), "cellules : on ne sort pas des bornes");
+  offline();
+  moveCell(a, c2, -1);
+  moveCell(b, c2, -1);
+  sync();
+  ok(ids(a).length === 3 && cellViews(a).length === 3, "cellules : deux déplacements simultanés laissent un doublon que la lecture ignore");
+  const removedA = removeDuplicates(a);
+  const removedB = removeDuplicates(b);
+  ok(removedA === 1 && (removedB === 0 || removedB === 1) && a.getArray("cells").length === 3 && b.getArray("cells").length === 3, "cellules : le nettoyage des doublons converge (idempotent entre clients)");
+
+  // Type change drops outputs.
+  const cc = ids(a)[0];
+  beginRun(a, cc, "r1");
+  applyKernelEvents(a, cc, "r1", [{ ev: "stream", id: "r1", name: "stdout", text: "o" }, { ev: "done", id: "r1", count: 3, status: "ok" }], newWriteState());
+  ok(findCell(b, cc)!.outputs.length === 1 && findCell(b, cc)!.executionCount === 3, "cellules : les sorties arrivent chez l'autre participant");
+  ok(setCellType(a, cc, "markdown") && findCell(b, cc)!.type === "markdown" && findCell(b, cc)!.outputs.length === 0 && findCell(b, cc)!.executionCount === null, "cellules : passer en Markdown efface sorties et compteur");
+  // Limits.
+  const full = new Y.Doc();
+  for (let i = 0; i < MAX_CELLS; i++) insertCell(full, { type: "raw", at: "end" });
+  let refused = false;
+  try {
+    insertCell(full, { type: "raw", at: "end" });
+  } catch {
+    refused = true;
+  }
+  ok(refused, `cellules : ${MAX_CELLS} au maximum`);
+  // Garbage written by an editor is ignored, not fatal.
+  const g = new Y.Doc();
+  g.getArray("cells").push([new Y.Map() as any, "pas une cellule" as any, 42 as any]);
+  ok(cellViews(g).length === 0, "cellules : une entrée mal formée est ignorée");
+  setKernelTerm(a, "A".repeat(22));
+  ok(readMeta(b.getMap("meta")).kernelTerm === "A".repeat(22), "noyau : l'identifiant de session est partagé par les métadonnées");
+  b.getMap("meta").set("kernelTerm", "../../etc");
+  ok(readMeta(b.getMap("meta")).kernelTerm === undefined, "noyau : un identifiant de session invalide est ignoré");
+}
+
+// 3. Kernel events into a cell (merging, clearing, display updates, limits)
+{
+  const d = new Y.Doc();
+  initBlankNotebook(d);
+  const id = ids(d)[0];
+  const st = newWriteState();
+  ok(beginRun(d, id, "run1").ok && !beginRun(d, id, "run2").ok && findCell(d, id)!.running === "run1", "exécution : une cellule déjà en cours n'est pas relancée");
+  findCell(d, id)!.map.get("outputs").push([{ output_type: "stream", name: "stdout", text: "ancien" }]);
+  ok(applyKernelEvents(d, id, "autre", [{ ev: "stream", id: "autre", name: "stdout", text: "x" }], st) === false && findCell(d, id)!.outputs.length === 1, "exécution : les événements d'un autre identifiant sont ignorés");
+  beginRun(d, id, "run1"); // refused: still running, outputs kept
+  const clear = new Y.Doc();
+  initBlankNotebook(clear);
+  const cid = ids(clear)[0];
+  beginRun(clear, cid, "r");
+  ok(findCell(clear, cid)!.outputs.length === 0, "exécution : lancer efface les sorties dans la même transaction que `running`");
+  const s2 = newWriteState();
+  applyKernelEvents(clear, cid, "r", [
+    { ev: "stream", id: "r", name: "stdout", text: "a" },
+    { ev: "stream", id: "r", name: "stdout", text: "b\n" },
+    { ev: "stream", id: "r", name: "stderr", text: "e" },
+    { ev: "stream", id: "r", name: "stdout", text: "c" },
+  ], s2);
+  const outs = findCell(clear, cid)!.outputs;
+  ok(outs.length === 3 && outs[0].text === "ab\n" && outs[1].name === "stderr" && outs[2].text === "c", "exécution : les flux consécutifs du même nom sont fusionnés comme dans Jupyter");
+  applyKernelEvents(clear, cid, "r", [{ ev: "display", id: "r", data: { "text/plain": "<A>" }, metadata: {}, display_id: "d1" }], s2);
+  applyKernelEvents(clear, cid, "r", [{ ev: "update", id: "r", display_id: "d1", data: { "text/plain": "<B>" }, metadata: {} }], s2);
+  ok(findCell(clear, cid)!.outputs.length === 4 && findCell(clear, cid)!.outputs[3].data["text/plain"] === "<B>", "exécution : update_display_data remplace la sortie du même display_id");
+  applyKernelEvents(clear, cid, "r", [{ ev: "clear", id: "r", wait: true }], s2);
+  ok(findCell(clear, cid)!.outputs.length === 4, "exécution : clear_output(wait=True) attend la sortie suivante");
+  applyKernelEvents(clear, cid, "r", [{ ev: "stream", id: "r", name: "stdout", text: "neuf" }], s2);
+  ok(findCell(clear, cid)!.outputs.length === 1 && findCell(clear, cid)!.outputs[0].text === "neuf", "exécution : …puis efface tout avant d'écrire");
+  applyKernelEvents(clear, cid, "r", [{ ev: "error", id: "r", ename: "ValueError", evalue: "x", traceback: ["tb"] }, { ev: "result", id: "r", count: 7, data: { "text/plain": "7" } }], s2);
+  ok(findCell(clear, cid)!.outputs.at(-1)!.output_type === "execute_result" && findCell(clear, cid)!.outputs.at(-2)!.output_type === "error", "exécution : erreur et résultat");
+  const fin = applyKernelEvents(clear, cid, "r", [{ ev: "done", id: "r", count: 7, status: "ok" }], s2);
+  ok(fin && findCell(clear, cid)!.running === undefined && findCell(clear, cid)!.executionCount === 7, "exécution : `done` enregistre le compteur et termine l'exécution");
+  ok(!applyKernelEvents(clear, cid, "r", [{ ev: "stream", id: "r", name: "stdout", text: "tard" }], s2) && findCell(clear, cid)!.outputs.length === 3, "exécution : après `done`, plus rien n'est écrit");
+
+  // Big streams are cut in small items and capped.
+  const bigDoc = new Y.Doc();
+  initBlankNotebook(bigDoc);
+  const bid = ids(bigDoc)[0];
+  beginRun(bigDoc, bid, "big");
+  const sb = newWriteState();
+  const sizes: number[] = [];
+  bigDoc.on("update", (u: Uint8Array) => sizes.push(u.length));
+  for (let i = 0; i < 40; i++) applyKernelEvents(bigDoc, bid, "big", [{ ev: "stream", id: "big", name: "stdout", text: "é".repeat(50_000) }], sb);
+  const bo = findCell(bigDoc, bid)!.outputs;
+  const total = bo.reduce((n, o) => n + (o.text?.length ?? 0), 0);
+  ok(bo.every((o) => o.text.length <= 33_000) && total <= 1024 * 1024 + 100 && /tronquée/.test(bo.at(-1)!.text), "exécution : un flux énorme est découpé, plafonné à 1 Mio, avec la mention « tronquée »");
+  ok(Math.max(...sizes) < 380 * 1024, "exécution : chaque mise à jour du document reste sous 380 Kio");
+  const emoji = new Y.Doc();
+  initBlankNotebook(emoji);
+  const eid = ids(emoji)[0];
+  beginRun(emoji, eid, "e");
+  applyKernelEvents(emoji, eid, "e", [{ ev: "stream", id: "e", name: "stdout", text: "😀".repeat(40_000) }], newWriteState());
+  ok(findCell(emoji, eid)!.outputs.every((o) => !/[\ud800-\udbff]$/.test(o.text) && !/^[\udc00-\udfff]/.test(o.text)), "exécution : on ne coupe jamais une paire de substitution");
+  const huge = new Y.Doc();
+  initBlankNotebook(huge);
+  const hid = ids(huge)[0];
+  beginRun(huge, hid, "h");
+  applyKernelEvents(huge, hid, "h", [{ ev: "display", id: "h", data: { "image/png": "A".repeat(500_000), "text/plain": "<Fig>" }, metadata: {} }], newWriteState());
+  ok(!("image/png" in findCell(huge, hid)!.outputs[0].data) && /Fig/.test(findCell(huge, hid)!.outputs[0].data["text/plain"]), "exécution : une image trop grosse n'est pas partagée (note à la place)");
+}
+
+// 4. Rendering: classification, ANSI, sandbox
+{
+  ok(stripAnsi("\u001b[0;31mValueError\u001b[0m: \u001b[1;32mok\u001b[0m\u001b]0;titre\u0007 \u001b[2J\u001b[H fin") === "ValueError: ok  fin", "ANSI : codes de couleur, OSC et déplacements retirés");
+  const sp = parseAnsi("a\u001b[31mrouge\u001b[1;4;32mvert gras\u001b[0m b\u001b[38;5;196mx\u001b[38;2;1;2;3my\u001b[0m");
+  ok(sp.map((s) => s.text).join("") === "arougevert gras bxy" && sp[1].fg === "#cd3131" && sp[2].bold === true && sp[2].underline === true && sp[2].fg === "#0dbc79" && sp[3].fg === undefined && !sp[3].bold, "ANSI : couleurs de base, gras, soulignement, réinitialisation");
+  ok(sp[4].fg === "rgb(255,0,0)" && sp[5].fg === "rgb(1,2,3)", "ANSI : 256 couleurs et couleurs vraies sont produites par une table, jamais recopiées de la sortie");
+  ok(parseAnsi("\u001b[38;5;999mx").every((s) => s.fg === undefined) && parseAnsi("x\u001b[31;mz")[1]?.fg === undefined, "ANSI : valeurs hors bornes ignorées");
+  ok(collapseCarriage("abc\rd\n10%\r50%\r100%\nx\r\ny") === "dbc\n100%\nx\ny", "ANSI : retours chariot (barres de progression)");
+
+  // Everything that can run goes to a sandboxed frame; nothing is ever an HTML string for the app.
+  const html = classifyBundle({ "text/html": "<script>alert(1)</script><b>x</b>", "text/plain": "x" });
+  ok(html?.kind === "frame" && /<script>alert\(1\)<\/script>/.test(html.srcdoc) && /Content-Security-Policy" content="default-src 'none'/.test(html.srcdoc), "rendu : text/html va dans un cadre isolé avec une CSP sans script");
+  const svg = classifyBundle({ "image/svg+xml": '<svg onload="alert(1)"/>', "image/png": "AAAA" });
+  ok(svg?.kind === "frame", "rendu : le SVG va dans un cadre isolé (pas dans <img>, pas dans la page)");
+  const js = classifyBundle({ "application/javascript": "alert('<b>')" });
+  ok(js?.kind === "frame" && !/alert\('<b>'\)/.test(js.srcdoc) && /alert\(&#39;&lt;b&gt;&#39;\)/.test(js.srcdoc), "rendu : le JavaScript n'est jamais exécuté, seulement affiché (échappé) dans un cadre");
+  const md = classifyBundle({ "text/markdown": "# <img src=x onerror=1>" }, { markdown: (m) => `<h1>${m}</h1>` });
+  ok(md?.kind === "frame" && /<h1># /.test(md.srcdoc), "rendu : le Markdown passe par le convertisseur puis le cadre isolé");
+  ok(classifyBundle({ "text/markdown": "<b>" })?.kind === "frame" && /&lt;b&gt;/.test((classifyBundle({ "text/markdown": "<b>" }) as any).srcdoc), "rendu : sans convertisseur, le Markdown est affiché en texte échappé");
+  const png = classifyBundle({ "image/png": "iVBORw0KGgo=\n", "text/plain": "<Figure>" });
+  ok(png?.kind === "image" && png.src === "data:image/png;base64,iVBORw0KGgo=", "rendu : une image PNG valide devient un data: URL");
+  ok(classifyBundle({ "image/png": 'AAAA" onerror="alert(1)' })?.kind === "note" && classifyBundle({ "image/jpeg": "AA AA\nAA==" })?.kind === "image", "rendu : base64 invalide refusé, espaces tolérés");
+  ok(cleanBase64("AAAA") === "AAAA" && cleanBase64("") === null && cleanBase64("A\"B") === null && cleanBase64("A=B") === null && cleanBase64("<svg>") === null, "rendu : alphabet base64 strict");
+  ok(classifyBundle({ "text/plain": "<b>x</b>" })?.kind === "text" && (classifyBundle({ "text/plain": "<b>x</b>" }) as any).text === "<b>x</b>", "rendu : le texte reste du texte (le DOM en fera un nœud texte)");
+  ok(classifyBundle({ "application/vnd.jupyter.widget-view+json": "{}" })?.kind === "note" && classifyBundle({})?.kind === undefined, "rendu : widgets non pris en charge, bundle vide = rien");
+  {
+    const f = frameDoc('<p>a</p><META http-equiv="refresh" content="0;url=https://exemple.invalid/"><meta http-equiv=refresh content=0>', false);
+    ok(!/refresh/i.test(f) && !/exemple\.invalid/.test(f) && /<base target="_blank">/.test(f), "rendu : aucune balise meta du notebook (pas de redirection automatique), liens sans navigation");
+  }
+  ok(/sandbox/.test("") === false && !/<script/.test(frameDoc("x", true).replace("</head>", "")) , "rendu : le gabarit du cadre ne contient aucun script");
+
+  const items = classifyOutputs([
+    { output_type: "stream", name: "stdout", text: "a" },
+    { output_type: "stream", name: "stdout", text: "b\r\nc\rd" },
+    { output_type: "stream", name: "stderr", text: "\u001b[31merr" },
+    { output_type: "error", ename: "\u001b[31mE", evalue: "v\u001b[0m", traceback: ["\u001b[0;31mline1\u001b[0m", "line2"] },
+    { output_type: "display_data", data: { "text/html": "<i>h</i>" }, metadata: {} },
+  ]);
+  ok(items.length === 4 && items[0].kind === "text" && (items[0] as any).text === "ab\nd" && items[1].kind === "text" && (items[1] as any).stream === "stderr", "rendu : flux fusionnés, retours chariot appliqués");
+  ok(items[2].kind === "error" && (items[2] as any).traceback === "line1\nline2" && (items[2] as any).ename === "E" && items[3].kind === "frame", "rendu : l'erreur est sans ANSI, le HTML dans un cadre");
+  const table = "<table>" + "<tr><td>a</td></tr>".repeat(200) + "</table>";
+  ok(frameHeight("html", "<b>x</b>") < 100 && frameHeight("html", table) === 420 && frameHeight("svg", "<svg height='20' width='5'/>") === 56 && frameHeight("svg", "<svg/>") === 240 && frameHeight("text", "a") >= 56 && frameHeight("text", "x\n".repeat(500)) === 460, "rendu : hauteur des cadres estimée d'après le contenu, bornée");
+  const capped = classifyOutputs([{ output_type: "stream", name: "stdout", text: "x".repeat(5000) }, { output_type: "stream", name: "stderr", text: "y".repeat(5000) }], { maxText: 1000 });
+  ok(capped.length === 2 && (capped[0] as any).text.length === 1000 && (capped[1] as any).text === "[sortie tronquée]", "rendu : le texte affiché est plafonné, avec la mention « sortie tronquée »");
+  ok(/<pre style="white-space:pre-wrap">&lt;b&gt;/.test(markdownFrame("<b>", undefined, false)) && /<h1>/.test(markdownFrame("# t", (m) => `<h1>${m}</h1>`, true)), "rendu : cellule Markdown sans convertisseur = texte échappé");
+}
+
+// 5. nodeDataOf: `notebooks`
+{
+  const docId = "A".repeat(22);
+  const base = { node: true, shells: [{ terminalId: "t" }] };
+  ok(nodeDataOf(el({ ...base, notebooks: [{ docId, x: 1, y: 2, w: 800, h: 600 }] }))?.notebooks?.[0]?.w === 800, "nodeData : notebooks conservés avec leur géométrie");
+  ok(nodeDataOf(el({ ...base, notebooks: [{ docId: "court" }, { docId: "../../etc/passwd" }, { docId: 12 }, null, "x", { docId: `${"B".repeat(21)}!` }] }))?.notebooks?.length === 0, "nodeData : identifiants de notebook invalides écartés");
+  ok(nodeDataOf(el({ ...base, notebooks: [{ docId }, { docId }] }))?.notebooks?.length === 1, "nodeData : pas de doublon");
+  const lots = Array.from({ length: 50 }, (_, i) => ({ docId: String(i).padStart(22, "N") }));
+  ok(nodeDataOf(el({ ...base, notebooks: lots }))?.notebooks?.length === MAX_NOTEBOOKS && MAX_NOTEBOOKS === 32, "nodeData : 32 notebooks au maximum");
+  ok(nodeDataOf(el({ ...base, notebooks: "oups" }))?.notebooks?.length === 0 && nodeDataOf(el(base))?.notebooks?.length === 0, "nodeData : notebooks absent ou invalide = liste vide");
+  ok(nodeDataOf(el({ ...base, codes: [{ docId }], notebooks: [{ docId: "C".repeat(22) }] }))?.codes?.length === 1, "nodeData : codes et notebooks sont indépendants");
+}
+
+// 6. Runner: one executor, everybody sees the outputs; an orphaned run is finalized
+{
+  /** A fake kernel session: what the executors send is answered line by line, everybody gets the output stream. */
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  const listeners = new Set<L>();
+  const history: Uint8Array[] = [];
+  const sent: string[] = [];
+  const emit = (ev: object) => {
+    const b = enc.encode(JSON.stringify(ev) + "\n");
+    history.push(b);
+    for (const l of listeners) l.onData(b);
+  };
+  let reqBuf = "";
+  const port = {
+    subscribe(_t: string, l: L) {
+      listeners.add(l);
+      l.onReplay(enc.encode(history.map((h) => dec.decode(h)).join("")));
+      return () => listeners.delete(l);
+    },
+    input(_t: string, data: Uint8Array) {
+      reqBuf += dec.decode(data, { stream: true });
+      for (const line of reqBuf.split("\n").slice(0, -1)) sent.push(line);
+      reqBuf = reqBuf.split("\n").at(-1)!;
+    },
+  };
+  const { a, b, offline, sync } = pair();
+  initBlankNotebook(a);
+  const cell = ids(a)[0];
+  findCell(a, cell)!.source.insert(0, "print(41 + 1)");
+  const awA = { states: new Map<number, any>(), getStates() { return this.states; }, setLocalStateField(k: string, v: unknown) { this.states.set(1, { ...(this.states.get(1) ?? {}), [k]: v }); } };
+  const awB = { states: new Map<number, any>(), getStates() { return new Map([...awA.states, ...this.states]); }, setLocalStateField(k: string, v: unknown) { this.states.set(2, { ...(this.states.get(2) ?? {}), [k]: v }); } };
+  const ra = new NotebookRunner(a, port, { awareness: awA, canEdit: true });
+  const rb = new NotebookRunner(b, port, { awareness: awB, canEdit: true });
+  const TERM = "T".repeat(22);
+  emit({ ev: "ready", kernel: "python3", language: "python", version: "3" });
+  emit({ ev: "status", state: "idle" });
+  ra.attach(TERM);
+  rb.attach(TERM);
+  ok(ra.status === "idle" && rb.status === "idle", "noyau : l'état vient du flux rejoué");
+  const r = ra.run(cell);
+  ok(r.ok && sent.length === 1 && JSON.parse(sent[0]).op === "exec" && JSON.parse(sent[0]).code === "print(41 + 1)" && JSON.parse(sent[0]).id === (r.ok ? r.execId : ""), "noyau : l'exécuteur envoie une seule ligne exec");
+  ok(findCell(b, cell)!.running === (r.ok ? r.execId : "") && JSON.stringify(awA.states.get(1).execs) === JSON.stringify([r.ok ? r.execId : ""]), "noyau : `running` est visible chez l'autre, l'identifiant est annoncé dans la présence");
+  const exec = r.ok ? r.execId : "";
+  ok(!rb.run(cell).ok, "noyau : l'autre ne peut pas relancer une cellule en cours");
+  emit({ ev: "status", state: "busy" });
+  emit({ ev: "stream", id: exec, name: "stdout", text: "42\n" });
+  emit({ ev: "result", id: exec, count: 1, data: { "text/plain": "42" } });
+  emit({ ev: "done", id: exec, count: 1, status: "ok" });
+  emit({ ev: "status", state: "idle" });
+  await nap(250);
+  const seenB = findCell(b, cell)!;
+  ok(seenB.outputs[0]?.text === "42\n" && seenB.outputs[1]?.output_type === "execute_result" && seenB.executionCount === 1 && !seenB.running, "noyau : les sorties, le compteur et la fin d'exécution arrivent chez l'autre participant");
+  ok(ra.localRuns.length === 0 && JSON.stringify(awA.states.get(1).execs) === "[]" && rb.localRuns.length === 0, "noyau : seul l'exécuteur écrivait, la présence est vidée à la fin");
+  ok(!JSON.stringify(a.getArray("cells").toJSON()).includes('"stream","name":"stdout","text":"42\\n"42') , "noyau : les sorties ne sont pas écrites deux fois");
+  ok(findCell(a, cell)!.outputs.length === 2, "noyau : exactement deux sorties (pas de doublon des autres clients)");
+
+  // Late joiner: the replay carries the old events, whose ids are nobody's: nothing is rewritten.
+  const rc = new NotebookRunner(new Y.Doc(), port, { canEdit: true });
+  rc.attach(TERM);
+  ok(rc.status === "idle", "noyau : un nouveau venu rejoue le flux sans rien réécrire");
+  rc.destroy();
+
+  // The executor disappears mid-run; the kernel finishes, someone else finalizes the run.
+  const r2 = ra.run(cell);
+  const exec2 = r2.ok ? r2.execId : "";
+  ra.destroy();
+  awA.states.clear();
+  emit({ ev: "status", state: "busy" });
+  emit({ ev: "stream", id: exec2, name: "stdout", text: "perdu\n" });
+  emit({ ev: "done", id: exec2, count: 2, status: "ok" });
+  emit({ ev: "status", state: "idle" });
+  await nap(120);
+  ok(findCell(b, cell)!.running === exec2, "noyau : un exécuteur disparu laisse la cellule en cours…");
+  rb.sweep(Date.now() + 1000);
+  ok(findCell(b, cell)!.running === exec2, "noyau : …on attend 5 s avant de conclure");
+  rb.sweep(Date.now() + 6000);
+  ok(!findCell(b, cell)!.running && findCell(b, cell)!.executionCount === 2, "noyau : après 5 s, un autre éditeur termine l'exécution (compteur du `done`)");
+  sync();
+  ok(findCell(a, cell)!.running === undefined, "noyau : tout le monde voit la fin");
+
+  // A presence that still announces the run keeps it alive.
+  offline();
+  sync();
+  const rd = new NotebookRunner(b, port, { awareness: awB, canEdit: true });
+  rd.attach(TERM);
+  b.transact(() => findCell(b, cell)!.map.set("running", "fantome:abc"));
+  awA.states.set(1, { execs: ["fantome:abc"] });
+  rd.sweep(Date.now());
+  rd.sweep(Date.now() + 9000);
+  ok(findCell(b, cell)!.running === "fantome:abc", "noyau : un exécuteur encore présent n'est pas écarté");
+  awA.states.clear();
+  emit({ ev: "status", state: "busy" });
+  rd.attach(null);
+  rd.attach(TERM);
+  rd.sweep(Date.now() + 20000);
+  ok(findCell(b, cell)!.running === "fantome:abc", "noyau : sans `done` et noyau occupé, on n'abandonne pas une exécution peut-être en file");
+  emit({ ev: "status", state: "idle" });
+  rd.sweep(Date.now() + 40000);
+  ok(!findCell(b, cell)!.running, "noyau : sans `done` et noyau au repos, l'exécution perdue est libérée");
+  rd.destroy();
+
+  // The kernel goes away while a run is in flight: the executor ends it with an error.
+  const re = new NotebookRunner(a, port, { awareness: awA, canEdit: true });
+  re.attach(TERM);
+  emit({ ev: "status", state: "idle" });
+  const r3 = re.run(cell);
+  ok(r3.ok, "noyau : relancer après la fin");
+  re.terminalGone();
+  ok(!findCell(a, cell)!.running && findCell(a, cell)!.outputs.at(-1)!.output_type === "error" && !re.run(cell).ok, "noyau : la session s'arrête → l'exécution se termine par une erreur, plus de lancement possible");
+  re.destroy();
+
+  // Read-only participants never write nor send.
+  const ro = new NotebookRunner(b, port, { canEdit: false });
+  ro.attach(TERM);
+  const before = sent.length;
+  ok(!ro.run(cell).ok && !ro.interrupt() && !ro.restart() && sent.length === before, "noyau : un lecteur ne peut ni lancer, ni interrompre, ni redémarrer");
+  ro.destroy();
+  rb.destroy();
+
+  // Splitting long code into several frames keeps one line.
+  const d3 = new Y.Doc();
+  initBlankNotebook(d3);
+  const big = ids(d3)[0];
+  findCell(d3, big)!.source.insert(0, "# é\n" + "x = 'é😀'\n".repeat(30_000));
+  const frames: Uint8Array[] = [];
+  const p3 = { subscribe: (_t: string, _l: L) => () => {}, input: (_t: string, d: Uint8Array) => void frames.push(d.slice()) };
+  const rf = new NotebookRunner(d3, p3, { canEdit: true });
+  rf.attach(TERM);
+  ok(rf.run(big).ok && frames.length > 4 && frames.every((f) => f.length <= 48 * 1024), "noyau : un long code part en plusieurs trames (48 Kio au plus)");
+  const joined = new LineSplitter().push(new Uint8Array(frames.flatMap((f) => [...f])));
+  ok(joined.length === 1 && JSON.parse(joined[0]).code === findCell(d3, big)!.source.toString(), "noyau : …qui se recollent en une seule ligne JSON identique (UTF-8 intact)");
+  rf.destroy();
+  const d4 = new Y.Doc();
+  initBlankNotebook(d4);
+  findCell(d4, ids(d4)[0])!.source.insert(0, "x".repeat(1024 * 1024 + 1));
+  const rg = new NotebookRunner(d4, p3, { canEdit: true });
+  rg.attach(TERM);
+  const tooLong = rg.run(ids(d4)[0]);
+  ok(!tooLong.ok && /trop long/.test((tooLong as any).reason) && !findCell(d4, ids(d4)[0])!.running, "noyau : un code de plus de 1 Mio est refusé avant de marquer la cellule en cours");
+  rg.destroy();
+}
+
+if (failures) {
+  console.error(`\n${failures} échec(s)`);
+  process.exit(1);
+}
+console.log("\nTout est bon");

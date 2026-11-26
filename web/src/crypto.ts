@@ -230,6 +230,10 @@ export const AAD = {
   file: (boardId: string, fileId: string) => `eb:file:${boardId}:${fileId}`,
   preview: (boardId: string) => `eb:preview:${boardId}`,
   pointer: (boardId: string) => `eb:ptr:${boardId}`,
+  /** Shared document (Yjs) updates and snapshots; the epoch binds them to the current key generation. */
+  doc: (boardId: string, docId: string, epoch: number) => `eb:doc:${boardId}:${docId}:${epoch}`,
+  /** Awareness (cursors, names, selections) of a shared document: relayed by the server, never stored. */
+  docAwareness: (boardId: string, docId: string, epoch: number) => `eb:doc-aw:${boardId}:${docId}:${epoch}`,
   /** Board key wrapped under a public link key (epoch binds it to the current key generation). */
   link: (boardId: string, epoch: number) => `eb:link:${boardId}:${epoch}`,
   linkLabel: (boardId: string, publicId: string) => `eb:link-label:${boardId}:${publicId}`,

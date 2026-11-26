@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportCoords, useHandleLibrary, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, Globe, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, FileCode2, FilePlus2, FolderOpen, Globe, NotebookPen, NotebookText, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -19,6 +19,20 @@ import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
 import { Avatar, Menu, Modal, confirmDialog, toast, useTheme, type MenuAnchor } from "../components/ui.tsx";
 import { NodeTile } from "../board/NodeTile.tsx";
 import { WebEmbed } from "../board/WebEmbed.tsx";
+import { FilesPanel } from "../board/FilesPanel.tsx";
+import { newDocId } from "../board/sharedDoc.ts";
+import { queueInit, splitPath } from "../board/codeDoc.ts";
+import { MAX_NOTEBOOK_BYTES, NotebookFormatError, parseIpynb, queueNotebookInit } from "../board/notebookDoc.ts";
+import { discardDocs } from "../board/docGc.ts";
+import type { NotebookHost } from "../board/NotebookEmbed.tsx";
+import { localShellIds, openMachineFile, pickLocalShell } from "../board/machineFiles.ts";
+import { MAX_CODES, MAX_NOTEBOOKS } from "../board/nodeData.ts";
+// Monaco weighs several MB: the code window is only fetched when a board shows one. That chunk
+// must not import the app's UI kit (components/ui.tsx): a second lazy importer of it makes the
+// bundler fold Excalidraw into the entry chunk. It gets what it needs through its `host` prop.
+const CodeEmbed = lazy(() => import("../board/CodeEmbed.tsx"));
+// Same for notebooks (Monaco again, plus the Markdown converter): same rule, same `host` prop.
+const NotebookEmbed = lazy(() => import("../board/NotebookEmbed.tsx"));
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { FileClient } from "../board/fileTransfer.ts";
@@ -52,6 +66,16 @@ import {
   hideShell,
   nodeDataOf,
   openWeb,
+  openCodeWindowOf,
+  addCode,
+  openCode,
+  removeCode,
+  toggleCode,
+  openNotebookWindowOf,
+  addNotebook,
+  openNotebook,
+  removeNotebook,
+  toggleNotebook,
   openShell,
   openWebWindowOf,
   openWindowOf,
@@ -144,6 +168,8 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
+    codes: { id: string; open: boolean }[];
+    notebooks: { id: string; open: boolean }[];
     /** A Telnet / SSH device: no agent on it, no site through it. */
     remote: boolean;
     /** An SSH device: other devices can be reached by bouncing through it. */
@@ -322,6 +348,72 @@ function Editor({ node }: { node: Node }) {
     else if (rem.target.kind === "ssh") setAccess({ nodeId, kind: "remote", bounce: rem });
   };
 
+  /** The node whose "open a file of the machine" picker is showing. */
+  const [codePicker, setCodePicker] = useState<string | null>(null);
+
+  /** A blank shared code file on a node (the window fills the document once it is synced). */
+  const newCodeFile = (nodeId: string) => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!x || !data) return;
+    if ((data.codes ?? []).length >= MAX_CODES) return toast(`Cette machine a déjà ${MAX_CODES} fichiers de code : retirez-en un`);
+    const docId = newDocId();
+    queueInit(docId, "blank");
+    addCode(x, nodeId, docId);
+  };
+
+  /** A file read from the node's machine, opened as a new shared code window. */
+  const openMachineCode = async (nodeId: string, path: string) => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!x || !data) return;
+    if ((data.codes ?? []).length >= MAX_CODES) return toast(`Cette machine a déjà ${MAX_CODES} fichiers de code : retirez-en un`);
+    const shell = pickLocalShell(session, data);
+    if (!shell) return toast("Aucun shell local en cours sur cette machine");
+    try {
+      const f = await openMachineFile(shell.client, path);
+      const docId = newDocId();
+      queueInit(docId, { path, name: splitPath(path).name, text: f.text, sha: f.sha });
+      addCode(x, nodeId, docId);
+    } catch (e: any) {
+      toast(e?.message ?? "Impossible d'ouvrir ce fichier");
+    }
+  };
+
+  /** The node whose "open a notebook of the machine" picker is showing. */
+  const [notebookPicker, setNotebookPicker] = useState<string | null>(null);
+
+  /** A blank shared notebook on a node (the window fills the document once it is synced). */
+  const newNotebook = (nodeId: string) => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!x || !data) return;
+    if ((data.notebooks ?? []).length >= MAX_NOTEBOOKS) return toast(`Cette machine a déjà ${MAX_NOTEBOOKS} notebooks : retirez-en un`);
+    const docId = newDocId();
+    queueNotebookInit(docId, "blank");
+    addNotebook(x, nodeId, docId);
+  };
+
+  /** An .ipynb read from the node's machine, opened as a new shared notebook window. */
+  const openMachineNotebook = async (nodeId: string, path: string) => {
+    const x = excalidrawRef.current;
+    const data = x && nodeDataOf(findEl(x, nodeId));
+    if (!x || !data) return;
+    if ((data.notebooks ?? []).length >= MAX_NOTEBOOKS) return toast(`Cette machine a déjà ${MAX_NOTEBOOKS} notebooks : retirez-en un`);
+    if (!/\.ipynb$/i.test(path)) return toast("Ce fichier n'est pas un notebook (.ipynb)");
+    const shell = pickLocalShell(session, data);
+    if (!shell) return toast("Aucun shell local en cours sur cette machine");
+    try {
+      const f = await openMachineFile(shell.client, path, MAX_NOTEBOOK_BYTES);
+      parseIpynb(f.text); // refuse it here, before a window is created
+      const docId = newDocId();
+      queueNotebookInit(docId, { path, name: splitPath(path).name, text: f.text, sha: f.sha });
+      addNotebook(x, nodeId, docId);
+    } catch (e: any) {
+      toast(e instanceof NotebookFormatError ? e.message : (e?.message ?? "Impossible d'ouvrir ce notebook"));
+    }
+  };
+
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
       const x = excalidrawRef.current;
@@ -369,11 +461,15 @@ function Editor({ node }: { node: Node }) {
       if (!data) return;
       const anchor = anchorBelow(nodeId);
       const webs = data.webs ?? [];
+      const codes = data.codes ?? [];
+      const notebooks = data.notebooks ?? [];
       // No shell yet: an icon that knows its machine (or its device) opens its own menu, whose
       // "new shell" goes there; only an icon with no known machine asks which one.
-      if (data.shells.length + webs.length === 0) anchor && (nodeMachineId(nodeId) ? setNodeMenu({ anchor, nodeId }) : setPicker({ anchor, nodeId }));
-      else if (data.shells.length === 1 && !webs.length) toggleShell(x, nodeId, data.shells[0].terminalId);
-      else if (webs.length === 1 && !data.shells.length) toggleWeb(x, nodeId, webs[0].webId);
+      if (data.shells.length + webs.length + codes.length + notebooks.length === 0) anchor && (nodeMachineId(nodeId) ? setNodeMenu({ anchor, nodeId }) : setPicker({ anchor, nodeId }));
+      else if (data.shells.length === 1 && !webs.length && !codes.length && !notebooks.length) toggleShell(x, nodeId, data.shells[0].terminalId);
+      else if (webs.length === 1 && !data.shells.length && !codes.length && !notebooks.length) toggleWeb(x, nodeId, webs[0].webId);
+      else if (codes.length === 1 && !data.shells.length && !webs.length && !notebooks.length) toggleCode(x, nodeId, codes[0].docId);
+      else if (notebooks.length === 1 && !data.shells.length && !webs.length && !codes.length) toggleNotebook(x, nodeId, notebooks[0].docId);
       else anchor && setNodeMenu({ anchor, nodeId });
     },
     [editor, anchorBelow],
@@ -399,6 +495,7 @@ function Editor({ node }: { node: Node }) {
     }
     return null;
   };
+  const nodeMachineRef = useRef<(nodeId: string) => string | null>(() => null);
   const liveMachineRef = useRef(liveMachineId);
   liveMachineRef.current = liveMachineId;
   /**
@@ -412,6 +509,7 @@ function Editor({ node }: { node: Node }) {
     if (!data) return null;
     return liveMachineId(nodeId) ?? data.remote?.machineId ?? data.machineId ?? null;
   };
+  nodeMachineRef.current = nodeMachineId;
   /**
    * New shell on a node, on the machine it already uses. A device's icon opens the Telnet / SSH
    * form prefilled with its device (the target comes from the board, so the user checks and
@@ -584,7 +682,7 @@ function Editor({ node }: { node: Node }) {
       }
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
-      const tid = terminalIdOf(el) ?? ((el?.customData as any)?.webId as string | undefined);
+      const tid = terminalIdOf(el) ?? ((el?.customData as any)?.webId as string | undefined) ?? ((el?.customData as any)?.codeId as string | undefined) ?? ((el?.customData as any)?.notebookId as string | undefined);
       const nd = nodeDataOf(el);
       setTerminalSelected(!!tid || !!nd);
       const active = appState.activeEmbeddable?.element.id === el?.id && appState.activeEmbeddable?.state === "active";
@@ -599,6 +697,8 @@ function Editor({ node }: { node: Node }) {
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
+              codes: nd ? (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!(x && openCodeWindowOf(x, c.docId)) })) : [],
+              notebooks: nd ? (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!(x && openNotebookWindowOf(x, c.docId)) })) : [],
               remote: !!nd?.remote,
               bounce: nd?.remote?.target.kind === "ssh",
             }
@@ -611,7 +711,7 @@ function Editor({ node }: { node: Node }) {
         const target = (e: ExcalidrawElement) => (e.type === "text" && e.containerId ? (elements.find((c) => c.id === e.containerId) ?? e) : e);
         const first = sel[0] && target(sel[0]);
         const group = first?.groupIds.at(-1);
-        const okSel = first && !cableOf(first) && !terminalIdOf(first) && !(first.customData as any)?.webId && sel.every((e) => (group ? e.groupIds.at(-1) === group : target(e).id === first.id));
+        const okSel = first && !cableOf(first) && !terminalIdOf(first) && !(first.customData as any)?.webId && !(first.customData as any)?.codeId && !(first.customData as any)?.notebookId && sel.every((e) => (group ? e.groupIds.at(-1) === group : target(e).id === first.id));
         if (okSel) {
           const members = group ? elements.filter((e) => !e.isDeleted && e.groupIds.includes(group) && !cableOf(e)) : [first];
           const tile = members.find((e) => nodeDataOf(e));
@@ -626,7 +726,7 @@ function Editor({ node }: { node: Node }) {
       }
       setCfgSel((prev) => (JSON.stringify(prev) === JSON.stringify(cfg) ? prev : cfg));
       // The window being used (active, or just selected) goes above the windows it overlaps.
-      const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId);
+      const isWindow = (e?: ExcalidrawElement) => !!e && !e.isDeleted && !nodeDataOf(e) && !!(terminalIdOf(e) || (e.customData as any)?.webId || (e.customData as any)?.codeId || (e.customData as any)?.notebookId);
       const activeEl = appState.activeEmbeddable?.state === "active" ? appState.activeEmbeddable.element : undefined;
       const focusId = isWindow(activeEl) ? activeEl!.id : isWindow(el) ? el!.id : null;
       if (focusId !== frontRef.current) {
@@ -649,12 +749,14 @@ function Editor({ node }: { node: Node }) {
               title: nd.title?.split("\n")[0] || null,
               shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
               webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
+              codes: (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!openCodeWindowOf(x, c.docId) })),
+              notebooks: (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!openNotebookWindowOf(x, c.docId) })),
               remote: !!nd.remote,
               bounce: nd.remote?.target.kind === "ssh",
               machineName: nd.machineName,
             };
           })
-          .filter((g) => g.shells.length + g.webs.length > 0);
+          .filter((g) => g.shells.length + g.webs.length + g.codes.length + g.notebooks.length > 0);
         setDock((prev) => (JSON.stringify(prev) === JSON.stringify(groups) ? prev : groups));
       }
       // A node was deleted (here or by someone else): its windows go with it.
@@ -814,7 +916,7 @@ function Editor({ node }: { node: Node }) {
       const hit = [...x.getSceneElements()]
         .reverse()
         .find((el) => el.type === "embeddable" && sx >= el.x && sx <= el.x + el.width && sy >= el.y && sy <= el.y + el.height);
-      if (!hit || !terminalIdOf(hit) || nodeDataOf(hit) || (hit.customData as TileData | undefined)?.collapsed) return;
+      if (!hit || !(terminalIdOf(hit) || (hit.customData as any)?.codeId || (hit.customData as any)?.notebookId) || nodeDataOf(hit) || (hit.customData as TileData | undefined)?.collapsed) return;
       // The title bar selects and moves the window, except when it is locked: then any click
       // opens the shell (and its title bar buttons), since the window can't be selected.
       if (sy <= hit.y + TERM_HEAD && !hit.locked) return;
@@ -838,7 +940,7 @@ function Editor({ node }: { node: Node }) {
         .reverse()
         .find(
           (el) =>
-            (terminalIdOf(el) || (el.customData as any)?.webId) &&
+            (terminalIdOf(el) || (el.customData as any)?.webId || (el.customData as any)?.codeId || (el.customData as any)?.notebookId) &&
             !(el.customData as TileData).collapsed &&
             sx >= el.x &&
             sx <= el.x + el.width &&
@@ -856,6 +958,49 @@ function Editor({ node }: { node: Node }) {
   const updateTerminalRef = useRef(updateTerminal);
   updateTerminalRef.current = updateTerminal;
 
+  const codeHost = useMemo(() => ({ theme, confirm: confirmDialog, toast }), [theme]);
+
+  /** What a notebook window may ask of the app: the machine it could run a kernel on, and starting one (after asking). */
+  const notebookHost = useMemo<NotebookHost>(() => {
+    const machineOf = async (nodeId: string): Promise<Machine | null> => {
+      const id = nodeMachineRef.current(nodeId);
+      return (id && (await listMachines(keys)).find((m) => m.id === id)) || null;
+    };
+    return {
+      theme,
+      confirm: confirmDialog,
+      toast,
+      kernelMachine: async (nodeId) => {
+        const m = await machineOf(nodeId);
+        return m ? { name: m.name } : null;
+      },
+      startKernel: async (nodeId, cwd) => {
+        const m = await machineOf(nodeId);
+        if (!m) {
+          toast("Machine introuvable, ou tu n'y as pas accès");
+          return null;
+        }
+        if (!m.online) {
+          toast(`${m.name} est hors ligne`);
+          return null;
+        }
+        const ok = await confirmDialog({
+          title: `Démarrer un noyau Python sur ${m.name} ?`,
+          text: `Le noyau exécute du code Python avec les droits de l'agent de ${m.name}${cwd ? `, dans ${cwd}` : ""}. Tous les éditeurs de ce tableau pourront y exécuter des cellules, comme dans un shell partagé. Il faut ipykernel et jupyter_client sur la machine.`,
+          confirm: "Démarrer",
+        });
+        if (!ok) return null;
+        try {
+          const info = await session.createTerminal(m, 80, 24, { kind: "jupyter", host: "", port: 0, ...(cwd ? { cwd } : {}) });
+          return info.id;
+        } catch (e) {
+          toast.error(e);
+          return null;
+        }
+      },
+    };
+  }, [theme, session, keys]);
+
   const renderEmbeddable = useCallback(
     (element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => {
       const active = appState.activeEmbeddable?.element.id === element.id && appState.activeEmbeddable.state === "active";
@@ -867,14 +1012,74 @@ function Editor({ node }: { node: Node }) {
             session={session}
             shells={nd.shells.map((s) => s.terminalId)}
             webCount={(nd.webs ?? []).length}
+            codeCount={(nd.codes ?? []).length}
+            notebookCount={(nd.notebooks ?? []).length}
             machineName={nd.machineName}
             remote={!!nd.remote}
-            openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length + (nd.webs ?? []).filter((w) => openWebWindowOf(x, w.webId)).length : 0}
+            openCount={x ? nd.shells.filter((s) => openWindowOf(x, s.terminalId)).length + (nd.webs ?? []).filter((w) => openWebWindowOf(x, w.webId)).length + (nd.codes ?? []).filter((c) => openCodeWindowOf(x, c.docId)).length + (nd.notebooks ?? []).filter((c) => openNotebookWindowOf(x, c.docId)).length : 0}
             title={nd.title}
             icon={nd.icon}
             active={active}
             onActivate={() => onNodeActivateRef.current(element.id)}
           />
+        );
+      }
+      const codeId = (element.customData as any)?.codeId as string | undefined;
+      if (codeId) {
+        const nid = windowNodeId(element);
+        const owner = nodeDataOf(x && nid ? findEl(x, nid) : undefined);
+        // The node's shells, open ones first: files go through the first running local one.
+        const shells = (owner?.shells ?? []).map((sh) => sh.terminalId);
+        if (x) shells.sort((a, b) => Number(!!openWindowOf(x, b)) - Number(!!openWindowOf(x, a)));
+        return (
+          <Suspense fallback={<div className="term code"><div className="term-body"><div className="term-veil">Chargement de l'éditeur…</div></div></div>}>
+            <CodeEmbed
+              host={codeHost}
+              session={session}
+              docId={codeId}
+              active={active}
+              shells={shells}
+              title={owner?.title?.split("\n")[0] ?? null}
+              onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onRemove={
+                editor && nid
+                  ? () => {
+                      removeCode(excalidrawRef.current!, nid, codeId);
+                      void discardDocs(session, [{ doc: codeId, notebook: false }]);
+                    }
+                  : undefined
+              }
+            />
+          </Suspense>
+        );
+      }
+      const notebookId = (element.customData as any)?.notebookId as string | undefined;
+      if (notebookId) {
+        const nid = windowNodeId(element);
+        const owner = nodeDataOf(x && nid ? findEl(x, nid) : undefined);
+        const shells = (owner?.shells ?? []).map((sh) => sh.terminalId);
+        if (x) shells.sort((a, b) => Number(!!openWindowOf(x, b)) - Number(!!openWindowOf(x, a)));
+        return (
+          <Suspense fallback={<div className="term notebook"><div className="term-body"><div className="term-veil">Chargement du notebook…</div></div></div>}>
+            <NotebookEmbed
+              host={notebookHost}
+              session={session}
+              docId={notebookId}
+              nodeId={nid ?? ""}
+              active={active}
+              shells={shells}
+              title={owner?.title?.split("\n")[0] ?? null}
+              onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onRemove={
+                editor && nid
+                  ? () => {
+                      removeNotebook(excalidrawRef.current!, nid, notebookId);
+                      void discardDocs(session, [{ doc: notebookId, notebook: true }]);
+                    }
+                  : undefined
+              }
+            />
+          </Suspense>
         );
       }
       const webId = (element.customData as any)?.webId as string | undefined;
@@ -936,10 +1141,13 @@ function Editor({ node }: { node: Node }) {
         />
       );
     },
-    [session, editor, updateTerminal],
+    [session, editor, updateTerminal, codeHost],
   );
 
   const validateEmbeddable = useCallback((link: string) => (link.startsWith(LINK_BASE) ? true : undefined), []);
+
+  /** Whether the selected node has a running local shell (files can be read from it). */
+  const selLocalShell = !!(selTerm && excalidraw && selTerm.kind === "node" && localShellIds(session, nodeDataOf(findEl(excalidraw, selTerm.id))).length);
 
   const everyone = useMemo(() => {
     const seen = new Map<string, Peer>();
@@ -1041,26 +1249,38 @@ function Editor({ node }: { node: Node }) {
             onOpen={(nodeId, kind, id) => {
               const x = excalidrawRef.current;
               if (!x) return;
-              const win = kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id);
+              const win = kind === "web" ? openWebWindowOf(x, id) : kind === "code" ? openCodeWindowOf(x, id) : kind === "notebook" ? openNotebookWindowOf(x, id) : openWindowOf(x, id);
               if (win) {
                 // Already open: bring it into view and to the front.
                 x.scrollToContent(win, { animate: true });
                 bringToFront(x, win.id);
                 activate(x, win.id);
               } else if (kind === "web") openWeb(x, nodeId, id);
+              else if (kind === "code") openCode(x, nodeId, id);
+              else if (kind === "notebook") openNotebook(x, nodeId, id);
               else openShell(x, nodeId, id);
             }}
             onHide={(kind, id) => {
               const x = excalidrawRef.current;
-              const win = x && (kind === "web" ? openWebWindowOf(x, id) : openWindowOf(x, id));
+              const win = x && (kind === "web" ? openWebWindowOf(x, id) : kind === "code" ? openCodeWindowOf(x, id) : kind === "notebook" ? openNotebookWindowOf(x, id) : openWindowOf(x, id));
               if (x && win) hideShell(x, win.id);
             }}
             onToggleAll={(nodeId) => excalidrawRef.current && toggleAll(excalidrawRef.current, nodeId)}
             onAdd={addOnNode}
             onAddShell={(nodeId, anchor) => void newShellOnNode(nodeId, anchor)}
+            onNewCode={newCodeFile}
+            onOpenCode={(nodeId) => setCodePicker(nodeId)}
+            onNewNotebook={newNotebook}
+            onOpenNotebook={(nodeId) => setNotebookPicker(nodeId)}
             onKill={(nodeId, kind, id) => {
               const x = excalidrawRef.current;
-              if (kind === "terminal") {
+              if (kind === "code") {
+                if (x) removeCode(x, nodeId, id);
+                void discardDocs(session, [{ doc: id, notebook: false }]);
+              } else if (kind === "notebook") {
+                if (x) removeNotebook(x, nodeId, id);
+                void discardDocs(session, [{ doc: id, notebook: true }]);
+              } else if (kind === "terminal") {
                 session.closeTerminal(id);
                 if (x) removeShell(x, nodeId, id, shellMachineName(id));
               } else {
@@ -1117,9 +1337,57 @@ function Editor({ node }: { node: Node }) {
                     </button>
                   );
                 })}
+                {selTerm.codes.map((c, i) => (
+                  <button
+                    key={c.id}
+                    className="chip"
+                    aria-pressed={c.open}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} le fichier de code ${i + 1}`}
+                    onClick={() => toggleCode(excalidrawRef.current!, selTerm.id, c.id)}
+                  >
+                    <FileCode2 size={13} />
+                    <span className="lbl">Code {i + 1}</span>
+                  </button>
+                ))}
+                {selTerm.notebooks.map((c, i) => (
+                  <button
+                    key={c.id}
+                    className="chip"
+                    aria-pressed={c.open}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} le notebook ${i + 1}`}
+                    onClick={() => toggleNotebook(excalidrawRef.current!, selTerm.id, c.id)}
+                  >
+                    <NotebookText size={13} />
+                    <span className="lbl">Notebook {i + 1}</span>
+                  </button>
+                ))}
                 <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
                   <TerminalSquare size={14} />
                 </button>
+                {!selTerm.remote && (
+                  <>
+                    <button title="Nouveau fichier de code" onClick={() => newCodeFile(selTerm.id)}>
+                      <FilePlus2 size={14} />
+                    </button>
+                    <button
+                      title={selLocalShell ? "Ouvrir un fichier de la machine…" : "Ouvrir un fichier de la machine (il faut un shell local en cours)"}
+                      disabled={!selLocalShell}
+                      onClick={() => setCodePicker(selTerm.id)}
+                    >
+                      <FolderOpen size={14} />
+                    </button>
+                    <button title="Nouveau notebook" onClick={() => newNotebook(selTerm.id)}>
+                      <NotebookPen size={14} />
+                    </button>
+                    <button
+                      title={selLocalShell ? "Ouvrir un notebook de la machine…" : "Ouvrir un notebook de la machine (il faut un shell local en cours)"}
+                      disabled={!selLocalShell}
+                      onClick={() => setNotebookPicker(selTerm.id)}
+                    >
+                      <NotebookText size={14} />
+                    </button>
+                  </>
+                )}
                 {/* A device has no agent: only an SSH one can be bounced through, and no site. */}
                 {(!selTerm.remote || selTerm.bounce) && (
                   <button
@@ -1236,6 +1504,49 @@ function Editor({ node }: { node: Node }) {
           onNewAccess={() => {
             addOnNode(nodeMenu.nodeId);
             setNodeMenu(null);
+          }}
+          onNewCode={() => {
+            newCodeFile(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+          onOpenCode={() => {
+            setCodePicker(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+          onNewNotebook={() => {
+            newNotebook(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+          onOpenNotebook={() => {
+            setNotebookPicker(nodeMenu.nodeId);
+            setNodeMenu(null);
+          }}
+        />
+      )}
+      {notebookPicker && excalidrawRef.current && (
+        <CodeFilePicker
+          session={session}
+          node={nodeDataOf(findEl(excalidrawRef.current, notebookPicker))}
+          title="Ouvrir un notebook de la machine"
+          intro="Le notebook est lu par le shell local de la machine, puis partagé chiffré de bout en bout avec le tableau. Il s'exécute sur un noyau Python que tu démarres ensuite."
+          keep={(e) => e.dir || /\.ipynb$/i.test(e.name)}
+          onClose={() => setNotebookPicker(null)}
+          onPick={(path) => {
+            const nodeId = notebookPicker;
+            setNotebookPicker(null);
+            void openMachineNotebook(nodeId, path);
+          }}
+        />
+      )}
+      {codePicker && excalidrawRef.current && (
+        <CodeFilePicker
+          session={session}
+          node={nodeDataOf(findEl(excalidrawRef.current, codePicker))}
+          onClose={() => setCodePicker(null)}
+          onPick={(path) => {
+            const nodeId = codePicker;
+            setCodePicker(null);
+            void openMachineCode(nodeId, path);
           }}
         />
       )}
@@ -1488,11 +1799,16 @@ function NodeMenu(p: {
   onNewShell: () => void;
   onCustomize: () => void;
   onNewAccess: () => void;
+  onNewCode: () => void;
+  onOpenCode: () => void;
+  onNewNotebook: () => void;
+  onOpenNotebook: () => void;
 }) {
   const api = p.api;
   const data = api ? nodeDataOf(findEl(api, p.nodeId)) : undefined;
   if (!api || !data) return null;
-  const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId)) || (data.webs ?? []).some((w) => openWebWindowOf(api, w.webId));
+  const anyOpen = data.shells.some((s) => openWindowOf(api, s.terminalId)) || (data.webs ?? []).some((w) => openWebWindowOf(api, w.webId)) || (data.codes ?? []).some((c) => openCodeWindowOf(api, c.docId)) || (data.notebooks ?? []).some((c) => openNotebookWindowOf(api, c.docId));
+  const hasLocalShell = localShellIds(p.session, data).length > 0;
   return (
     <Menu anchor={p.anchor} onClose={p.onClose}>
       <div className="menu-label">{data.title?.split("\n")[0] || data.machineName || "Shells"}</div>
@@ -1534,7 +1850,41 @@ function NodeMenu(p: {
           </button>
         );
       })}
-      {data.shells.length + (data.webs ?? []).length > 0 && (
+      {(data.codes ?? []).map((c, i) => {
+        const open = !!openCodeWindowOf(api, c.docId);
+        return (
+          <button
+            key={c.docId}
+            className={`menu-item ${open ? "selected" : ""}`}
+            onClick={() => {
+              p.onClose();
+              toggleCode(api, p.nodeId, c.docId);
+            }}
+          >
+            <FileCode2 size={16} />
+            <span style={{ flex: 1 }}>Fichier de code {i + 1}</span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
+          </button>
+        );
+      })}
+      {(data.notebooks ?? []).map((c, i) => {
+        const open = !!openNotebookWindowOf(api, c.docId);
+        return (
+          <button
+            key={c.docId}
+            className={`menu-item ${open ? "selected" : ""}`}
+            onClick={() => {
+              p.onClose();
+              toggleNotebook(api, p.nodeId, c.docId);
+            }}
+          >
+            <NotebookText size={16} />
+            <span style={{ flex: 1 }}>Notebook {i + 1}</span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
+          </button>
+        );
+      })}
+      {data.shells.length + (data.webs ?? []).length + (data.codes ?? []).length + (data.notebooks ?? []).length > 0 && (
         <>
           <div className="menu-sep" />
           <button
@@ -1551,6 +1901,32 @@ function NodeMenu(p: {
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
+      {!data.remote && (
+        <>
+          <button className="menu-item" onClick={p.onNewCode}>
+            <FilePlus2 size={16} /> Nouveau fichier de code
+          </button>
+          <button
+            className="menu-item"
+            disabled={!hasLocalShell}
+            title={hasLocalShell ? undefined : "Il faut un shell local en cours sur cette machine"}
+            onClick={p.onOpenCode}
+          >
+            <FolderOpen size={16} /> Ouvrir un fichier de la machine…
+          </button>
+          <button className="menu-item" onClick={p.onNewNotebook}>
+            <NotebookPen size={16} /> Nouveau notebook
+          </button>
+          <button
+            className="menu-item"
+            disabled={!hasLocalShell}
+            title={hasLocalShell ? undefined : "Il faut un shell local en cours sur cette machine"}
+            onClick={p.onOpenNotebook}
+          >
+            <NotebookText size={16} /> Ouvrir un notebook de la machine…
+          </button>
+        </>
+      )}
       {!data.remote ? (
         <button className="menu-item" onClick={p.onNewAccess}>
           <Cable size={16} /> Telnet / SSH ou site web…
@@ -1743,5 +2119,32 @@ function WebForm({
         </div>
       </form>
     </FormFrame>
+  );
+}
+
+/** File picker over the machine of a node: browse its first running local shell's folders, click a file to open it. */
+function CodeFilePicker(p: {
+  session: BoardSession;
+  node: ReturnType<typeof nodeDataOf>;
+  title?: string;
+  intro?: string;
+  /** Which entries to list (folders must stay in). */
+  keep?: (e: { name: string; dir: boolean }) => boolean;
+  onClose: () => void;
+  onPick: (path: string) => void;
+}) {
+  const shell = useMemo(() => pickLocalShell(p.session, p.node), [p.session, p.node]);
+  return (
+    <Modal onClose={p.onClose} width={460}>
+      <h2 className="display">{p.title ?? "Ouvrir un fichier de la machine"}</h2>
+      <p>{p.intro ?? "Le fichier est lu par le shell local de la machine, puis partagé chiffré de bout en bout avec le tableau."}</p>
+      <div className="code-picker">
+        {shell ? (
+          <FilesPanel client={shell.client} busy={false} onDownload={p.onPick} onClose={p.onClose} keep={p.keep} />
+        ) : (
+          <p>Aucun shell local en cours sur cette machine.</p>
+        )}
+      </div>
+    </Modal>
   );
 }

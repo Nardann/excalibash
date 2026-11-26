@@ -26,6 +26,11 @@ function excalidrawPatches(): Plugin {
 
 export default defineConfig({
   plugins: [react(), excalidrawPatches()],
+  resolve: {
+    // y-monaco imports Monaco by its old ESM path ("monaco-editor/esm/vs/…"); current Monaco
+    // exposes that code as "monaco-editor/…". Same module either way: one Monaco instance.
+    alias: [{ find: /^monaco-editor\/esm\/vs\/(.*)\.js$/, replacement: "monaco-editor/$1" }],
+  },
   define: { "process.env.IS_PREACT": JSON.stringify("false") },
   server: {
     port: 5173,

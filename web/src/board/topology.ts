@@ -57,7 +57,7 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
   const warnings: string[] = [];
   const live = elements.filter((e) => !e.isDeleted);
   const byId = new Map(live.map((e) => [e.id, e]));
-  const isWindow = (e: El) => !!cd(e).nodeId && !!(cd(e).terminalId || cd(e).webId);
+  const isWindow = (e: El) => !!cd(e).nodeId && !!(cd(e).terminalId || cd(e).webId || cd(e).codeId || cd(e).notebookId);
   const cables = live.filter((e) => cableOf(e) && !cableOf(e)!.orphaned).sort((p, q) => cmp(p.id, q.id));
 
   // The anchor of a cable end -> the item (tile / shape / group) it stands for.
