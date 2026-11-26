@@ -36,15 +36,14 @@ export async function discardDocs(host: GcHost, refs: DocRef[], delayMs = 1000):
   if (!host.canEdit || !refs.length) return;
   for (const ref of refs) {
     try {
-      if (ref.notebook) {
-        const d = openSharedDoc(host, ref.doc);
-        try {
-          const synced = await Promise.race([d.synced.then(() => true), wait(4000).then(() => false)]);
-          const term = synced ? kernelTermOf(d.ydoc) : null;
-          if (term && host.terminals.get(term)?.label.startsWith("Noyau Jupyter ")) host.closeTerminal(term);
-        } finally {
-          d.destroy();
-        }
+      // A notebook and a code window run on a kernel session kept in their metadata: end it with the document.
+      const d = openSharedDoc(host, ref.doc);
+      try {
+        const synced = await Promise.race([d.synced.then(() => true), wait(4000).then(() => false)]);
+        const term = synced ? kernelTermOf(d.ydoc) : null;
+        if (term && host.terminals.get(term)?.label.startsWith("Noyau Jupyter ")) host.closeTerminal(term);
+      } finally {
+        d.destroy();
       }
     } catch (e) {
       console.error("[excalibash]", e);

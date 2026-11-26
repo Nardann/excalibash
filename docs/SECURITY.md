@@ -357,6 +357,20 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   éditeur qui voit une cellule « en cours » dont l'identifiant n'est dans la présence de personne depuis 5 s la termine
   (compteur du `done` vu, ou noyau au repos) ; les sorties produites après le départ de l'exécuteur ne sont pas conservées.
   Les clients MCP qui savent écrire dans un terminal peuvent aussi parler à ce noyau, comme à n'importe quel shell.
+- **Exécuter un fichier Python (fenêtre de code).** « ▶ Exécuter » envoie le contenu **actuel** de la fenêtre (enregistré
+  ou non) à un noyau Jupyter propre au fichier, dont l'identifiant de session est gardé dans le document de code
+  (`meta.kernelTerm`, même modèle que le notebook : *démarrer* exige `machineAuth` et une confirmation, ensuite tout
+  éditeur du tableau peut y exécuter du code, avec les droits de l'agent). Le dossier de travail est celui du fichier
+  quand son chemin est absolu. Mêmes règles que les cellules : un seul exécuteur (celui qui a cliqué) écrit les sorties
+  de son exécution, au format nbformat, dans le `Y.Array` `outputs` du document (tout le monde voit la dernière exécution),
+  `meta.running` marque l'exécution en cours, et un exécuteur disparu est remplacé au bout de 5 s. « Exécuter dans le
+  terminal » reste pour le shell et JavaScript, et en action secondaire pour Python. La session de noyau est fermée avec
+  le document quand la fenêtre est retirée.
+- **Complétion et documentation.** Les requêtes `complete` / `inspect` du pont sont des lignes écrites dans le même
+  terminal chiffré : le navigateur les envoie à la demande (« . », Ctrl+Espace, survol, Maj+Tab), avec abandon à 3 s et
+  annulation. Elles ne sont jamais envoyées pour un lecteur (le serveur refuse sa saisie) ni quand le noyau est occupé
+  (elles attendraient derrière la cellule en cours). Les réponses sont des données du noyau : la documentation s'affiche
+  en texte dans un bloc de code Markdown, ANSI retiré, sans HTML ni lien interprété.
 - **L'exécuteur survit à la fenêtre.** L'exécution d'un notebook (abonnement au flux du noyau, écriture des sorties,
   reprise des exécuteurs disparus) appartient à un objet par tableau et par notebook, pas à la fenêtre : masquer la
   fenêtre en pleine exécution ne perd plus rien. Il est libéré quand le document est supprimé, quand le tableau est

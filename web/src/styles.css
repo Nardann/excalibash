@@ -2267,10 +2267,66 @@ html.dark .term.broadcasting {
 .term.code .term-body.code-body {
   padding: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.code-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 90px;
 }
 .code-host {
   position: absolute;
   inset: 0;
+}
+.code-out {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 45%;
+  border-top: 1px solid var(--line, rgba(128, 128, 128, 0.35));
+  background: var(--term-bg, transparent);
+}
+.code-out-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.code-out-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.code-out-state.on::before,
+.code-out-state.busy::before,
+.code-out-state.off::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+.code-out-state.busy::before {
+  background: #f59e0b;
+}
+.code-out-state.off::before {
+  background: #94a3b8;
+}
+.code-out-fatal {
+  color: #ef4444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.code-out-body {
+  overflow: auto;
+  min-height: 40px;
+  padding: 2px 8px 6px;
 }
 .code-dirty {
   display: inline-block;

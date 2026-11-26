@@ -1,4 +1,5 @@
-// The execution side of a notebook, owned by the board session instead of the window.
+// The execution side of a notebook (and of a code window run in a kernel), owned by the board session instead of
+// the window.
 //
 // A cell's outputs are written by the client that started the run (see notebookRunner.ts). When the
 // runner lived in the React window, hiding the window in the middle of a run dropped the rest of the
@@ -12,8 +13,12 @@
 // The rules of the runner are unchanged: only the executor writes the outputs of its runs, and any
 // editor takes over a run whose executor vanished (sweep). Pure TypeScript, no DOM, no React.
 import type { BoardSession } from "./collab.ts";
+import { kernelTermOf as codeKernelTermOf } from "./codeDoc.ts";
+import { CodeRunner } from "./codeRunner.ts";
+import type { ExecRunner } from "./execRunner.ts";
+import type { TermPort } from "./kernelSession.ts";
 import { kernelTermOf, metaOf } from "./notebookDoc.ts";
-import { NotebookRunner, type TermPort } from "./notebookRunner.ts";
+import { NotebookRunner } from "./notebookRunner.ts";
 import { openSharedDoc, type DocHost, type SharedDoc } from "./sharedDoc.ts";
 
 /** What the service needs from the board connection besides the document transport. */
@@ -47,35 +52,53 @@ export function sessionEnv(s: BoardSession): ServiceEnv {
 /** How long an unused service stays alive once nothing runs (ms). */
 export const IDLE_MS = 60_000;
 
-export type NotebookHandle = {
+export type ServiceHandle<R extends ExecRunner = NotebookRunner> = {
   readonly doc: SharedDoc;
-  readonly runner: NotebookRunner;
+  readonly runner: R;
   /** True once the service was torn down (document deleted, board closed or idle). */
   readonly disposed: boolean;
   release(): void;
 };
 
-class Service {
+export type NotebookHandle = ServiceHandle<NotebookRunner>;
+export type CodeHandle = ServiceHandle<CodeRunner>;
+
+/** What differs between a notebook and a code window: the runner and where the kernel session id is kept. */
+type Kind<R extends ExecRunner> = {
+  make(doc: SharedDoc, port: TermPort, canEdit: boolean): R;
+  termOf(ydoc: SharedDoc["ydoc"]): string | null;
+};
+const notebookKind: Kind<NotebookRunner> = {
+  make: (doc, port, canEdit) => new NotebookRunner(doc.ydoc, port, { awareness: doc.awareness, canEdit }),
+  termOf: kernelTermOf,
+};
+const codeKind: Kind<CodeRunner> = {
+  make: (doc, port, canEdit) => new CodeRunner(doc.ydoc, port, { awareness: doc.awareness, canEdit }),
+  termOf: codeKernelTermOf,
+};
+
+class Service<R extends ExecRunner = ExecRunner> {
   readonly doc: SharedDoc;
-  readonly runner: NotebookRunner;
+  readonly runner: R;
   refs = 0;
   disposed = false;
   private offs: (() => void)[] = [];
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
-    private owner: Map<string, Service>,
+    private owner: Map<string, Service<any>>,
     private docId: string,
+    kind: Kind<R>,
     host: DocHost,
     env: ServiceEnv,
     private idleMs: number,
   ) {
     this.doc = openSharedDoc(host, docId);
-    this.runner = new NotebookRunner(this.doc.ydoc, env.port, { awareness: this.doc.awareness, canEdit: host.canEdit && !this.doc.readOnly });
+    this.runner = kind.make(this.doc, env.port, host.canEdit && !this.doc.readOnly);
     const meta = metaOf(this.doc.ydoc);
     const follow = () => {
       if (this.disposed) return;
-      const term = kernelTermOf(this.doc.ydoc);
+      const term = kind.termOf(this.doc.ydoc);
       this.runner.attach(term);
       if (term && env.terminalOver(term)) this.runner.terminalGone();
     };
@@ -124,7 +147,7 @@ class Service {
   }
 }
 
-const registry = new WeakMap<object, Map<string, Service>>();
+const registry = new WeakMap<object, Map<string, Service<any>>>();
 
 /** True when a service of this notebook is alive on the board (tests, diagnostics). */
 export const hasNotebookService = (host: object, docId: string): boolean => registry.get(host)?.has(docId) ?? false;
@@ -134,20 +157,16 @@ export function peekNotebookRunner(host: object, docIds: readonly string[]): Not
   const map = registry.get(host);
   for (const id of docIds) {
     const s = map?.get(id);
-    if (s && !s.disposed && s.runner.term && s.runner.status !== "dead") return s.runner;
+    if (s && !s.disposed && s.runner instanceof NotebookRunner && s.runner.term && s.runner.status !== "dead") return s.runner;
   }
   return undefined;
 }
 
-/**
- * Joins (or creates) the service of a notebook of the board. The runner and the document handle
- * outlive the window: call `release()` when the window goes away.
- */
-export function acquireNotebook(host: DocHost, env: ServiceEnv, docId: string, o: { idleMs?: number } = {}): NotebookHandle {
+function acquire<R extends ExecRunner>(kind: Kind<R>, host: DocHost, env: ServiceEnv, docId: string, o: { idleMs?: number }): ServiceHandle<R> {
   let map = registry.get(host);
   if (!map) registry.set(host, (map = new Map()));
-  let s = map.get(docId);
-  if (!s || s.disposed) map.set(docId, (s = new Service(map, docId, host, env, o.idleMs ?? IDLE_MS)));
+  let s = map.get(docId) as Service<R> | undefined;
+  if (!s || s.disposed) map.set(docId, (s = new Service<R>(map, docId, kind, host, env, o.idleMs ?? IDLE_MS)));
   s.acquire();
   const svc = s;
   let released = false;
@@ -164,3 +183,12 @@ export function acquireNotebook(host: DocHost, env: ServiceEnv, docId: string, o
     },
   };
 }
+
+/**
+ * Joins (or creates) the service of a notebook of the board. The runner and the document handle
+ * outlive the window: call `release()` when the window goes away.
+ */
+export const acquireNotebook = (host: DocHost, env: ServiceEnv, docId: string, o: { idleMs?: number } = {}): NotebookHandle => acquire(notebookKind, host, env, docId, o);
+
+/** The same for a code window: its runner runs the file on the kernel session kept in the code document. */
+export const acquireCode = (host: DocHost, env: ServiceEnv, docId: string, o: { idleMs?: number } = {}): CodeHandle => acquire(codeKind, host, env, docId, o);

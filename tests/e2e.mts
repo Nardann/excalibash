@@ -21,6 +21,7 @@ import * as mf from "../web/src/board/machineFiles.ts";
 import * as nbDoc from "../web/src/board/notebookDoc.ts";
 import { NotebookRunner } from "../web/src/board/notebookRunner.ts";
 import * as nbSvc from "../web/src/board/notebookService.ts";
+import { CodeRunner } from "../web/src/board/codeRunner.ts";
 import { LineSplitter, parseEvent } from "../web/src/board/kernelProtocol.ts";
 import { FileClient } from "../web/src/board/fileTransfer.ts";
 import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
@@ -1798,6 +1799,40 @@ site.close();
       ok((await runB.complete(src, src.length)) !== null, "notebook : Bob, éditeur, complète aussi sur le même noyau");
       ok(nbDoc.findCell(na.ydoc, imp)!.outputs.length === 0 && !bobErrors.length, "notebook : une requête de complétion n'écrit rien dans le document");
       nbDoc.deleteCell(na.ydoc, imp);
+    }
+
+    // A code window runs its CURRENT buffer in a kernel session kept in the code document; everybody sees the last run.
+    {
+      const runDoc = sd.newDocId();
+      const crA = sd.openSharedDoc(hA3.host, runDoc);
+      const crB = sd.openSharedDoc(hB3.host, runDoc);
+      await Promise.all([crA.synced, crB.synced]);
+      codeDoc.initBlank(crA.ydoc, "calc.py");
+      crA.ydoc.getText("content").insert(0, "x = 6\nprint(x * 7)\n");
+      codeDoc.setKernelTerm(crA.ydoc, kid);
+      ok(await until(() => codeDoc.kernelTermOf(crB.ydoc) === kid), "code : la session de noyau du fichier est partagée par son document (meta.kernelTerm)");
+      const codeRun = new CodeRunner(crA.ydoc, kernelPort(sAl, kk, "code-alice"), { awareness: crA.awareness, canEdit: true });
+      const codeRunB = new CodeRunner(crB.ydoc, kernelPort(sBo, kkBob!, "code-bob"), { awareness: crB.awareness, canEdit: true });
+      codeRun.attach(kid);
+      codeRunB.attach(kid);
+      await until(() => codeRun.status === "idle", 20000);
+      const cr1 = codeRun.run(crA.ydoc.getText("content").toString());
+      ok(cr1.ok && (await until(() => codeDoc.readMeta(crB.ydoc.getMap("meta")).running === (cr1.ok ? cr1.execId : ""), 4000)), "code : Bob voit « en cours » dès qu'Alice lance le fichier");
+      const gotRun = await until(() => !codeDoc.readMeta(crB.ydoc.getMap("meta")).running && codeDoc.readOutputs(crB.ydoc).some((o) => o.output_type === "stream" && o.text === "42\n"), 40000);
+      ok(gotRun && codeDoc.readOutputs(crB.ydoc).length === 1 && codeDoc.readMeta(crB.ydoc.getMap("meta")).runCount !== undefined, "code : « 42 » est écrit dans les sorties du document de code (une seule fois), Bob le voit");
+      ok(codeRunB.localRuns.length === 0, "code : Bob, abonné au même noyau, n'écrit rien");
+      // The window is hidden / the file is edited meanwhile: what runs is what was on screen at the click.
+      crA.ydoc.getText("content").insert(0, "import sys\n");
+      const cr2 = codeRunB.run("print(x + 1)\nraise ValueError('boum')");
+      ok(cr2.ok && (await until(() => !codeDoc.readMeta(crA.ydoc.getMap("meta")).running && codeDoc.readOutputs(crA.ydoc).some((o) => o.output_type === "error" && o.ename === "ValueError"), 40000)), "code : le noyau du fichier garde son état (x), une exception arrive comme sortie d'erreur, lancée par Bob");
+      ok(codeDoc.readOutputs(crA.ydoc)[0]?.text === "7\n" && codeDoc.readOutputs(crA.ydoc).length === 2, "code : la nouvelle exécution a remplacé les sorties précédentes");
+      await nap(300);
+      const rawNow = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+      ok(!rawNow.includes("calc.py") && !rawNow.includes("ValueError") && !rawNow.includes("boum"), "code : ni le nom du fichier ni les sorties en clair dans la base");
+      codeRun.destroy();
+      codeRunB.destroy();
+      crA.destroy();
+      crB.destroy();
     }
 
     // The runner belongs to the board session, not to the window: hide the window in the middle of a run and

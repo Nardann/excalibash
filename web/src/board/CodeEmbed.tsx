@@ -1,21 +1,25 @@
 // A code window: Monaco (open-source core of VS Code) bound to an end-to-end encrypted shared
 // Yjs document (sharedDoc.ts). The text and the cursors travel sealed; the file itself lives on
 // the node's machine, read and written through the sealed file channel of a local shell.
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Download, FileCode2, FolderOpen, Minimize2, Play, Power, RefreshCw, Save, SaveAll } from "lucide-react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import { ChevronDown, ChevronUp, Download, FileCode2, FolderOpen, Minimize2, Play, Power, RefreshCw, RotateCw, Save, SaveAll, Square, TerminalSquare } from "lucide-react";
 import { MonacoBinding } from "y-monaco";
 import type * as Monaco from "monaco-editor";
 import { monaco } from "./monacoEnv.ts";
 import type { BoardSession } from "./collab.ts";
-import { openSharedDoc, type SharedDoc } from "./sharedDoc.ts";
+import type { SharedDoc } from "./sharedDoc.ts";
 import {
   LANGUAGES,
   cursorStyleSheet,
   initBlank,
   initFromFile,
   isDirty,
+  kernelTermOf,
   markSaved,
+  outputsOf,
   readMeta,
+  readOutputs,
+  setKernelTerm,
   runCommand,
   safeColor,
   safeLabel,
@@ -24,7 +28,11 @@ import {
   type CodeMeta,
 } from "./codeDoc.ts";
 import { openMachineFile, pickLocalShell, saveMachineFile, sendCommand } from "./machineFiles.ts";
-import { peekNotebookRunner } from "./notebookService.ts";
+import { acquireCode, peekNotebookRunner, sessionEnv } from "./notebookService.ts";
+import type { CodeRunner } from "./codeRunner.ts";
+import { kernelCwd } from "./notebookDoc.ts";
+import { classifyOutputs } from "./notebookRender.ts";
+import { Outputs } from "./OutputView.tsx";
 import { bindPythonKernel } from "./pyKernel.ts";
 
 /** What the window needs from the app's UI kit, handed in by the board page (this chunk must not import it: see BoardPage). */
@@ -32,12 +40,17 @@ export type CodeHost = {
   theme: "light" | "dark";
   confirm: (o: { title: string; text: string; confirm: string; danger?: boolean }) => Promise<boolean>;
   toast: (text: string) => void;
+  /** The machine of the node when this user may open a kernel session on it (holds its machine key); null otherwise. */
+  kernelMachine?: (nodeId: string) => Promise<{ name: string } | null>;
+  /** Asks the user, then starts a kernel session on the node's machine. Resolves with the terminal id, null if cancelled. */
+  startKernel?: (nodeId: string, cwd?: string, purpose?: "code" | "notebook") => Promise<string | null>;
 };
 
 type Props = {
   host: CodeHost;
   session: BoardSession;
   docId: string;
+  nodeId?: string;
   active: boolean;
   /** The node's shells, the ones whose window is open first: the file goes through the first running local one. */
   shells: string[];
@@ -62,15 +75,21 @@ const initials = (name: string) =>
 
 const WHEEL_AND_KEYS = ["keydown", "keyup", "keypress", "paste", "copy", "cut", "wheel"];
 
-/** The document handle of this window: opened with it, released with it. */
+/**
+ * The code service of this window (document + kernel runner, see notebookService.ts): joined with the
+ * window, released with it. The service outlives the window while a run is in flight.
+ */
 function useDoc(session: BoardSession, docId: string) {
   const [doc, setDoc] = useState<SharedDoc | null>(null);
+  const [runner, setRunner] = useState<CodeRunner | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    const d = openSharedDoc(session, docId);
+    const h = acquireCode(session, sessionEnv(session), docId);
+    const d = h.doc;
     setDoc(d);
+    setRunner(h.runner);
     setReady(false);
     const off = d.onError((m) => live && setError(m));
     d.synced.then(() => {
@@ -86,14 +105,14 @@ function useDoc(session: BoardSession, docId: string) {
     return () => {
       live = false;
       off();
-      d.destroy();
+      h.release();
     };
   }, [session, docId]);
-  return { doc, ready, error };
+  return { doc, runner, ready, error };
 }
 
-export default function CodeEmbed({ host, session, docId, active, shells, notebookDocs, title, onHide, onRemove, onLabel }: Props) {
-  const { doc, ready, error } = useDoc(session, docId);
+export default function CodeEmbed({ host, session, docId, nodeId, active, shells, notebookDocs, title, onHide, onRemove, onLabel }: Props) {
+  const { doc, runner, ready, error } = useDoc(session, docId);
   const { theme, confirm: confirmDialog, toast } = host;
   const rootRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -225,8 +244,9 @@ export default function CodeEmbed({ host, session, docId, active, shells, notebo
     const ed = editorRef.current;
     const model = ed?.getModel();
     if (!ed || !model || !ready || meta.language !== "python") return;
-    return bindPythonKernel(ed, model, () => peekNotebookRunner(session, notebooksRef.current));
-  }, [ready, doc, meta.language, session]);
+    // The file's own kernel first, else a kernel a notebook of the node already follows.
+    return bindPythonKernel(ed, model, () => (runner?.term && runner.status !== "dead" ? runner : peekNotebookRunner(session, notebooksRef.current)));
+  }, [ready, doc, meta.language, session, runner]);
 
   const dirty = sha !== null && isDirty(sha, meta.savedSha);
   const text = () => doc!.ydoc.getText("content").toString();
@@ -241,6 +261,86 @@ export default function CodeEmbed({ host, session, docId, active, shells, notebo
     } finally {
       setBusy(null);
     }
+  };
+
+
+  // ---- running the file in a kernel (Python) ----------------------------------------------------------------
+  const isPython = meta.language === "python";
+  const kernelTerm = meta.kernelTerm ?? null;
+  const kTerm = kernelTerm ? session.terminals.get(kernelTerm) : undefined;
+  const termGone = !!kernelTerm && (kTerm ? !(kTerm.status === "running" || kTerm.status === "starting") : session.state === "online");
+  const [kStatus, setKStatus] = useState<{ status: string; fatal: string | null }>({ status: "absent", fatal: null });
+  const [panel, setPanel] = useState(true);
+  const [machine, setMachine] = useState<{ name: string } | null>(null);
+  const [outRev, bumpOut] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!runner) return;
+    const sync = () => setKStatus({ status: runner.status, fatal: runner.fatal });
+    sync();
+    return runner.on(sync);
+  }, [runner]);
+  useEffect(() => {
+    if (!doc || !ready) return;
+    const outs = outputsOf(doc.ydoc);
+    outs.observe(bumpOut);
+    bumpOut();
+    return () => outs.unobserve(bumpOut);
+  }, [doc, ready]);
+  const shellKey = shells.join();
+  useEffect(() => {
+    let live = true;
+    if (!nodeId || !host.kernelMachine) return;
+    host.kernelMachine(nodeId).then((m) => live && setMachine(m), () => live && setMachine(null));
+    return () => {
+      live = false;
+    };
+  }, [host, nodeId, shellKey]);
+  const outputItems = useMemo(
+    () => (doc && ready ? classifyOutputs(readOutputs(doc.ydoc), { dark: theme === "dark" }) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [doc, ready, outRev, theme],
+  );
+  const running = !!meta.running;
+  const hasKernel = !!kernelTerm && !termGone && kStatus.status !== "dead" && kStatus.status !== "absent";
+  const canStartKernel = !!machine && !!host.startKernel && !!nodeId;
+  const kernelLabel = !kernelTerm ? "Aucun noyau" : termGone || kStatus.status === "dead" ? "Noyau arrêté" : kStatus.status === "busy" ? "Exécution…" : kStatus.status === "restarting" ? "Redémarrage…" : "Noyau prêt";
+
+  /** Starts the kernel of this file (asking first), unless somebody else has just done it. */
+  const ensureKernel = async (): Promise<boolean> => {
+    if (!doc || !host.startKernel || !nodeId) return false;
+    if (hasKernel) return true;
+    const old = kernelTermOf(doc.ydoc);
+    const id = await host.startKernel(nodeId, kernelCwd(meta.path), "code");
+    if (!id) return false;
+    const cur = kernelTermOf(doc.ydoc);
+    const curT = cur && cur !== old ? session.terminals.get(cur) : undefined;
+    if (curT && (curT.status === "running" || curT.status === "starting")) {
+      // Somebody started one while we were asking: one kernel for everybody.
+      session.closeTerminal(id);
+      toast("Un noyau vient d'être démarré par quelqu'un d'autre : il est partagé");
+      return true;
+    }
+    setKernelTerm(doc.ydoc, id);
+    if (old && old !== id) session.closeTerminal(old);
+    return true;
+  };
+
+  /** Runs the CURRENT content of the window (saved or not) on the file's kernel. */
+  const runInKernel = () =>
+    guard("run", async () => {
+      if (!doc || !runner || readOnly) return;
+      if (running) return toast("Ce fichier est déjà en cours d'exécution");
+      if (!(await ensureKernel())) return;
+      setPanel(true);
+      const r = runner.run(text());
+      if (!r.ok) toast(r.reason);
+    });
+  const interrupt = () => {
+    if (!runner?.interrupt()) toast("Rien à interrompre");
+  };
+  const restartKernel = async () => {
+    if (!(await confirmDialog({ title: "Redémarrer le noyau ?", text: "Les variables et l'état du noyau sont perdus, pour tout le monde. Les exécutions en file sont abandonnées.", confirm: "Redémarrer", danger: true }))) return;
+    runner?.restart();
   };
 
   /** Writes the document to the machine; resolves true once it is saved. */
@@ -407,9 +507,25 @@ export default function CodeEmbed({ host, session, docId, active, shells, notebo
         <button title="Télécharger" disabled={!ready} onClick={download}>
           <Download size={14} />
         </button>
+        {isPython && host.startKernel && (
+          <>
+            <button
+              title={readOnly ? "Lecture seule" : running ? "Exécution en cours" : hasKernel || canStartKernel ? "Exécuter le contenu actuel dans le noyau Python" : "Il faut l'accès à la machine pour démarrer un noyau"}
+              disabled={readOnly || !ready || !!busy || running || (!hasKernel && !canStartKernel)}
+              onClick={() => void runInKernel()}
+            >
+              <Play size={14} />
+            </button>
+            {running && (
+              <button title="Interrompre l'exécution" onClick={interrupt}>
+                <Square size={14} />
+              </button>
+            )}
+          </>
+        )}
         {runnable && (
           <button title={needsShell("Enregistrer puis exécuter dans le terminal")} disabled={readOnly || !shell || !!busy || !ready} onClick={() => void run()}>
-            <Play size={14} />
+            {isPython && host.startKernel ? <TerminalSquare size={14} /> : <Play size={14} />}
           </button>
         )}
         {onHide && (
@@ -455,9 +571,35 @@ export default function CodeEmbed({ host, session, docId, active, shells, notebo
         </form>
       )}
       <div className="term-body code-body">
-        <div ref={hostRef} className="code-host" />
-        {!ready && <div className="term-veil">{error ?? "Connexion au document…"}</div>}
-        {ready && error && <div className="term-veil bottom">{error}</div>}
+        <div className="code-main">
+          <div ref={hostRef} className="code-host" />
+          {!ready && <div className="term-veil">{error ?? "Connexion au document…"}</div>}
+          {ready && error && <div className="term-veil bottom">{error}</div>}
+        </div>
+        {isPython && host.startKernel && ready && (
+          <div className={`code-out ${panel ? "open" : ""}`}>
+            <div className="code-out-head">
+              <button className="code-out-toggle" onClick={() => setPanel(!panel)} title={panel ? "Replier la sortie" : "Déplier la sortie"}>
+                {panel ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                <span>Sortie</span>
+              </button>
+              <span className={`code-out-state ${hasKernel ? (kStatus.status === "busy" ? "busy" : "on") : "off"}`}>{kernelLabel}</span>
+              {kStatus.fatal && kernelTerm && <span className="code-out-fatal" title={kStatus.fatal}>{kStatus.fatal}</span>}
+              <span style={{ flex: 1 }} />
+              <button title={running ? "Interrompre l'exécution" : "Aucune exécution en cours"} disabled={readOnly || !running} onClick={interrupt}>
+                <Square size={13} /> <span>Interrompre</span>
+              </button>
+              <button title={readOnly ? "Lecture seule" : "Redémarrer le noyau"} disabled={readOnly || !hasKernel} onClick={() => void restartKernel()}>
+                <RotateCw size={13} /> <span>Redémarrer</span>
+              </button>
+            </div>
+            {panel && (
+              <div className="code-out-body">
+                {outputItems.length ? <Outputs items={outputItems} /> : <div className="nb-empty">{running ? "Exécution en cours…" : "Aucune sortie : lance le fichier avec ▶."}</div>}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

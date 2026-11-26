@@ -4,8 +4,12 @@
 // A code document is a Y.Doc with
 //   Y.Text "content"
 //   Y.Map  "meta": { path?, name, language, savedSha?, savedAt?, savedBy? }
+//   Y.Array "outputs": nbformat v4 outputs of the last run in the kernel (see below)
 // `path` is absolute on the machine, or relative to the shell's working directory (as `ls` returns it).
+// Running a Python file in a kernel adds to the meta: `kernelTerm` (terminal id of the kernel session, shared by
+// everybody like a notebook's), `running` (id of the run in flight) and `runCount` (the kernel's counter).
 import * as Y from "yjs";
+import { isTermId, validOutput, type NbOutput, type RunSink } from "./notebookDoc.ts";
 
 export type CodeMeta = {
   path?: string;
@@ -15,6 +19,11 @@ export type CodeMeta = {
   savedSha?: string;
   savedAt?: number;
   savedBy?: string;
+  /** Terminal id of the kernel session used to run this file (one for everybody). */
+  kernelTerm?: string;
+  /** Id of the run in flight, if any. */
+  running?: string;
+  runCount?: number;
 };
 
 export const MAX_CODE_BYTES = 2 * 1024 * 1024;
@@ -137,7 +146,69 @@ export function readMeta(meta: { get(k: string): unknown }): CodeMeta {
     ...(sha(meta.get("savedSha")) ? { savedSha: sha(meta.get("savedSha")) } : {}),
     ...(n(meta.get("savedAt")) !== undefined ? { savedAt: n(meta.get("savedAt")) } : {}),
     ...(s(meta.get("savedBy")) ? { savedBy: s(meta.get("savedBy")) } : {}),
+    ...(isTermId(meta.get("kernelTerm")) ? { kernelTerm: meta.get("kernelTerm") as string } : {}),
+    ...(typeof meta.get("running") === "string" && (meta.get("running") as string).length > 0 && (meta.get("running") as string).length <= 64 ? { running: meta.get("running") as string } : {}),
+    ...(n(meta.get("runCount")) !== undefined ? { runCount: n(meta.get("runCount")) } : {}),
   };
+}
+
+// ---- running the file in a kernel -----------------------------------------------------------------------------
+
+export const outputsOf = (ydoc: Y.Doc) => ydoc.getArray<NbOutput>("outputs");
+/** The outputs of the last run (well-formed ones only: any editor can write the document). */
+export const readOutputs = (ydoc: Y.Doc): NbOutput[] => (outputsOf(ydoc).toArray() as unknown[]).filter(validOutput);
+
+/** The kernel session of the file, or null (the terminal id is validated). */
+export const kernelTermOf = (ydoc: Y.Doc): string | null => readMeta(ydoc.getMap("meta")).kernelTerm ?? null;
+
+export function setKernelTerm(ydoc: Y.Doc, term: string | null) {
+  const meta = ydoc.getMap("meta");
+  ydoc.transact(() => {
+    if (term) meta.set("kernelTerm", term);
+    else meta.delete("kernelTerm");
+  });
+}
+
+/** Marks the file as running under `execId` and clears the last outputs, in ONE transaction. */
+export function beginCodeRun(ydoc: Y.Doc, execId: string): { ok: true } | { ok: false; reason: string } {
+  const meta = ydoc.getMap("meta");
+  if (readMeta(meta).running) return { ok: false, reason: "Ce fichier est déjà en cours d'exécution" };
+  ydoc.transact(() => {
+    const outs = outputsOf(ydoc);
+    if (outs.length) outs.delete(0, outs.length);
+    meta.set("running", execId);
+  });
+  return { ok: true };
+}
+
+/** Ends a run (also an abandoned one). `count` is the kernel's execution counter when known. */
+export function finishCodeRun(ydoc: Y.Doc, execId: string, count?: number | null) {
+  const meta = ydoc.getMap("meta");
+  if (readMeta(meta).running !== execId) return false;
+  ydoc.transact(() => {
+    if (typeof count === "number") meta.set("runCount", count);
+    meta.delete("running");
+  });
+  return true;
+}
+
+/** Where the events of the run `execId` go: the outputs of the file, ended by `finishCodeRun`. */
+export function codeSink(ydoc: Y.Doc, execId: string): RunSink {
+  return {
+    outs: outputsOf(ydoc),
+    active: () => readMeta(ydoc.getMap("meta")).running === execId,
+    finish: (count) => void finishCodeRun(ydoc, execId, count),
+  };
+}
+
+/** Empties the last outputs (not while a run is in flight). */
+export function clearCodeOutputs(ydoc: Y.Doc): boolean {
+  if (readMeta(ydoc.getMap("meta")).running) return false;
+  ydoc.transact(() => {
+    const outs = outputsOf(ydoc);
+    if (outs.length) outs.delete(0, outs.length);
+  });
+  return true;
 }
 
 export type FileInit = { path?: string; name: string; text: string; sha: string; by?: string };

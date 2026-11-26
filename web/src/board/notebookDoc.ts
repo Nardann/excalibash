@@ -46,6 +46,7 @@ const TERM_RE = /^[A-Za-z0-9_-]{22}$/;
 const KERNEL_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}$/;
 const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
+export const isTermId = (v: unknown): v is string => typeof v === "string" && TERM_RE.test(v);
 const jsonLen = (v: unknown) => JSON.stringify(v)?.length ?? 0;
 
 /** A random UUID v4 (crypto.randomUUID needs a secure context). */
@@ -125,7 +126,7 @@ export type CellView = {
   map: Cell;
 };
 
-const validOutput = (o: unknown): o is NbOutput =>
+export const validOutput = (o: unknown): o is NbOutput =>
   isObj(o) && (o.output_type === "stream" || o.output_type === "display_data" || o.output_type === "execute_result" || o.output_type === "error");
 
 /** One cell of the document, or null when it is not well formed. */
@@ -450,16 +451,22 @@ function appendStream(outs: Y.Array<NbOutput>, name: "stdout" | "stderr", text: 
 export const eventWeight = (ev: KernelEvent): number =>
   ev.ev === "stream" ? ev.text.length + 64 : ev.ev === "display" || ev.ev === "result" || ev.ev === "update" ? jsonLen(ev.data) + 128 : ev.ev === "error" ? jsonLen(ev.traceback) + 256 : 32;
 
+/** Where a run's events land: an output list and the marks of the run. A notebook cell and a code window each give one. */
+export type RunSink = {
+  outs: Y.Array<NbOutput>;
+  /** The run is still the current one (not cancelled, not finalized by somebody else). */
+  active(): boolean;
+  /** `done`: record the count and end the run. */
+  finish(count: number | null | undefined): void;
+};
+
 /**
- * Writes kernel events into the cell running under `execId`, in one transaction. Events for a cell
- * that is not (or no longer) running under this id are dropped. `done` records the count and ends the
- * run. Returns true when a `done` was applied.
+ * Writes kernel events into a sink, in one transaction. Events for a run that is no longer the current one are
+ * dropped. `done` records the count and ends the run. Returns true when a `done` was applied.
  */
-export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, events: KernelEvent[], st: WriteState): boolean {
-  const c = findCell(ydoc, cellId);
-  if (!c || c.running !== execId) return false;
-  const outs = c.map.get("outputs") as Y.Array<NbOutput> | undefined;
-  if (!(outs instanceof Y.Array)) return false;
+export function applyEventsTo(ydoc: Y.Doc, sink: RunSink, events: KernelEvent[], st: WriteState): boolean {
+  if (!sink.active()) return false;
+  const outs = sink.outs;
   let finished = false;
   ydoc.transact(() => {
     const clear = () => {
@@ -524,8 +531,7 @@ export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, e
           break;
         }
         case "done":
-          c.map.set("execution_count", typeof ev.count === "number" ? ev.count : (c.executionCount ?? null));
-          c.map.delete("running");
+          sink.finish(typeof ev.count === "number" ? ev.count : undefined);
           finished = true;
           break;
       }
@@ -533,6 +539,31 @@ export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, e
     }
   });
   return finished;
+}
+
+/**
+ * Writes kernel events into the cell running under `execId`, in one transaction. Events for a cell
+ * that is not (or no longer) running under this id are dropped. `done` records the count and ends the
+ * run. Returns true when a `done` was applied.
+ */
+export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, events: KernelEvent[], st: WriteState): boolean {
+  const c = findCell(ydoc, cellId);
+  if (!c || c.running !== execId) return false;
+  const outs = c.map.get("outputs") as Y.Array<NbOutput> | undefined;
+  if (!(outs instanceof Y.Array)) return false;
+  return applyEventsTo(
+    ydoc,
+    {
+      outs,
+      active: () => true,
+      finish(count) {
+        c.map.set("execution_count", count !== undefined ? count : (c.executionCount ?? null));
+        c.map.delete("running");
+      },
+    },
+    events,
+    st,
+  );
 }
 
 // ---- .ipynb import ---------------------------------------------------------------------------------------

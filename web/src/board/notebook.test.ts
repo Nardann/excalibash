@@ -29,8 +29,10 @@ import {
 } from "./notebookDoc.ts";
 import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDoc, frameHeight, parseAnsi, stripAnsi, markdownFrame } from "./notebookRender.ts";
 import { NotebookRunner } from "./notebookRunner.ts";
-import { acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
+import { CodeRunner } from "./codeRunner.ts";
+import { acquireCode, acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
 import { AAD, box, newSymKey, unbox } from "../crypto.ts";
+import { beginCodeRun, clearCodeOutputs, finishCodeRun, initBlank, kernelTermOf as codeKernelTermOf, outputsOf, readMeta as readCodeMeta, readOutputs, setKernelTerm as setCodeKernelTerm } from "./codeDoc.ts";
 import { codePointsToUtf16, docMarkdown, mapComplete, utf16ToCodePoints, wordAt } from "./pyComplete.ts";
 import { copyDocState, sceneDocIds, sealDoc, type StoredDoc } from "./docCrypto.ts";
 import { LineSplitter } from "./kernelProtocol.ts";
@@ -829,6 +831,127 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   ok((await pend) === null && (await run.complete(code, pos)) === null, "complétion : session détachée, les requêtes en attente rendent vide");
   run.destroy();
   viewer.destroy();
+}
+
+// 12. A code window runs its buffer on a kernel: same executor rules as a notebook cell
+{
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  const listeners = new Set<L>();
+  const sent: any[] = [];
+  const emit = (ev: object) => {
+    const b = enc.encode(JSON.stringify(ev) + "\n");
+    for (const l of listeners) l.onData(b);
+  };
+  const port = {
+    subscribe: (_t: string, l: L) => (listeners.add(l), () => listeners.delete(l)),
+    input: (_t: string, d: Uint8Array) => void sent.push(...dec.decode(d).split("\n").filter(Boolean).map((l) => JSON.parse(l))),
+  };
+  const TERM = "C".repeat(22);
+  const { a, b } = pair();
+  initBlank(a, "run.py");
+  a.getText("content").insert(0, "print(6 * 7)\n");
+  ok(codeKernelTermOf(b) === null && !readCodeMeta(b.getMap("meta")).running, "code : un document neuf n'a ni noyau ni exécution");
+  b.getMap("meta").set("kernelTerm", "pas un identifiant");
+  ok(codeKernelTermOf(b) === null, "code : un identifiant de session invalide est ignoré");
+  setCodeKernelTerm(a, TERM);
+  ok(codeKernelTermOf(b) === TERM, "code : l'identifiant de la session de noyau est partagé par le document");
+  const ra = new CodeRunner(a, port, { canEdit: true });
+  const rb = new CodeRunner(b, port, { canEdit: true });
+  ra.attach(TERM);
+  rb.attach(TERM);
+  emit({ ev: "status", state: "idle" });
+  const r = ra.run(a.getText("content").toString());
+  const execId = r.ok ? r.execId : "";
+  ok(r.ok && sent.length === 1 && sent[0].op === "exec" && sent[0].code === "print(6 * 7)\n" && sent[0].id === execId, "code : la ligne exec porte le contenu actuel de la fenêtre");
+  ok(readCodeMeta(b.getMap("meta")).running === execId && !rb.run("x").ok && !ra.run("x").ok, "code : « en cours » est visible partout et on ne lance pas deux fois");
+  a.getText("content").insert(0, "# modifié après le lancement\n");
+  emit({ ev: "status", state: "busy" });
+  emit({ ev: "stream", id: execId, name: "stdout", text: "42\n" });
+  emit({ ev: "result", id: execId, count: 3, data: { "text/plain": "42" } });
+  emit({ ev: "done", id: execId, count: 3, status: "ok" });
+  emit({ ev: "status", state: "idle" });
+  await nap(250);
+  const outs = readOutputs(b);
+  ok(outs[0]?.text === "42\n" && outs[1]?.output_type === "execute_result" && outs.length === 2 && readCodeMeta(b.getMap("meta")).runCount === 3 && !readCodeMeta(b.getMap("meta")).running, "code : les sorties (« 42 »), le compteur et la fin arrivent chez l'autre participant, une seule fois");
+  ok(ra.localRuns.length === 0 && rb.localRuns.length === 0, "code : seul l'exécuteur écrivait");
+  // A second run replaces the outputs.
+  const r2 = rb.run("print('bis')");
+  ok(r2.ok && readOutputs(a).length === 0, "code : relancer efface les sorties précédentes, dans la même transaction");
+  const exec2 = r2.ok ? r2.execId : "";
+  emit({ ev: "stream", id: exec2, name: "stderr", text: "oups\n" });
+  emit({ ev: "error", id: exec2, ename: "ValueError", evalue: "x", traceback: ["\u001b[31mTraceback\u001b[0m"] });
+  emit({ ev: "done", id: exec2, count: 4, status: "error" });
+  await nap(250);
+  ok(readOutputs(a).map((o) => o.output_type).join() === "stream,error" && readCodeMeta(a.getMap("meta")).runCount === 4, "code : flux et erreur sont des sorties nbformat");
+  // The executor vanishes: another editor finalizes after 5 s.
+  const r3 = ra.run("while True: pass");
+  const exec3 = r3.ok ? r3.execId : "";
+  ra.destroy();
+  emit({ ev: "done", id: exec3, count: 5, status: "ok" });
+  await nap(100);
+  rb.sweep(Date.now() + 1000);
+  ok(readCodeMeta(b.getMap("meta")).running === exec3, "code : un exécuteur disparu laisse « en cours »…");
+  rb.sweep(Date.now() + 7000);
+  ok(!readCodeMeta(b.getMap("meta")).running && readCodeMeta(b.getMap("meta")).runCount === 5, "code : …puis un autre éditeur termine l'exécution (compteur du `done`)");
+  // Kernel gone while the executor runs.
+  const rc = new CodeRunner(a, port, { canEdit: true });
+  rc.attach(TERM);
+  emit({ ev: "status", state: "idle" });
+  const r4 = rc.run("1");
+  rc.terminalGone();
+  ok(r4.ok && !readCodeMeta(a.getMap("meta")).running && readOutputs(a).at(-1)!.output_type === "error" && !rc.run("1").ok, "code : la session s'arrête → l'exécution se termine par une erreur");
+  // Viewers do not run; clearing is refused during a run.
+  const rv = new CodeRunner(b, port, { canEdit: false });
+  rv.attach(TERM);
+  ok(!rv.run("1").ok && !rv.interrupt() && !rv.restart(), "code : un lecteur ne peut ni lancer, ni interrompre, ni redémarrer");
+  const c = new Y.Doc();
+  initBlank(c, "x.py");
+  ok(beginCodeRun(c, "e:1").ok && !beginCodeRun(c, "e:2").ok && !clearCodeOutputs(c) && finishCodeRun(c, "e:1", 1) && clearCodeOutputs(c), "code : une seule exécution à la fois, effacer les sorties seulement hors exécution");
+  c.getMap("meta").set("running", "x".repeat(65));
+  ok(!readCodeMeta(c.getMap("meta")).running, "code : un marquage d'exécution trop long est ignoré");
+  c.getArray("outputs").push([{ output_type: "stream", name: "stdout", text: "ok" }, { output_type: "weird" }, "x"]);
+  ok(readOutputs(c).length === 1, "code : seules les sorties bien formées sont lues");
+  rc.destroy();
+  rb.destroy();
+  rv.destroy();
+
+  // The code service, like a notebook's: a hidden window does not lose the outputs.
+  const handlers = new Map<string, any>();
+  const host = {
+    boardId: "board",
+    key: await newSymKey(),
+    canEdit: true,
+    currentEpoch: 1,
+    you: { name: "Alice", color: "#336699" },
+    docSend(m: any) {
+      if (m.t === "doc.sub") queueMicrotask(() => handlers.get(m.doc)?.onMessage({ t: "doc.state", ups: [] }));
+      return true;
+    },
+    docRegister(doc: string, h: any) {
+      handlers.set(doc, h);
+      queueMicrotask(() => h.onOpen());
+      return () => handlers.delete(doc);
+    },
+    on: () => () => {},
+  };
+  let closeBoard: (() => void) | undefined;
+  const env: ServiceEnv = { port, watchTerminals: () => () => {}, terminalOver: () => false, onClose: (fn) => ((closeBoard = fn), () => (closeBoard = undefined)) };
+  const win = acquireCode(host, env, "R".repeat(22), { idleMs: 150 });
+  await win.doc.synced;
+  initBlank(win.doc.ydoc, "svc.py");
+  setCodeKernelTerm(win.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  const rr = win.runner.run("print('svc')");
+  win.release();
+  emit({ ev: "stream", id: rr.ok ? rr.execId : "", name: "stdout", text: "svc\n" });
+  emit({ ev: "done", id: rr.ok ? rr.execId : "", count: 1, status: "ok" });
+  await nap(250);
+  ok(readOutputs(win.doc.ydoc)[0]?.text === "svc\n" && !readCodeMeta(win.doc.ydoc.getMap("meta")).running && outputsOf(win.doc.ydoc).length === 1, "code : fenêtre masquée en pleine exécution, les sorties arrivent quand même (service du tableau)");
+  await nap(400);
+  ok(win.disposed, "code : service libéré une fois inactif");
+  closeBoard?.();
 }
 
 if (failures) {

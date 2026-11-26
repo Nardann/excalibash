@@ -959,8 +959,6 @@ function Editor({ node }: { node: Node }) {
   const updateTerminalRef = useRef(updateTerminal);
   updateTerminalRef.current = updateTerminal;
 
-  const codeHost = useMemo(() => ({ theme, confirm: confirmDialog, toast }), [theme]);
-
   /** What a notebook window may ask of the app: the machine it could run a kernel on, and starting one (after asking). */
   const notebookHost = useMemo<NotebookHost>(() => {
     const machineOf = async (nodeId: string): Promise<Machine | null> => {
@@ -975,7 +973,7 @@ function Editor({ node }: { node: Node }) {
         const m = await machineOf(nodeId);
         return m ? { name: m.name } : null;
       },
-      startKernel: async (nodeId, cwd) => {
+      startKernel: async (nodeId, cwd, purpose) => {
         const m = await machineOf(nodeId);
         if (!m) {
           toast("Machine introuvable, ou tu n'y as pas accès");
@@ -987,7 +985,7 @@ function Editor({ node }: { node: Node }) {
         }
         const ok = await confirmDialog({
           title: `Démarrer un noyau Python sur ${m.name} ?`,
-          text: `Le noyau exécute du code Python avec les droits de l'agent de ${m.name}${cwd ? `, dans ${cwd}` : ""}. Tous les éditeurs de ce tableau pourront y exécuter des cellules, comme dans un shell partagé. Il faut ipykernel et jupyter_client sur la machine.`,
+          text: `Le noyau exécute du code Python avec les droits de l'agent de ${m.name}${cwd ? `, dans ${cwd}` : ""}. Tous les éditeurs de ce tableau pourront y exécuter ${purpose === "code" ? "du code Python" : "des cellules"}, comme dans un shell partagé. Il faut ipykernel et jupyter_client sur la machine.`,
           confirm: "Démarrer",
         });
         if (!ok) return null;
@@ -1035,7 +1033,8 @@ function Editor({ node }: { node: Node }) {
         return (
           <Suspense fallback={<div className="term code"><div className="term-body"><div className="term-veil">Chargement de l'éditeur…</div></div></div>}>
             <CodeEmbed
-              host={codeHost}
+              host={notebookHost}
+              nodeId={nid}
               session={session}
               docId={codeId}
               active={active}
@@ -1145,7 +1144,7 @@ function Editor({ node }: { node: Node }) {
         />
       );
     },
-    [session, editor, updateTerminal, codeHost],
+    [session, editor, updateTerminal, notebookHost],
   );
 
   const validateEmbeddable = useCallback((link: string) => (link.startsWith(LINK_BASE) ? true : undefined), []);
