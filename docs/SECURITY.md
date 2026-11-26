@@ -217,6 +217,19 @@ chiffrés d'éléments qu'il détient déjà (`{id, v, n, c}`), tels quels.
   `known_hosts`, à côté de la configuration de l'agent ; une clé différente bloque la connexion.
   La vérification peut être désactivée par session (option avancée, déconseillée). Les mots de passe
   se tapent dans le terminal : ils voyagent chiffrés jusqu'à l'agent et ne sont jamais stockés.
+- **Rebonds** : la cible peut passer par une chaîne de rebonds SSH (au plus 8, comme `ssh -J`). La liste est
+  scellée avec la cible, sous `machineAuth` : le serveur ne peut ni la lire ni la changer. L'agent ouvre une
+  connexion SSH vers le premier rebond, puis un canal `direct-tcpip` vers le suivant à travers elle, et ainsi de
+  suite ; la cible (SSH, Telnet ou TCP) est jointe depuis le dernier. Chaque rebond est authentifié dans le
+  terminal (les invites indiquent l'hôte qui les pose) et sa clé d'hôte est épinglée comme pour une cible. Les
+  clés sont retenues par adresse (`hôte:port`), quel que soit le chemin : une même adresse jointe par deux rebonds
+  différents (deux labos) partage son épingle, et un rebond malveillant pourrait faire épingler une fausse clé
+  pour une adresse encore jamais vue. La vérification de clé d'hôte ne peut pas être désactivée sur un rebond
+  depuis les données du tableau. Un rebond voit l'adresse du saut suivant ; il ne
+  voit pas le contenu d'une session SSH qui le traverse, mais voit en clair une session Telnet ou TCP qu'il relaie
+  vers la cible.
+- Un rebond proposé depuis l'icône d'un équipement vient des données du tableau (que tout éditeur peut écrire) :
+  il pré-remplit le formulaire, que l'utilisateur relit et valide, comme la cible d'un équipement.
 - L'option « Équipement ancien » n'ajoute des algorithmes faibles (`diffie-hellman-group1-sha1`,
   `ssh-rsa`, `ssh-dss`, CBC, `hmac-sha1`) qu'à la session qui la demande.
 

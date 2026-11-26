@@ -2145,6 +2145,24 @@ html.dark .term.broadcasting {
   align-self: flex-start;
 }
 
+/* SSH jump hosts of the Telnet / SSH form */
+.hops .hop-row {
+  display: grid;
+  grid-template-columns: 16px 1fr 64px 110px auto;
+  gap: 6px;
+  align-items: center;
+  font-weight: 400;
+}
+.hops .hop-arrow {
+  color: var(--muted);
+}
+.hops .hop-legacy {
+  margin: 4px 0 0 22px;
+}
+.hops .hop-add {
+  align-self: flex-start;
+}
+
 .term-xfer {
   display: inline-flex;
   align-items: center;

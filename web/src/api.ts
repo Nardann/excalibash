@@ -138,4 +138,9 @@ export type RemoteTarget = {
   legacyHostKey?: boolean;
   legacyCiphers?: boolean;
   hostKeyCheck?: "tofu" | "off";
+  /** SSH jump hosts, the first one reached from the machine (like ssh -J); the target is reached from the last one. */
+  via?: RemoteHop[];
 };
+
+/** One SSH jump host on the way to a device. */
+export type RemoteHop = Omit<RemoteTarget, "kind" | "via">;

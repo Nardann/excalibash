@@ -44,10 +44,30 @@ function refs<T extends string>(v: unknown, field: T): (Geometry & Record<T, str
   return v.filter((r) => r && typeof r === "object" && str(r[field])).map((r) => ({ ...geometry(r), [field]: r[field] }) as Geometry & Record<T, string>);
 }
 const KINDS_OK = ["telnet", "ssh", "raw"];
+const bool = (v: unknown) => v === true;
+/** A jump host as stored on the board (any editor could have written it): plain fields only. */
+function hopRef(h: any) {
+  if (!h || typeof h !== "object" || !str(h.host) || !Number.isInteger(h.port)) return undefined;
+  return {
+    host: h.host as string,
+    port: h.port as number,
+    ...(str(h.user) !== undefined ? { user: h.user as string } : {}),
+    ...(bool(h.legacyKex) ? { legacyKex: true } : {}),
+    ...(bool(h.legacyHostKey) ? { legacyHostKey: true } : {}),
+    ...(bool(h.legacyCiphers) ? { legacyCiphers: true } : {}),
+    // Never "hostKeyCheck: off" from the board: the form does not show it, so an editor could
+    // otherwise turn off the host key check of someone else's hop without them seeing it.
+  };
+}
 function remoteRef(v: any): RemoteRef | undefined {
   const t = v?.target;
   if (!str(v?.machineId) || !t || !KINDS_OK.includes(t.kind) || !str(t.host) || !Number.isInteger(t.port)) return undefined;
-  return { machineId: v.machineId, target: { kind: t.kind, host: t.host, port: t.port, ...(str(t.user) !== undefined ? { user: t.user } : {}) } };
+  const via = Array.isArray(t.via) ? t.via.map(hopRef) : [];
+  if (via.length > 8 || via.some((h: unknown) => !h)) return undefined;
+  return {
+    machineId: v.machineId,
+    target: { kind: t.kind, host: t.host, port: t.port, ...(str(t.user) !== undefined ? { user: t.user } : {}), ...(via.length ? { via } : {}) },
+  };
 }
 const normalized = new WeakMap<object, NodeData>();
 export const nodeDataOf = (el: El | null | undefined): NodeData | undefined => {

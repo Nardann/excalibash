@@ -26,7 +26,13 @@ import { PointTrash } from "../board/PointTrash.tsx";
 import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkStatus.ts";
 import { exportDiagram, exportTopology, type TopologyFormat } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
-import type { RemoteTarget } from "../api.ts";
+import type { RemoteHop, RemoteTarget } from "../api.ts";
+
+/** A device's target as a jump host, to bounce through it (its options carried over). */
+const hopFrom = (t: RemoteTarget): RemoteHop => {
+  const { kind: _k, via: _v, ...hop } = t;
+  return hop;
+};
 import {
   LINK_BASE,
   TERM_H,
@@ -128,8 +134,10 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
-    /** A Telnet / SSH device: no agent on it, so nothing can be reached through it. */
+    /** A Telnet / SSH device: no agent on it, no site through it. */
     remote: boolean;
+    /** An SSH device: other devices can be reached by bouncing through it. */
+    bounce: boolean;
   } | null>(null);
   const selTermRef = useRef(selTerm);
   selTermRef.current = selTerm;
@@ -282,7 +290,20 @@ function Editor({ node }: { node: Node }) {
     kind: "remote" | "web";
     /** A new session to a device icon's own device: the Telnet / SSH form alone, prefilled. */
     device?: RemoteRef;
+    /** A session bouncing through an SSH device icon: the form with its hops prefilled. */
+    bounce?: RemoteRef;
   } | null>(null);
+
+  /**
+   * The "add" button of an icon: Telnet / SSH or a site for a machine; for an SSH device, a
+   * session that bounces through it (its own hops, then the device). Nothing for other devices.
+   */
+  const addOnNode = (nodeId: string) => {
+    const x = excalidrawRef.current;
+    const rem = x ? nodeDataOf(findEl(x, nodeId))?.remote : undefined;
+    if (!rem) setAccess({ nodeId, kind: "remote" });
+    else if (rem.target.kind === "ssh") setAccess({ nodeId, kind: "remote", bounce: rem });
+  };
 
   const newShell = useCallback(
     async (machine: Machine, nodeId?: string, target?: RemoteTarget) => {
@@ -299,7 +320,8 @@ function Editor({ node }: { node: Node }) {
           // A device gets an icon of its own, like a machine with an agent; sessions to the
           // same device (another port, user or protocol) gather on that icon.
           const rem = nodeDataOf(owner)?.remote;
-          if (owner && rem && rem.machineId === machine.id && rem.target.host === target.host) addShell(x, owner.id, info.id);
+          const route = (t: RemoteTarget) => JSON.stringify([...(t.via ?? []).map((h) => [h.host, h.port]), t.host]);
+          if (owner && rem && rem.machineId === machine.id && route(rem.target) === route(target)) addShell(x, owner.id, info.id);
           else createNode(x, info.id, { near: owner, title: target.host, remote: { machineId: machine.id, target } });
         } else if (owner) addShell(x, owner.id, info.id, machine.id, machine.name);
         else createNode(x, info.id, { machineId: machine.id, machineName: machine.name });
@@ -558,6 +580,7 @@ function Editor({ node }: { node: Node }) {
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
               remote: !!nd?.remote,
+              bounce: nd?.remote?.target.kind === "ssh",
             }
           : null;
       setSelTerm((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
@@ -586,6 +609,7 @@ function Editor({ node }: { node: Node }) {
               shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
               webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
               remote: !!nd.remote,
+              bounce: nd.remote?.target.kind === "ssh",
               machineName: nd.machineName,
             };
           })
@@ -929,7 +953,7 @@ function Editor({ node }: { node: Node }) {
               if (x && win) hideShell(x, win.id);
             }}
             onToggleAll={(nodeId) => excalidrawRef.current && toggleAll(excalidrawRef.current, nodeId)}
-            onAdd={(nodeId) => setAccess({ nodeId, kind: "remote" })}
+            onAdd={addOnNode}
             onAddShell={(nodeId, anchor) => void newShellOnNode(nodeId, anchor)}
             onKill={(nodeId, kind, id) => {
               const x = excalidrawRef.current;
@@ -992,9 +1016,12 @@ function Editor({ node }: { node: Node }) {
                 <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
                   <TerminalSquare size={14} />
                 </button>
-                {/* A device has no agent: no hop to another device or site through it. */}
-                {!selTerm.remote && (
-                  <button title="Ajouter : Telnet / SSH vers un équipement, ou site web de la machine" onClick={() => setAccess({ nodeId: selTerm.id, kind: "remote" })}>
+                {/* A device has no agent: only an SSH one can be bounced through, and no site. */}
+                {(!selTerm.remote || selTerm.bounce) && (
+                  <button
+                    title={selTerm.remote ? "Rebondir depuis cet équipement (SSH) vers un autre" : "Ajouter : Telnet / SSH vers un équipement, ou site web de la machine"}
+                    onClick={() => addOnNode(selTerm.id)}
+                  >
                     <Plus size={14} />
                   </button>
                 )}
@@ -1092,7 +1119,7 @@ function Editor({ node }: { node: Node }) {
             setNodeMenu(null);
           }}
           onNewAccess={() => {
-            setAccess({ nodeId: nodeMenu.nodeId, kind: "remote" });
+            addOnNode(nodeMenu.nodeId);
             setNodeMenu(null);
           }}
         />
@@ -1103,9 +1130,12 @@ function Editor({ node }: { node: Node }) {
           const remote = (bare?: boolean) => (
             <RemoteForm
               bare={bare}
-              defaultHost={device?.target.host}
               defaultTarget={access.device?.target}
-              defaultMachineId={access.device?.machineId || (access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)}
+              defaultHost={access.bounce ? "" : device?.target.host}
+              defaultVia={access.bounce && [...(access.bounce.target.via ?? []), hopFrom(access.bounce.target)]}
+              defaultMachineId={
+                (access.bounce ?? access.device)?.machineId || (access.nodeId && nodeMachineId(access.nodeId)) || localStorage.getItem(LAST_MACHINE)
+              }
               onClose={() => setAccess(null)}
               onCreate={(machine, target) => {
                 setAccess(null);
@@ -1114,7 +1144,7 @@ function Editor({ node }: { node: Node }) {
             />
           );
           // No node yet (machine picker): the session creates its node, a site needs one.
-          if (!access.nodeId || access.device) return remote();
+          if (!access.nodeId || access.device || access.bounce) return remote();
           const nodeId = access.nodeId;
           return (
             <AccessDialog kind={access.kind} onKind={(kind) => setAccess({ nodeId, kind })} onClose={() => setAccess(null)}>
@@ -1406,10 +1436,16 @@ function NodeMenu(p: {
       <button className="menu-item" onClick={p.onNewShell}>
         <Plus size={16} /> Nouveau shell
       </button>
-      {!data.remote && (
+      {!data.remote ? (
         <button className="menu-item" onClick={p.onNewAccess}>
           <Cable size={16} /> Telnet / SSH ou site web…
         </button>
+      ) : (
+        data.remote.target.kind === "ssh" && (
+          <button className="menu-item" onClick={p.onNewAccess}>
+            <Cable size={16} /> Rebondir vers un autre équipement…
+          </button>
+        )
       )}
       <button className="menu-item" onClick={p.onCustomize}>
         <Palette size={16} /> Icône et libellé…

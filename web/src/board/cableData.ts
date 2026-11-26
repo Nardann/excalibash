@@ -49,7 +49,7 @@ function endData(v: any): EndInfo | undefined {
 const isVlan = (k: string) => /^\d{1,4}$/.test(k) && +k >= 1 && +k <= 4094;
 function vlanIpsData(v: any): Record<string, string> | undefined {
   if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null);
   for (const [k, ip] of Object.entries(v).slice(0, 128)) if (isVlan(k) && s(ip)) out[k] = (ip as string).slice(0, 64);
   return Object.keys(out).length ? out : undefined;
 }
@@ -94,9 +94,16 @@ export const IP_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1
  * then one line per VLAN with its address ("VLAN 10 10.0.10.1/24").
  */
 export function vlanLines(i?: EndInfo): string[] {
-  if (!i?.vlans) return [];
+  const { plain, withIp } = vlanParts(i);
+  return [...(plain.length ? [`VLAN ${plain.join(", ")}`] : []), ...withIp.map(([v, ip]) => `VLAN ${v} ${ip}`)];
+}
+
+/** The VLANs of a cable end: those without an address, and those with one (as [vlan, ip]). */
+export function vlanParts(i?: EndInfo): { plain: string[]; withIp: [string, string][] } {
+  if (!i?.vlans) return { plain: [], withIp: [] };
   const parts = (parseVlans(i.vlans) ?? i.vlans).split(",").map((p) => p.trim()).filter(Boolean);
+  // Own numeric keys only: a VLAN written "constructor" must not find Object.prototype.
   const ips = i.vlanIps ?? {};
-  const plain = parts.filter((p) => !ips[p]);
-  return [...(plain.length ? [`VLAN ${plain.join(", ")}`] : []), ...parts.filter((p) => ips[p]).map((p) => `VLAN ${p} ${ips[p]}`)];
+  const ipOf = (p: string) => (isVlan(p) && Object.hasOwn(ips, p) && typeof ips[p] === "string" ? ips[p] : undefined);
+  return { plain: parts.filter((p) => !ipOf(p)), withIp: parts.filter((p) => ipOf(p)).map((p) => [p, ipOf(p)!]) };
 }

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { Modal, toast } from "../components/ui.tsx";
-import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, type End, type EndInfo } from "./cables.ts";
+import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, vlanParts, type End, type EndInfo } from "./cables.ts";
 import { FileClient, IFACE_RE, filterProblem, type Signal } from "./fileTransfer.ts";
 import { saveBlob, exportName } from "./termTools.ts";
 import type { LinkState, LinkStates } from "./linkStatus.ts";
@@ -148,11 +148,16 @@ export function CableOverlay({
                   ) : (
                     <span>{i!.ip}</span>
                   ))}
-                {vlanLines(i).map((l) => (
-                  <span key={l} className="vlan">
-                    {l}
-                  </span>
-                ))}
+                {vlanParts(i).plain.length > 0 && <span className="vlan">VLAN {vlanParts(i).plain.join(", ")}</span>}
+                {vlanParts(i).withIp.map(([v, vip]) => {
+                  const l = links[`${key}:v${v}`];
+                  return (
+                    <span key={v} className="vlan cable-ip" title={l ? `VLAN ${v} : ${linkText(vip, l)}` : undefined}>
+                      {l && <span className={`link-dot ${l.up ? "up" : "down"}`} />}
+                      VLAN {v} {vip}
+                    </span>
+                  );
+                })}
               </div>
             )}
             {editable && m.selected && (
@@ -164,7 +169,10 @@ export function CableOverlay({
         );
       })}
       {mids.map((m) => {
-        const states = (["a", "b"] as End[]).map((e) => links[`${m.cableId}:${e}`]).filter((l): l is LinkState => !!l);
+        // Every address of the cable counts: the ends' IPs and their VLAN interfaces.
+        const states = Object.entries(links)
+          .filter(([k]) => k.startsWith(`${m.cableId}:`))
+          .map(([, l]) => l);
         if (!states.length) return null;
         const up = states.filter((l) => l.up).length;
         const state = up === states.length ? "up" : up === 0 ? "down" : "mixed";
@@ -182,7 +190,8 @@ type VlanRow = { vlan: string; ip: string };
 
 function rowsOf(info?: EndInfo): VlanRow[] {
   const parts = info?.vlans ? (parseVlans(info.vlans) ?? info.vlans).split(",").map((p) => p.trim()).filter(Boolean) : [];
-  return parts.map((vlan) => ({ vlan, ip: info?.vlanIps?.[vlan] ?? "" }));
+  const ips = info?.vlanIps ?? {};
+  return parts.map((vlan) => ({ vlan, ip: Object.hasOwn(ips, vlan) && typeof ips[vlan] === "string" ? ips[vlan] : "" }));
 }
 
 const isSingleVlan = (v: string) => /^\d{1,4}$/.test(v.trim());

@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 const (
 	dialTimeout   = 10 * time.Second
+	maxHops       = 8
 	maxInputQueue = 1 << 20
 	maxLineLen    = 1024
 )
@@ -43,6 +45,9 @@ type target struct {
 	LegacyHostKey bool   `json:"legacyHostKey"`
 	LegacyCiphers bool   `json:"legacyCiphers"`
 	HostKeyCheck  string `json:"hostKeyCheck"`
+	// Via: SSH jump hosts, first one reached from this machine (like ssh -J). The target is
+	// reached from the last one, whatever its kind.
+	Via []target `json:"via"`
 }
 
 func badTarget(why string) error { return fmt.Errorf("%w : %s", errTarget, why) }
@@ -55,31 +60,57 @@ func parseTarget(raw json.RawMessage) (*target, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, badTarget("format incorrect")
 	}
+	if err := t.validate(); err != nil {
+		return nil, err
+	}
+	if len(t.Via) > maxHops {
+		return nil, badTarget("trop de rebonds")
+	}
+	for i := range t.Via {
+		h := &t.Via[i]
+		if h.Kind == "" {
+			h.Kind = "ssh"
+		}
+		if h.Kind != "ssh" {
+			return nil, badTarget("un rebond se fait en SSH")
+		}
+		if len(h.Via) > 0 {
+			return nil, badTarget("rebond imbriqué")
+		}
+		if err := h.validate(); err != nil {
+			return nil, err
+		}
+	}
+	return &t, nil
+}
+
+// validate checks and completes one hop or target.
+func (t *target) validate() error {
 	switch t.Kind {
 	case "telnet", "ssh", "raw":
 	default:
-		return nil, badTarget("type de connexion inconnu")
+		return badTarget("type de connexion inconnu")
 	}
 	if !targetHost.MatchString(t.Host) {
-		return nil, badTarget("adresse d'hôte incorrecte")
+		return badTarget("adresse d'hôte incorrecte")
 	}
 	if t.Port == 0 && t.Kind != "raw" {
 		t.Port = map[string]int{"telnet": 23, "ssh": 22}[t.Kind]
 	}
 	if t.Port < 1 || t.Port > 65535 {
-		return nil, badTarget("port hors de 1 à 65535")
+		return badTarget("port hors de 1 à 65535")
 	}
 	if !targetUser.MatchString(t.User) {
-		return nil, badTarget("nom d'utilisateur incorrect")
+		return badTarget("nom d'utilisateur incorrect")
 	}
 	switch t.HostKeyCheck {
 	case "":
 		t.HostKeyCheck = "tofu"
 	case "tofu", "off":
 	default:
-		return nil, badTarget("vérification de clé d'hôte inconnue")
+		return badTarget("vérification de clé d'hôte inconnue")
 	}
-	return &t, nil
+	return nil
 }
 
 func (t target) addr() string { return net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) }
@@ -111,7 +142,7 @@ func startRemote(t target, cols, rows uint16) *remote {
 	}
 	go func() {
 		hostname, _ := os.Hostname()
-		r.printf("\x1b[90mConnexion à %s (%s) depuis %s…\x1b[0m\r\n", t.addr(), t.Kind, hostname)
+		r.printf("\x1b[90mConnexion à %s (%s) depuis %s%s…\x1b[0m\r\n", t.addr(), t.Kind, hostname, t.viaText())
 		var code int
 		switch t.Kind {
 		case "telnet":
@@ -147,12 +178,26 @@ func (r *remote) wait() int { <-r.ended; return r.code }
 func (r *remote) close()    { r.out.Close() }
 func (r *remote) pid() int  { return 0 }
 
-func (r *remote) describe() string {
-	if r.t.User != "" {
-		return r.t.Kind + " " + r.t.User + "@" + r.t.addr()
+func (t target) userAddr() string {
+	if t.User != "" {
+		return t.User + "@" + t.addr()
 	}
-	return r.t.Kind + " " + r.t.addr()
+	return t.addr()
 }
+
+// viaText lists the jump hosts (" par a, b"), or nothing.
+func (t target) viaText() string {
+	if len(t.Via) == 0 {
+		return ""
+	}
+	hops := make([]string, len(t.Via))
+	for i, h := range t.Via {
+		hops[i] = h.userAddr()
+	}
+	return " par " + strings.Join(hops, ", ")
+}
+
+func (r *remote) describe() string { return r.t.Kind + " " + r.t.userAddr() + r.t.viaText() }
 
 func (r *remote) resize(cols, rows uint16) {
 	r.mu.Lock()
@@ -181,17 +226,53 @@ func (r *remote) printf(format string, args ...any) {
 	fmt.Fprintf(r.outW, format, args...)
 }
 
-// dial opens the TCP connection, closed as soon as the session is killed.
+// dial opens the connection to the target, through the jump hosts if any. Everything it opens
+// is closed as soon as the session ends or is killed.
 func (r *remote) dial() (net.Conn, bool) {
+	if len(r.t.Via) == 0 {
+		return r.dialTCP(r.t.addr())
+	}
+	conn, ok := r.dialTCP(r.t.Via[0].addr())
+	if !ok {
+		return nil, false
+	}
+	for i, h := range r.t.Via {
+		r.printf("\x1b[90mRebond %d/%d : %s\x1b[0m\r\n", i+1, len(r.t.Via), h.userAddr())
+		client, ok := r.sshClient(conn, h)
+		if !ok {
+			return nil, false
+		}
+		context.AfterFunc(r.ctx, func() { client.Close() })
+		next := r.t.addr()
+		if i+1 < len(r.t.Via) {
+			next = r.t.Via[i+1].addr()
+		}
+		ctx, cancel := context.WithTimeout(r.ctx, dialTimeout)
+		c, err := client.DialContext(ctx, "tcp", next)
+		cancel()
+		if err != nil {
+			if r.ctx.Err() == nil {
+				r.printf("%s ne peut pas joindre %s : %v\r\n", h.Host, next, err)
+			}
+			return nil, false
+		}
+		context.AfterFunc(r.ctx, func() { c.Close() })
+		conn = c
+	}
+	return conn, true
+}
+
+// dialTCP opens a TCP connection from this machine.
+func (r *remote) dialTCP(addr string) (net.Conn, bool) {
 	d := net.Dialer{Timeout: dialTimeout}
-	conn, err := d.DialContext(r.ctx, "tcp", r.t.addr())
+	conn, err := d.DialContext(r.ctx, "tcp", addr)
 	if err != nil {
 		if r.ctx.Err() == nil {
 			var op *net.OpError
 			if errors.As(err, &op) {
 				err = op.Err
 			}
-			r.printf("Impossible de joindre %s : %v\r\n", r.t.addr(), err)
+			r.printf("Impossible de joindre %s : %v\r\n", addr, err)
 		}
 		return nil, false
 	}
