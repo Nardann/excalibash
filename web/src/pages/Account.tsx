@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
 import { fr } from "date-fns/locale";
-import { Bell, EyeOff, Fingerprint, KeyRound, Loader2, MonitorSmartphone, Trash2 } from "lucide-react";
+import { Bell, Check, EyeOff, Fingerprint, KeyRound, Loader2, MonitorSmartphone, Palette, Trash2 } from "lucide-react";
 import { api, type User } from "../api.ts";
 import { useAuth, useKeys, useUser } from "../auth.tsx";
 import { changePassword, forgetKeys } from "../account.ts";
 import { deriveAccountKeys, fingerprint } from "../crypto.ts";
-import { confirmDialog, copyText, toast } from "../components/ui.tsx";
+import { confirmDialog, copyText, toast, useTheme } from "../components/ui.tsx";
+import { CUSTOM_ID, THEMES, customFrom, customTheme, themeById, type Base, type CustomColors, type Mode, type ThemeDef } from "../themes.ts";
 
 type NotifyEvent = "itemDeleted" | "itemShared" | "accessRevoked" | "itemTransferred" | "newLogin";
 type NotifyPrefs = Record<NotifyEvent, boolean>;
@@ -167,6 +168,8 @@ export function Account() {
           </button>
         </div>
       </div>
+
+      <Appearance />
 
       <div className="panel">
         <div className="panel-head">
@@ -366,5 +369,132 @@ export function Account() {
         <Link to="/confidentialite">Confidentialité</Link>
       </p>
     </>
+  );
+}
+
+/** Themes of the interface and terminals: one light, one dark, kept in this browser. */
+function Appearance() {
+  const { mode, setMode, slots, setSlot, custom, setCustom } = useTheme();
+  const modes: [Mode, string][] = [
+    ["light", "Clair"],
+    ["dark", "Sombre"],
+    ["auto", "Automatique (système)"],
+  ];
+  const card = (t: ThemeDef, base: Base) => {
+    const on = slots[base] === t.id;
+    const v = (k: string, fallback: string) => t.vars[k] ?? fallback;
+    const dark = t.base === "dark";
+    return (
+      <button
+        key={t.id}
+        type="button"
+        className={`theme-card ${on ? "on" : ""}`}
+        aria-pressed={on}
+        title={t.name}
+        onClick={() => {
+          setSlot(base, t.id);
+          // Picking a theme shows it, unless the system decides which one is shown.
+          if (mode !== "auto") setMode(base);
+        }}
+      >
+        <span className="theme-swatch" style={{ background: v("bg", dark ? "#0a0a0a" : "#f8fafc") }}>
+          <span className="theme-swatch-panel" style={{ background: v("surface", dark ? "#171717" : "#ffffff"), borderColor: v("line", dark ? "#262626" : "#e2e8f0") }}>
+            <span style={{ background: v("text", dark ? "#fafafa" : "#0f172a") }} />
+            <span style={{ background: v("muted", "#94a3b8") }} />
+            <span className="theme-swatch-brand" style={{ background: v("brand", dark ? "#6366f1" : "#4f46e5") }} />
+          </span>
+          <span className="theme-swatch-term" style={{ background: t.term.background }}>
+            {[t.term.green, t.term.blue, t.term.red, t.term.yellow].map((c, i) => (
+              <span key={i} style={{ background: c }} />
+            ))}
+          </span>
+        </span>
+        <span className="theme-name">
+          {on && <Check size={13} />} {t.name}
+        </span>
+      </button>
+    );
+  };
+  const group = (base: Base, title: string) => {
+    const mine = customTheme(custom[base], base);
+    return (
+      <>
+        <div className="theme-group">{title}</div>
+        <div className="theme-grid">
+          {THEMES.filter((t) => t.base === base).map((t) => card(t, base))}
+          {card(mine, base)}
+        </div>
+        {slots[base] === CUSTOM_ID[base] && <CustomEditor base={base} colors={custom[base]} onChange={(c) => setCustom(base, c)} />}
+      </>
+    );
+  };
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h3>
+          <Palette size={16} /> Apparence
+        </h3>
+      </div>
+      <div className="row" style={{ display: "block" }}>
+        <div className="sub" style={{ marginBottom: 10 }}>
+          Choisis ton thème clair et ton thème sombre (interface et terminaux, gardés dans ce navigateur). Le bouton soleil / lune passe de l'un à l'autre.
+        </div>
+        <div className="theme-custom-base" role="radiogroup" aria-label="Thème affiché">
+          {modes.map(([m, label]) => (
+            <button key={m} type="button" role="radio" aria-checked={mode === m} className={`btn btn-sm ${mode === m ? "btn-primary" : ""}`} onClick={() => setMode(m)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {group("light", "Thème clair")}
+        {group("dark", "Thème sombre")}
+      </div>
+    </div>
+  );
+}
+
+const CUSTOM_FIELDS: [keyof CustomColors, string][] = [
+  ["bg", "Fond"],
+  ["surface", "Panneaux"],
+  ["text", "Texte"],
+  ["brand", "Accent"],
+  ["termBg", "Fond des terminaux"],
+  ["termFg", "Texte des terminaux"],
+];
+
+/** The colors of a custom theme, applied as they are picked. */
+function CustomEditor({ base, colors, onChange }: { base: Base; colors: CustomColors; onChange: (c: CustomColors) => void }) {
+  return (
+    <div className="theme-custom">
+      <div className="theme-custom-grid">
+        {CUSTOM_FIELDS.map(([k, label]) => (
+          <label key={k} className="theme-color">
+            <input type="color" value={colors[k]} onChange={(e) => onChange({ ...colors, [k]: e.target.value })} />
+            <span>
+              {label}
+              <small className="mono">{colors[k]}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+      <label className="theme-from">
+        Partir des couleurs de
+        <select
+          className="select"
+          value=""
+          onChange={(e) => {
+            const t = themeById(e.target.value);
+            if (t) onChange(customFrom(t));
+          }}
+        >
+          <option value="">un thème…</option>
+          {THEMES.filter((t) => t.base === base).map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
   );
 }

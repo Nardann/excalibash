@@ -122,6 +122,12 @@ function Editor({ node }: { node: Node }) {
   const { refresh } = useLibrary();
   const navigate = useNavigate();
   const { theme, toggle } = useTheme();
+  // Excalidraw's own theme switch (its menu) changes ours. Only a change of Excalidraw's theme
+  // counts: right after our button, Excalidraw still reports the old one for a moment, and
+  // comparing it with ours would switch straight back (issue #33).
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+  const excalidrawTheme = useRef<string>(theme);
   const session = useMemo(() => new BoardSession(node.id, node.key!, node.epoch, node.role), [node.id, node.key, node.epoch, node.role]);
   const [excalidraw, setExcalidraw] = useState<ExcalidrawImperativeAPI | null>(null);
   const [conn, setConn] = useState<ConnState>("connecting");
@@ -572,7 +578,10 @@ function Editor({ node }: { node: Node }) {
           maintainCables(xc);
         });
       }
-      if (appState.theme !== theme) toggle();
+      if (appState.theme !== excalidrawTheme.current) {
+        excalidrawTheme.current = appState.theme;
+        if (appState.theme !== themeRef.current) toggle();
+      }
       const selected = Object.keys(appState.selectedElementIds);
       const el = selected.length === 1 ? elements.find((e) => e.id === selected[0]) : undefined;
       const tid = terminalIdOf(el) ?? ((el?.customData as any)?.webId as string | undefined);
