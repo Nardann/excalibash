@@ -242,7 +242,9 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   - le serveur crée un rendez-vous de 10 minutes, à usage unique, avec un code de 6 caractères ;
   - l'agent **génère sa propre paire X25519 sur la machine** et dépose sa clé publique ;
   - le navigateur du propriétaire affiche l'empreinte de cette clé, que l'humain compare avec celle affichée par la machine ;
-  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé (`seal(agentPub, machineAuth, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
+  - la machine affiche aussi un **code de confirmation** de 8 caractères (≈ 40 bits), que l'humain recopie dans le navigateur ; il ne passe jamais par le serveur ;
+  - après validation seulement, le navigateur scelle un `machineAuth` aléatoire pour cette clé, suivi d'une étiquette `HMAC-SHA256(confirmation, machineAuth ‖ agentPub)` (`seal(agentPub, machineAuth ‖ tag, "eb:pair:<code>")`), et l'agent l'enregistre dans `~/.config/excalibash/agent.json` (0600) ;
+  - le sceau seul est anonyme : le serveur connaît la clé publique de l'agent et le code, il pourrait donc sceller un `machineAuth` de son choix. Sans le code de confirmation, son étiquette est fausse et l'agent annule l'appairage. Il n'a qu'un essai par appairage ;
   - un serveur qui substituerait sa propre clé ferait apparaître une empreinte différente de celle de l'écran de la machine. Deviner un code n'apporte rien d'autre que ce même risque : le dépôt de clé est limité en débit, et un code n'accepte qu'une seule machine.
 - Chaque terminal a une clé `K_t` générée par le navigateur **de qui l'ouvre**, qui doit détenir `machineAuth` (le propriétaire de la machine, ou une personne à qui il l'a partagée).
   Le serveur stocke :
@@ -593,9 +595,12 @@ Un tableau a 20 liens au plus.
 - **Suppression d'un compte par un admin** : elle ne déclenche pas de rotation sur les dossiers que
   ce compte partageait.
 - **Sites tunnelisés sur une même origine** : tous les tunnels d'un navigateur partagent l'origine
-  proxy, où le Service Worker garde leurs clés. Un site piégé, ouvert dans un tunnel (par exemple
-  depuis un tableau partagé par quelqu'un d'autre), peut lire les clés des autres tunnels ouverts
-  dans ce navigateur et joindre leurs cibles. Parade : n'ouvrir que des sites de confiance, ou un
-  profil de navigateur dédié. Une origine par tunnel (sous-domaines) supprimerait ce risque.
+  proxy, où le Service Worker garde leurs clés. Elles y sont des `CryptoKey` non extractibles : un
+  site ne peut pas les copier pour s'en servir ailleurs. Le Service Worker refuse aussi qu'une page
+  d'un tunnel appelle un autre tunnel, ou change sa clé. Reste qu'un site piégé, ouvert dans un tunnel
+  (par exemple depuis un tableau partagé par quelqu'un d'autre), partage l'IndexedDB et peut intégrer
+  une page d'un autre tunnel ouvert dans ce navigateur, puis lire son contenu (même origine). Parade :
+  n'ouvrir que des sites de confiance, ou un profil de navigateur dédié. Une origine par tunnel
+  (sous-domaines) supprimerait ce risque.
 - **Quotas** : il n'y a pas de quota de stockage par compte. Avec les inscriptions ouvertes, un
   compte peut remplir le disque ; les inscriptions sur invitation évitent ce risque.

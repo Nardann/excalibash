@@ -349,6 +349,8 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
   console.log(`[agent] ${machineId} connecté`);
 
   ws.on("pong", () => (agent.alive = true));
+  // Without a listener, a protocol error (oversized or malformed frame) would throw and stop the process.
+  ws.on("error", () => ws.terminate());
 
   ws.on("message", (raw) => {
     let msg: any;
@@ -357,42 +359,11 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
     } catch {
       return;
     }
-    const t = typeof msg.id === "string" ? terms.get(msg.id) : undefined;
-    switch (msg.t) {
-      case "hello":
-        onHello(machineId, msg);
-        for (const fn of agentHooks.hello) fn(machineId);
-        break;
-      case "http.res":
-      case "probe.res":
-      case "ws.ack":
-      case "ws.data":
-      case "ws.close":
-      case "file.res":
-        for (const fn of agentHooks.message) fn(machineId, msg);
-        break;
-      case "opened":
-        if (t && t.machineId === machineId && t.status !== "running") {
-          t.status = "running";
-          persist(t);
-          announce(t);
-        }
-        break;
-      case "output": {
-        if (!t || t.machineId !== machineId || typeof msg.d !== "string" || typeof msg.gen !== "string" || typeof msg.seq !== "number") return;
-        const chunk = { gen: msg.gen, seq: msg.seq, d: msg.d };
-        appendScrollback(t, chunk);
-        broadcastToBoard(t.boardId, { t: "term.data", id: t.id, ...chunk });
-        break;
-      }
-      case "exit":
-        if (!t || t.machineId !== machineId) return;
-        t.status = "exited";
-        t.exitCode = typeof msg.code === "number" ? msg.code : null;
-        persist(t);
-        announce(t);
-        if (typeof msg.error === "string") broadcastToBoard(t.boardId, { t: "term.error", id: t.id, message: msg.error.slice(0, 200) });
-        break;
+    if (!msg || typeof msg !== "object") return;
+    try {
+      onAgentMessage(machineId, msg);
+    } catch (e) {
+      console.error("[agent]", e);
     }
   });
 
@@ -405,6 +376,47 @@ export function handleAgent(ws: WebSocket, machineId: string): void {
     for (const t of terms.values()) if (t.machineId === machineId) announce(t);
   });
 }
+
+function onAgentMessage(machineId: string, msg: any): void {
+  const t = typeof msg.id === "string" ? terms.get(msg.id) : undefined;
+  switch (msg.t) {
+    case "hello":
+      onHello(machineId, msg);
+      for (const fn of agentHooks.hello) fn(machineId);
+      break;
+    case "http.res":
+    case "probe.res":
+    case "ws.ack":
+    case "ws.data":
+    case "ws.close":
+    case "file.res":
+      for (const fn of agentHooks.message) fn(machineId, msg);
+      break;
+    case "opened":
+      if (t && t.machineId === machineId && t.status !== "running") {
+        t.status = "running";
+        persist(t);
+        announce(t);
+      }
+      break;
+    case "output": {
+      if (!t || t.machineId !== machineId || typeof msg.d !== "string" || typeof msg.gen !== "string" || typeof msg.seq !== "number") return;
+      const chunk = { gen: msg.gen, seq: msg.seq, d: msg.d };
+      appendScrollback(t, chunk);
+      broadcastToBoard(t.boardId, { t: "term.data", id: t.id, ...chunk });
+      break;
+    }
+    case "exit":
+      if (!t || t.machineId !== machineId) return;
+      t.status = "exited";
+      t.exitCode = typeof msg.code === "number" ? msg.code : null;
+      persist(t);
+      announce(t);
+      if (typeof msg.error === "string") broadcastToBoard(t.boardId, { t: "term.error", id: t.id, message: msg.error.slice(0, 200) });
+      break;
+  }
+}
+
 
 function onHello(machineId: string, msg: any): void {
   db.prepare("UPDATE machines SET hostname = ?, os = ?, arch = ?, last_seen = ? WHERE id = ?").run(

@@ -878,7 +878,9 @@ site.close();
   }
   const fp = await c.fingerprint(c.fromB64(claim.agentPub));
   ok(pairOut.includes(fp), "l'empreinte affichée sur la machine est celle montrée dans le navigateur");
-  await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, "vm-tp"));
+  const confirm = pairOut.match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1];
+  ok(!!confirm, "la machine affiche un code de confirmation");
+  await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, confirm!, "vm-tp"));
   const exit = await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
   ok(exit === 0, "l'agent est appairé et sa configuration enregistrée");
   const reuse = await realFetch(`${BASE}/api/pair/${pr.code.replace("-", "")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pub: c.toB64(c.randomBytes(32)) }) });
@@ -1860,6 +1862,31 @@ for (let i = 0; i < 12; i++) {
   if (r.status === 429) limited++;
 }
 ok(limited > 0, "limitation des tentatives de connexion par compte, même en changeant X-Forwarded-For");
+
+// Malformed input must not stop the process (upgrades run outside Express).
+{
+  const { connect } = await import("node:net");
+  const raw = (req: string) =>
+    new Promise<string>((resolve) => {
+      const s = connect(Number(new URL(BASE).port), new URL(BASE).hostname, () => s.write(req));
+      let out = "";
+      s.on("data", (d) => (out += d));
+      s.on("close", () => resolve(out));
+      s.on("error", () => resolve(out));
+      setTimeout(() => s.destroy(), 2000);
+    });
+  const upgrade = "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+  await raw(`GET // HTTP/1.1\r\nHost: x\r\n${upgrade}\r\n`);
+  await raw(`GET /ws?board=x HTTP/1.1\r\nHost: x\r\nCookie: eb_session=%E0\r\n${upgrade}\r\n`);
+  const sn = boardSocket(alice, B);
+  await sn.open;
+  await sn.next((m) => m.t === "init");
+  for (const m of ["null", "42", '"x"', "[]"]) sn.ws.send(m);
+  await new Promise((r) => setTimeout(r, 300));
+  sn.ws.close();
+  const alive = await realFetch(BASE + "/api/config").then((r) => r.ok, () => false);
+  ok(alive, "le serveur survit à une URL `//`, un cookie mal encodé et des messages `null`");
+}
 
 agent.kill();
 sa.ws.close();

@@ -60,7 +60,13 @@ async function getTunnel(id) {
   if (tunnels.has(id)) return tunnels.get(id);
   const saved = await idb("tunnels", "readonly", (s) => s.get(id));
   if (!saved) return null;
-  const t = { key: await crypto.subtle.importKey("raw", unb64(saved.key), "AES-GCM", false, ["encrypt", "decrypt"]), target: new URL(saved.target) };
+  // Stored as a non-extractable CryptoKey (a raw string from an older worker is imported, then replaced).
+  let key = saved.key;
+  if (typeof key === "string") {
+    key = await importTunnelKey(key);
+    await idb("tunnels", "readwrite", (s) => s.put({ key, target: saved.target }, id));
+  }
+  const t = { key, target: new URL(saved.target) };
   tunnels.set(id, t);
   return t;
 }
@@ -93,13 +99,29 @@ async function storeCookies(id, setCookies) {
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
-// Keys arrive from the boot page, which got them from Excalibash by postMessage.
+// Every tunnelled site shares this origin, so its pages can open this IndexedDB. Keys are kept as
+// non-extractable CryptoKeys: a page can't read one out to use it elsewhere (see SECURITY.md).
+const importTunnelKey = (raw) => crypto.subtle.importKey("raw", unb64(raw), "AES-GCM", false, ["encrypt", "decrypt"]);
+
+/** The tunnel a client (page) belongs to, from its URL: /t/<id>/… */
+const tunnelOfClient = (client) => (client && client.url ? prefixed(new URL(client.url))?.id : undefined);
+
+// Keys arrive from the boot page, which got them from Excalibash by postMessage. Only a page of that
+// very tunnel may set its key: a site in another tunnel can't swap it for one of its own.
 self.addEventListener("message", (e) => {
   const m = e.data;
-  if (!m || m.type !== "key" || !ID.test(m.tunnelId)) return;
+  if (!m || m.type !== "key" || !ID.test(m.tunnelId) || typeof m.key !== "string" || typeof m.target !== "string") return;
+  if (tunnelOfClient(e.source) !== m.tunnelId) return;
   e.waitUntil(
     (async () => {
-      await idb("tunnels", "readwrite", (s) => s.put({ key: m.key, target: m.target }, m.tunnelId));
+      let key;
+      try {
+        key = await importTunnelKey(m.key);
+        new URL(m.target);
+      } catch {
+        return;
+      }
+      await idb("tunnels", "readwrite", (s) => s.put({ key, target: m.target }, m.tunnelId));
       tunnels.delete(m.tunnelId);
       e.source && e.source.postMessage({ type: "key-ok", tunnelId: m.tunnelId });
     })(),
@@ -139,6 +161,11 @@ self.addEventListener("fetch", (e) => {
 async function handle(e, url) {
   const route = await tunnelOf(e, url);
   if (!route) return fetch(e.request); // boot page
+  // A page of one tunnel may only reach its own: a site in tunnel A must not drive tunnel B with B's
+  // key (cookies included). Navigations have no client yet and are checked by their referrer.
+  const ref = e.request.referrer ? new URL(e.request.referrer) : null;
+  const from = e.clientId ? tunnelOfClient(await self.clients.get(e.clientId)) : ref && ref.origin === self.location.origin ? prefixed(ref)?.id : undefined;
+  if (from && from !== route.id) return new Response("Accès à un autre tunnel refusé.", { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
   // Keep navigations under /t/<id>/ so every page knows its tunnel.
   if (route.unprefixed && e.request.mode === "navigate") return Response.redirect(`/t/${route.id}${route.path}`, 302);
   const t = await getTunnel(route.id);
