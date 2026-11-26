@@ -1041,10 +1041,10 @@ input.board-title {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  border: 2px solid #1e293b;
+  border: 2px solid var(--ink);
   border-radius: 12px;
-  background: #0b1020;
-  box-shadow: 3px 3px 0 0 rgba(30, 41, 59, 0.9);
+  background: var(--term-bg, #0b1020);
+  box-shadow: var(--shadow);
 }
 .term-head {
   display: flex;
@@ -1053,20 +1053,15 @@ input.board-title {
   flex: none;
   height: 30px;
   padding: 0 6px 0 10px;
-  border-bottom: 2px solid #1e293b;
-  background: #f8fafc;
-  color: #1e293b;
+  border-bottom: 2px solid var(--ink);
+  background: var(--surface-2);
+  color: var(--ink);
   font-size: 12px;
   font-weight: 700;
 }
+/* Colors from the theme's variables (themes.ts): in a dark theme, --ink is the border color. */
 html.dark .term-head {
-  background: #262626;
-  color: #e5e5e5;
-  border-bottom-color: #404040;
-}
-html.dark .term {
-  border-color: #404040;
-  box-shadow: 3px 3px 0 0 rgba(255, 255, 255, 0.12);
+  color: var(--text-2);
 }
 .term-head .name {
   flex: 1;
@@ -1304,19 +1299,16 @@ html.dark .term.collapsed {
   width: calc(100% - 4px);
   height: calc(100% - 4px);
   padding: 8px;
-  border: 2px solid #1e293b;
+  border: 2px solid var(--ink);
   border-radius: 16px;
-  background: #fff;
-  color: #1e293b;
-  box-shadow: 3px 3px 0 0 rgba(30, 41, 59, 0.9);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
   text-align: center;
   overflow: hidden;
 }
 html.dark .term-tile {
-  background: #171717;
-  color: #e5e5e5;
-  border-color: #404040;
-  box-shadow: 3px 3px 0 0 rgba(255, 255, 255, 0.12);
+  color: var(--text-2);
 }
 .tile-icon {
   position: relative;
@@ -2330,4 +2322,156 @@ html.dark .term.broadcasting {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
+}
+
+/* Theme picker (Mon compte → Apparence) */
+.theme-group {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+.theme-card:hover {
+  border-color: var(--muted);
+}
+.theme-card.on {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px var(--brand-softer);
+}
+.theme-swatch {
+  position: relative;
+  display: block;
+  height: 62px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+}
+.theme-swatch-panel {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  width: 52%;
+  height: 42px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid;
+  border-radius: 5px;
+}
+.theme-swatch-panel span {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  width: 80%;
+}
+.theme-swatch-panel span:nth-child(2) {
+  width: 55%;
+}
+.theme-swatch-panel .theme-swatch-brand {
+  width: 40%;
+  height: 8px;
+  margin-top: auto;
+}
+.theme-swatch-term {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 34%;
+  height: 34px;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 3px;
+  padding: 5px;
+  border-radius: 4px;
+}
+.theme-swatch-term span {
+  width: 8px;
+  height: 4px;
+  border-radius: 1px;
+}
+.theme-swatch-auto {
+  display: flex;
+}
+.theme-swatch-auto span {
+  flex: 1;
+}
+.theme-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.theme-custom {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.theme-custom-base {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.theme-custom-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.theme-color {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.theme-color input {
+  width: 40px;
+  height: 32px;
+  padding: 2px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+.theme-color span {
+  display: flex;
+  flex-direction: column;
+}
+.theme-color small {
+  font-weight: 400;
+  color: var(--muted);
+}
+.theme-from {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
 }
