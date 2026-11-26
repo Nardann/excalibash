@@ -126,6 +126,9 @@ class Room implements BoardRoom {
     );
     this.broadcast(JSON.stringify({ t: "peer.join", peer: this.peer(client) }), ws);
 
+    // Without a listener, a protocol error (oversized or malformed frame) would throw and stop the process.
+    ws.on("error", () => ws.terminate());
+
     ws.on("message", (raw) => {
       let msg: any;
       try {
@@ -133,6 +136,8 @@ class Room implements BoardRoom {
       } catch {
         return;
       }
+      // `null`, a number or a string parse fine, and `msg.t` would then throw out of the handler.
+      if (!msg || typeof msg !== "object") return;
       try {
         this.onMessage(ws, client, msg);
       } catch (e) {

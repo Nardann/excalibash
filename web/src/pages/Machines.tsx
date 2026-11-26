@@ -15,7 +15,7 @@ import {
   type Machine,
   type MachineShare,
 } from "../vault.ts";
-import { fingerprint, fromB64 } from "../crypto.ts";
+import { CONFIRM_RE, fingerprint, fromB64, normalizeConfirm } from "../crypto.ts";
 import { Modal, Switch, confirmDialog, copyText, toast } from "../components/ui.tsx";
 import { ShareMachineModal } from "../components/ShareMachineModal.tsx";
 import { useUser } from "../auth.tsx";
@@ -251,6 +251,7 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
   const [pairing, setPairing] = useState<{ code: string; command: string; expiresAt: number } | null>(null);
   const [claim, setClaim] = useState<{ agentPub: string; agentName: string; fingerprint: string } | null>(null);
   const [name, setName] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [done, setDone] = useState<string | null>(null);
   const [viaBoards, setViaBoards] = useState(true);
   const [now, setNow] = useState(Date.now());
@@ -293,7 +294,7 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
     if (!pairing || !claim) return;
     setBusy(true);
     try {
-      setDone(await approvePairing(keys, pairing.code, claim.agentPub, name.trim() || claim.agentName || "machine", viaBoards));
+      setDone(await approvePairing(keys, pairing.code, claim.agentPub, confirm, name.trim() || claim.agentName || "machine", viaBoards));
     } catch (e) {
       toast.error(e);
     } finally {
@@ -325,9 +326,20 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
           <h2 className="display">Vérifie l'empreinte</h2>
           <p>
             La machine <b>{claim.agentName || "inconnue"}</b> s'est présentée. Compare cette empreinte avec celle affichée sur son écran. Si elle est différente,
-            quelqu'un d'autre a utilisé le code : refuse.
+            quelqu'un d'autre a utilisé le code : refuse. Recopie ensuite le code de confirmation affiché sous l'empreinte : il ne passe jamais par le serveur.
           </p>
           <div className="pair-fp mono">{claim.fingerprint}</div>
+          <label className="field" style={{ marginTop: 16 }}>
+            Code de confirmation affiché sur la machine
+            <input
+              className="input mono"
+              value={confirm}
+              placeholder="XXXX-XXXX"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          </label>
           <label className="field" style={{ marginTop: 16 }}>
             Nom dans Excalibash (chiffré)
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
@@ -337,7 +349,7 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
             <button className="btn" onClick={cancel}>
               Ce n'est pas la même
             </button>
-            <button className="btn btn-primary" disabled={busy} onClick={approve}>
+            <button className="btn btn-primary" disabled={busy || !CONFIRM_RE.test(normalizeConfirm(confirm))} onClick={approve}>
               C'est la même
             </button>
           </div>

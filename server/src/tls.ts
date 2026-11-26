@@ -196,7 +196,8 @@ export type Listener = { close(): void };
  * Serves `app` on `port`. With TLS, the same port speaks HTTPS and plain HTTP (sniffed on the
  * first byte): plain HTTP is redirected, except the /agent websocket of agents paired over http://.
  */
-export function serve(app: RequestListener, port: number, label: string, upgrade?: Upgrade): Listener {
+export function serve(app: RequestListener, port: number, label: string, rawUpgrade?: Upgrade): Listener {
+  const upgrade = rawUpgrade && guarded(rawUpgrade);
   if (!tls) {
     const server = createHttpServer(app);
     if (upgrade) server.on("upgrade", upgrade);
@@ -207,11 +208,14 @@ export function serve(app: RequestListener, port: number, label: string, upgrade
   const secure = createHttpsServer({ cert: tls.cert, key: tls.key }, app);
   const plain = createHttpServer((req, res) => redirect(req, res, port));
   if (upgrade) secure.on("upgrade", upgrade);
-  plain.on("upgrade", (req, socket, head) => {
-    if (upgrade && new URL(req.url ?? "/", "http://x").pathname === "/agent") return upgrade(req, socket, head);
-    const to = httpsUrl(req, port);
-    socket.end(to ? `HTTP/1.1 308 Permanent Redirect\r\nLocation: ${to}\r\nConnection: close\r\n\r\n` : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-  });
+  plain.on(
+    "upgrade",
+    guarded((req, socket, head) => {
+      if (upgrade && new URL(req.url ?? "/", "http://x").pathname === "/agent") return upgrade(req, socket, head);
+      const to = httpsUrl(req, port);
+      socket.end(to ? `HTTP/1.1 308 Permanent Redirect\r\nLocation: ${to}\r\nConnection: close\r\n\r\n` : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    }),
+  );
 
   const front = createNetServer((socket: Socket) => {
     socket.on("error", () => socket.destroy());
@@ -232,6 +236,23 @@ export function serve(app: RequestListener, port: number, label: string, upgrade
       secure.close();
       plain.close();
     },
+  };
+}
+
+/**
+ * An upgrade runs outside Express: a throw there (a request line like `//`, a malformed cookie)
+ * would be uncaught and stop the process. It answers 400 instead.
+ */
+function guarded(upgrade: Upgrade): Upgrade {
+  return (req, socket, head) => {
+    socket.on("error", () => socket.destroy());
+    try {
+      upgrade(req, socket, head);
+    } catch (e) {
+      console.error("[upgrade]", e);
+      if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+      else socket.destroy();
+    }
   };
 }
 

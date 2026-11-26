@@ -159,6 +159,22 @@ export async function publicKeyOf(pkcs8: Uint8Array): Promise<Bytes> {
   return fromB64((await subtle.exportKey("jwk", k)).x!);
 }
 
+/** The confirmation code an agent shows while pairing, as typed: "abcd-2345" → "ABCD2345". */
+export const normalizeConfirm = (code: string): string => code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+export const CONFIRM_RE = /^[2-9A-HJKMNP-Z]{8}$/;
+
+/**
+ * Pairing tag: HMAC-SHA256(confirmation code, auth ‖ agentPub). The code goes from the machine's
+ * screen to this browser by hand, so the server cannot make an auth key the agent would accept.
+ */
+export async function pairTag(confirm: string, auth: Uint8Array, agentPub: Uint8Array): Promise<Bytes> {
+  const k = await subtle.importKey("raw", utf8(normalizeConfirm(confirm)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const msg = new Uint8Array(auth.length + agentPub.length);
+  msg.set(auth);
+  msg.set(agentPub, auth.length);
+  return new Uint8Array(await subtle.sign("HMAC", k, msg)) as Bytes;
+}
+
 export async function fingerprint(pub: Uint8Array): Promise<string> {
   const h = new Uint8Array(await subtle.digest("SHA-256", pub as Bytes)).subarray(0, 20);
   const hex = [...h].map((x) => x.toString(16).padStart(2, "0")).join("").toUpperCase();
