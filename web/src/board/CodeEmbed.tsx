@@ -42,6 +42,8 @@ type Props = {
   title?: string | null;
   onHide?: () => void;
   onRemove?: () => void;
+  /** The file name changed (opened, saved as): the node remembers it as the label of this window. */
+  onLabel?: (name: string) => void;
 };
 
 type Person = { clientId: number; name: string; color: string; self: boolean };
@@ -86,7 +88,7 @@ function useDoc(session: BoardSession, docId: string) {
   return { doc, ready, error };
 }
 
-export default function CodeEmbed({ host, session, docId, active, shells, title, onHide, onRemove }: Props) {
+export default function CodeEmbed({ host, session, docId, active, shells, title, onHide, onRemove, onLabel }: Props) {
   const { doc, ready, error } = useDoc(session, docId);
   const { theme, confirm: confirmDialog, toast } = host;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -98,6 +100,12 @@ export default function CodeEmbed({ host, session, docId, active, shells, title,
   const [busy, setBusy] = useState<string | null>(null);
   const [saveAs, setSaveAs] = useState<string | null>(null);
   const readOnly = !session.canEdit || !!doc?.readOnly;
+  // The dock shows the file name: editors keep it in the node (a no-op when it is already there).
+  const labelRef = useRef(onLabel);
+  labelRef.current = onLabel;
+  useEffect(() => {
+    if (ready && !readOnly) labelRef.current?.(meta.name);
+  }, [ready, readOnly, meta.name]);
 
   // Shell statuses live in the session: re-render when they change.
   useSyncExternalStore(

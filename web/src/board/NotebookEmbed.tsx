@@ -89,6 +89,8 @@ type Props = {
   title?: string | null;
   onHide?: () => void;
   onRemove?: () => void;
+  /** The file name changed (opened, saved as): the node remembers it as the label of this window. */
+  onLabel?: (name: string) => void;
 };
 
 type Person = { clientId: number; name: string; color: string; self: boolean };
@@ -454,7 +456,7 @@ const NotebookCell = memo(function NotebookCell(p: CellProps) {
 
 // ---- the window --------------------------------------------------------------------------------------------------------
 
-export default function NotebookEmbed({ host, session, docId, nodeId, active, shells, title, onHide, onRemove }: Props) {
+export default function NotebookEmbed({ host, session, docId, nodeId, active, shells, title, onHide, onRemove, onLabel }: Props) {
   const { theme, confirm: confirmDialog, toast } = host;
   const { doc, runner, ready, error } = useDoc(session, docId, toast);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -469,6 +471,12 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
   const [kStatus, setKStatus] = useState<{ status: string; fatal: string | null }>({ status: "absent", fatal: null });
   const [machine, setMachine] = useState<{ name: string } | null>(null);
   const readOnly = !session.canEdit || !!doc?.readOnly;
+  // The dock shows the file name: editors keep it in the node (a no-op when it is already there).
+  const labelRef = useRef(onLabel);
+  labelRef.current = onLabel;
+  useEffect(() => {
+    if (ready && !readOnly) labelRef.current?.(meta.name);
+  }, [ready, readOnly, meta.name]);
   const markdown = useMarkdown();
 
   // Terminal statuses (the kernel session among them) live in the session.

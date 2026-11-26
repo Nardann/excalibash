@@ -76,6 +76,7 @@ import {
   openNotebook,
   removeNotebook,
   toggleNotebook,
+  setDocLabel,
   openShell,
   openWebWindowOf,
   openWindowOf,
@@ -168,8 +169,8 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
-    codes: { id: string; open: boolean }[];
-    notebooks: { id: string; open: boolean }[];
+    codes: { id: string; open: boolean; label?: string }[];
+    notebooks: { id: string; open: boolean; label?: string }[];
     /** A Telnet / SSH device: no agent on it, no site through it. */
     remote: boolean;
     /** An SSH device: other devices can be reached by bouncing through it. */
@@ -697,8 +698,8 @@ function Editor({ node }: { node: Node }) {
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
-              codes: nd ? (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!(x && openCodeWindowOf(x, c.docId)) })) : [],
-              notebooks: nd ? (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!(x && openNotebookWindowOf(x, c.docId)) })) : [],
+              codes: nd ? (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!(x && openCodeWindowOf(x, c.docId)), label: c.label })) : [],
+              notebooks: nd ? (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!(x && openNotebookWindowOf(x, c.docId)), label: c.label })) : [],
               remote: !!nd?.remote,
               bounce: nd?.remote?.target.kind === "ssh",
             }
@@ -749,8 +750,8 @@ function Editor({ node }: { node: Node }) {
               title: nd.title?.split("\n")[0] || null,
               shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
               webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
-              codes: (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!openCodeWindowOf(x, c.docId) })),
-              notebooks: (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!openNotebookWindowOf(x, c.docId) })),
+              codes: (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!openCodeWindowOf(x, c.docId), label: c.label })),
+              notebooks: (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!openNotebookWindowOf(x, c.docId), label: c.label })),
               remote: !!nd.remote,
               bounce: nd.remote?.target.kind === "ssh",
               machineName: nd.machineName,
@@ -1041,6 +1042,7 @@ function Editor({ node }: { node: Node }) {
               shells={shells}
               title={owner?.title?.split("\n")[0] ?? null}
               onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onLabel={editor && nid ? (n) => void setDocLabel(excalidrawRef.current!, "code", nid, codeId, n) : undefined}
               onRemove={
                 editor && nid
                   ? () => {
@@ -1070,6 +1072,7 @@ function Editor({ node }: { node: Node }) {
               shells={shells}
               title={owner?.title?.split("\n")[0] ?? null}
               onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onLabel={editor && nid ? (n) => void setDocLabel(excalidrawRef.current!, "notebook", nid, notebookId, n) : undefined}
               onRemove={
                 editor && nid
                   ? () => {
@@ -1342,11 +1345,11 @@ function Editor({ node }: { node: Node }) {
                     key={c.id}
                     className="chip"
                     aria-pressed={c.open}
-                    title={`${c.open ? "Masquer" : "Ouvrir"} le fichier de code ${i + 1}`}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} ${c.label ?? `le fichier de code ${i + 1}`}`}
                     onClick={() => toggleCode(excalidrawRef.current!, selTerm.id, c.id)}
                   >
                     <FileCode2 size={13} />
-                    <span className="lbl">Code {i + 1}</span>
+                    <span className="lbl">{c.label ?? `Code ${i + 1}`}</span>
                   </button>
                 ))}
                 {selTerm.notebooks.map((c, i) => (
@@ -1354,11 +1357,11 @@ function Editor({ node }: { node: Node }) {
                     key={c.id}
                     className="chip"
                     aria-pressed={c.open}
-                    title={`${c.open ? "Masquer" : "Ouvrir"} le notebook ${i + 1}`}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} ${c.label ?? `le notebook ${i + 1}`}`}
                     onClick={() => toggleNotebook(excalidrawRef.current!, selTerm.id, c.id)}
                   >
                     <NotebookText size={13} />
-                    <span className="lbl">Notebook {i + 1}</span>
+                    <span className="lbl">{c.label ?? `Notebook ${i + 1}`}</span>
                   </button>
                 ))}
                 <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
@@ -1862,7 +1865,7 @@ function NodeMenu(p: {
             }}
           >
             <FileCode2 size={16} />
-            <span style={{ flex: 1 }}>Fichier de code {i + 1}</span>
+            <span style={{ flex: 1 }}>{c.label ?? `Fichier de code ${i + 1}`}</span>
             <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
           </button>
         );
@@ -1879,7 +1882,7 @@ function NodeMenu(p: {
             }}
           >
             <NotebookText size={16} />
-            <span style={{ flex: 1 }}>Notebook {i + 1}</span>
+            <span style={{ flex: 1 }}>{c.label ?? `Notebook ${i + 1}`}</span>
             <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
           </button>
         );

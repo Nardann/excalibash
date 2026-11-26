@@ -2,7 +2,7 @@
 //   node --experimental-strip-types web/src/board/code.test.ts     (or: npx tsx web/src/board/code.test.ts)
 import * as Y from "yjs";
 import { EMPTY_SHA, cursorStyleSheet, initBlank, initFromFile, isDirty, languageForName, markSaved, readMeta, runCommand, safeColor, safeLabel, sha256Hex, splitPath } from "./codeDoc.ts";
-import { MAX_CODES, nodeDataOf } from "./nodeData.ts";
+import { MAX_CODES, MAX_LABEL, cleanLabel, labelOfName, nodeDataOf } from "./nodeData.ts";
 
 let failures = 0;
 const ok = (cond: unknown, msg: string) => {
@@ -92,6 +92,22 @@ const el = (customData: unknown) => ({ customData }) as any;
   ok(node([{ docId: id(5) }, { docId: id(5) }])!.codes!.length === 1, "nodeData : doublons écartés");
   const many = node(Array.from({ length: 80 }, (_, i) => ({ docId: id(i + 100) })))!;
   ok(many.codes!.length === MAX_CODES && MAX_CODES === 32, "nodeData : au plus 32 fichiers de code par machine");
+}
+
+// 7. Display names of the windows (`label` of a codes / notebooks entry)
+{
+  const el = (customData: unknown) => ({ customData }) as any;
+  const id = (n: number) => String(n).padStart(22, "L");
+  const node = (extra: object) => nodeDataOf(el({ node: true, shells: [], ...extra }))!;
+  ok(cleanLabel("demo.py") === "demo.py" && cleanLabel("  mon fichier é😀.py ") === "mon fichier é😀.py", "label : un nom de fichier est gardé (accents, emoji, blancs autour retirés)");
+  ok(cleanLabel("a".repeat(MAX_LABEL)) !== undefined && cleanLabel("a".repeat(MAX_LABEL + 1)) === undefined && MAX_LABEL === 80, "label : 80 caractères au plus");
+  ok([42, null, undefined, {}, [], "", "   ", ".", "..", "dossier/demo.py", "a\\b", "x\ny", "x\u0000y", "x\u202ey".replace("\u202e", "\u2028")].every((v) => cleanLabel(v) === undefined), "label : refusés — pas une chaîne, vide, chemin, caractère de contrôle ou séparateur de ligne");
+  ok(labelOfName("/home/enzo/projets/demo.py") === "demo.py" && labelOfName("a\\b\\c.txt") === "c.txt" && labelOfName("sans-titre") === "sans-titre" && labelOfName("") === null && labelOfName("/") === null, "label : on ne garde que le nom de base, jamais le chemin");
+  ok(labelOfName("x".repeat(200))!.length === MAX_LABEL, "label : un nom trop long est coupé");
+  const codes = node({ codes: [{ docId: id(1), label: "demo.py", x: 1 }, { docId: id(2), label: "/etc/passwd" }, { docId: id(3), label: "z".repeat(81) }, { docId: id(4), label: 12 }, { docId: id(5) }] }).codes!;
+  ok(codes[0].label === "demo.py" && codes[0].x === 1 && codes.slice(1).every((c) => c.label === undefined && !("label" in c)), "label : lu dans le scénario, validé entrée par entrée (géométrie conservée)");
+  const nbs = node({ notebooks: [{ docId: id(6), label: "carnet.ipynb" }, { docId: id(7), label: " " }] }).notebooks!;
+  ok(nbs[0].label === "carnet.ipynb" && nbs[1].label === undefined, "label : même règle pour les notebooks");
 }
 
 if (failures) {

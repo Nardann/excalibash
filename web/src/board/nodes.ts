@@ -4,7 +4,7 @@
 import { CaptureUpdateAction, convertToExcalidrawElements, newElementWith } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { cd, nodeDataOf } from "./nodeData.ts";
+import { cd, labelOfName, nodeDataOf } from "./nodeData.ts";
 import type { NodeData, ShellRef, WebRef, CodeRef, NotebookRef, RemoteRef, Geometry } from "./nodeData.ts";
 import type { TileIcon } from "./personalLibrary.ts";
 export { nodeDataOf };
@@ -299,6 +299,30 @@ export function removeShell(api: Api, nodeId: string, terminalId: string, machin
   if (node && data) changed.push(newElementWith(node, { customData: { ...data, ...keep, shells: data.shells.filter((s) => s.terminalId !== terminalId) } }));
   for (const e of all(api)) if (cd(e).terminalId === terminalId && cd(e).nodeId === nodeId && !e.isDeleted) changed.push(newElementWith(e, { isDeleted: true }));
   commit(api, changed, [], { activeEmbeddable: null, selectedElementIds: {} });
+}
+
+/**
+ * Records the display name of a code or notebook window in its node's list (the dock and the menus show it
+ * instead of "Code 1"). A base name only. Not an undo step; nothing is written when it is already there.
+ */
+export function setDocLabel(api: Api, kind: "code" | "notebook", nodeId: string, docId: string, name: string | null): boolean {
+  const node = findEl(api, nodeId);
+  const data = nodeDataOf(node);
+  if (!node || node.isDeleted || !data) return false;
+  const label = name === null ? undefined : (labelOfName(name) ?? undefined);
+  const list = refsOf(data, kind);
+  const cur = list.find((r) => r.docId === docId);
+  if (!cur || cur.label === label) return false;
+  const refs = list.map((r) => {
+    if (r.docId !== docId) return r;
+    const { label: _old, ...rest } = r;
+    return label ? { ...rest, label } : rest;
+  });
+  api.updateScene({
+    elements: all(api).map((e) => (e.id === node.id ? newElementWith(node, { customData: { ...data, [KINDS[kind].list]: refs } }) : e)),
+    captureUpdate: CaptureUpdateAction.NEVER,
+  });
+  return true;
 }
 
 /** Removes a web view from its node (its tunnel was closed). */

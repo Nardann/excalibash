@@ -206,6 +206,10 @@ Un document partagé est un document Yjs (CRDT) identifié par un `docId` de 128
   qu'une ligne affichée et confirmée, avec le chemin protégé. Les noms et couleurs de la présence, écrits par n'importe quel
   membre, sont filtrés avant d'entrer dans une feuille de style. Comme pour tous les documents, les lecteurs ont la clé
   du tableau : lecture seule côté client et refus par le serveur des écritures, pas une garantie cryptographique.
+- **Nom affiché** : l'entrée d'une fenêtre de code ou de notebook dans la liste de son icône peut porter un `label`
+  (le nom de base du fichier, jamais le chemin ; 80 caractères au plus, sans caractère de contrôle ni `/`), pour que le
+  dock affiche « demo.py » au lieu de « Code 1 ». Il vit dans le tableau, donc chiffré avec lui ; chaque lecture le
+  revalide et l'écarte s'il est invalide.
 - **Migration de l'ordre des cellules** : un ancien notebook (sans `order`) se lit tel quel, dans l'ordre de stockage ; la
   première modification de structure par un éditeur (insérer, déplacer, supprimer) écrit l'ordre. L'opération est idempotente
   et sans copie de cellule ; deux éditeurs qui la font en même temps laissent des identifiants répétés, ignorés à la
