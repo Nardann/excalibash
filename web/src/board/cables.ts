@@ -6,9 +6,9 @@
 import { CaptureUpdateAction, newElementWith } from "@excalidraw/excalidraw";
 import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { cd, cableOf, anchorOf, parseVlans, IP_RE, LABEL_RADIUS } from "./cableData.ts";
+import { cd, cableOf, anchorOf, parseVlans, vlanLines, IP_RE, LABEL_RADIUS } from "./cableData.ts";
 import type { Anchor, EndInfo, CableData, End } from "./cableData.ts";
-export { cableOf, anchorOf, parseVlans, IP_RE, LABEL_RADIUS };
+export { cableOf, anchorOf, parseVlans, vlanLines, IP_RE, LABEL_RADIUS };
 export type { Anchor, EndInfo, CableData, End };
 
 type El = ExcalidrawElement;
@@ -295,7 +295,9 @@ export function setCableEnd(api: Api, id: string, end: End, info: EndInfo) {
   const el = els.find((e) => e.id === id);
   const c = cableOf(el);
   if (!el || !c) return;
-  const next: EndInfo = { iface: clean(info.iface), ip: clean(info.ip), vlans: clean(info.vlans) };
+  const vlans = clean(info.vlans);
+  const vlanIps = vlans && info.vlanIps && Object.keys(info.vlanIps).length ? info.vlanIps : undefined;
+  const next: EndInfo = { iface: clean(info.iface), ip: clean(info.ip), vlans, ...(vlanIps ? { vlanIps } : {}) };
   const filled = Object.values(next).some(Boolean);
   if (filled && (info.dx || info.dy)) Object.assign(next, { dx: info.dx, dy: info.dy });
   const ends = { ...c.ends, [end]: filled ? next : undefined };

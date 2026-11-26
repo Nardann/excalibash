@@ -17,7 +17,7 @@ export type TopoNode = {
   kind: "machine" | "remote" | "shape";
   mgmt?: { host: string; port: number; kind: string };
 };
-export type TopoEnd = { node: string; iface?: string; ip?: string; vlans?: string };
+export type TopoEnd = { node: string; iface?: string; ip?: string; vlans?: string; /** Address in a VLAN, by VLAN number. */ vlanIps?: Record<string, string> };
 export type TopoLink = { a: TopoEnd; b: TopoEnd };
 export type Topology = { nodes: TopoNode[]; links: TopoLink[]; warnings: string[] };
 
@@ -84,7 +84,8 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
     return items.get(e.id);
   };
 
-  type Raw = { id: string; a: Key; b: Key; ea?: { iface?: string; ip?: string; vlans?: string }; eb?: { iface?: string; ip?: string; vlans?: string } };
+  type Info = { iface?: string; ip?: string; vlans?: string; vlanIps?: Record<string, string> };
+  type Raw = { id: string; a: Key; b: Key; ea?: Info; eb?: Info };
   const raws: Raw[] = [];
   for (const el of cables) {
     const c = cableOf(el)!;
@@ -137,7 +138,7 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
   // Interfaces: explicit ones first (cleaned, duplicates per node refused), then eth1, eth2… for the rest.
   const ifaces = new Map<string, Set<string>>();
   const taken = (node: string) => ifaces.get(node) ?? (ifaces.set(node, new Set()), ifaces.get(node)!);
-  type Slot = { node: string; peer: string; info?: { iface?: string; ip?: string; vlans?: string }; out: TopoEnd };
+  type Slot = { node: string; peer: string; info?: Info; out: TopoEnd };
   const slots: Slot[] = [];
   const links: TopoLink[] = raws.map((r) => {
     const mk = (k: Key, other: Key, info: Raw["ea"]): TopoEnd => {
@@ -172,6 +173,17 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
       if (vlans) s.out.vlans = vlans;
       else warnings.push(`« ${me} » vers « ${peer} » : VLAN « ${s.info.vlans.slice(0, 40).replace(/[^\x20-\x7e]/g, "?")} » invalide, ignoré.`);
     }
+    // Addresses in VLANs: only for a VLAN of this end (a single one, not a range), well-formed.
+    if (vlans && s.info?.vlanIps) {
+      const listed = new Set(vlans.split(", "));
+      const out: Record<string, string> = {};
+      for (const [v, vip] of Object.entries(s.info.vlanIps)) {
+        if (!listed.has(v)) continue;
+        if (IP_RE.test(vip)) out[v] = vip;
+        else warnings.push(`« ${me} » vers « ${peer} » : adresse « ${vip.slice(0, 40).replace(/[^\x20-\x7e]/g, "?")} » du VLAN ${v} invalide, ignorée.`);
+      }
+      if (Object.keys(out).length) s.out.vlanIps = out;
+    }
   }
   const counters = new Map<string, number>();
   for (const s of slots) {
@@ -186,11 +198,11 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
     s.out.iface = name;
     warnings.push(`« ${me} » : interface non renseignée sur le câble vers « ${nameById.get(s.peer)} », « ${name} » générée.`);
   }
-  // Tidy key order: node, iface, ip, vlans.
+  // Tidy key order: node, iface, ip, vlans, vlanIps.
   for (const l of links) for (const e of [l.a, l.b]) {
-    const { node, iface, ip, vlans } = e;
+    const { node, iface, ip, vlans, vlanIps } = e;
     for (const k of Object.keys(e)) delete (e as any)[k];
-    Object.assign(e, { node, iface, ...(ip ? { ip } : {}), ...(vlans ? { vlans } : {}) });
+    Object.assign(e, { node, iface, ...(ip ? { ip } : {}), ...(vlans ? { vlans } : {}), ...(vlanIps ? { vlanIps } : {}) });
   }
   return { nodes, links, warnings };
 }
@@ -213,7 +225,8 @@ export function toContainerlab(topo: Topology, labName: string): string {
     "# Généré par Excalibash. Le kind et l'image de chaque nœud sont des valeurs par défaut :",
     "# adapte-les au matériel réel (ex. kind: nokia_srlinux, ceos, vr-sros... avec l'image correspondante).",
     "# Containerlab n'a pas de champ pour les IP et les VLAN : ils sont notés en commentaire à côté de",
-    "# chaque lien. Les IP avec masque (ex. 10.0.0.1/24) sont aussi posées par exec sur les nœuds linux.",
+    "# chaque lien. Les IP avec masque (ex. 10.0.0.1/24) sont aussi posées par exec sur les nœuds linux,",
+    "# celles d'un VLAN sur une sous-interface (eth1.10).",
     `name: ${yamlStr(sanitizeName(labName, "schema"))}`,
     "topology:",
   ];
@@ -228,6 +241,13 @@ export function toContainerlab(topo: Topology, labName: string): string {
       const ip = execIp(e.ip);
       const iface = execIface(e.iface);
       if (e.node === n.id && ip && iface) execs.push(`ip addr add ${ip} dev ${iface}`);
+      // A VLAN with an address: a VLAN subinterface (eth1.10) carrying it.
+      for (const [v, vip] of Object.entries(e.node === n.id && iface ? (e.vlanIps ?? {}) : {})) {
+        const addr = execIp(vip);
+        const sub = execIface(`${iface}.${v}`);
+        if (!addr || !sub || !/^\d{1,4}$/.test(v) || sub.length > 15) continue;
+        execs.push(`ip link add link ${iface} name ${sub} type vlan id ${v}`, `ip link set ${sub} up`, `ip addr add ${addr} dev ${sub}`);
+      }
     }
     if (execs.length) out.push("      exec:", ...execs.map((x) => `        - ${JSON.stringify(x)}`));
   }
@@ -235,7 +255,8 @@ export function toContainerlab(topo: Topology, labName: string): string {
   else out.push("  links:");
   for (const l of topo.links) {
     for (const e of [l.a, l.b]) {
-      const extra = [e.ip ? `ip ${comment(e.ip)}` : "", e.vlans ? `VLAN ${comment(e.vlans)}` : ""].filter(Boolean).join(", ");
+      const vlanIps = Object.entries(e.vlanIps ?? {}).map(([v, vip]) => `VLAN ${comment(v)} ip ${comment(vip)}`);
+      const extra = [e.ip ? `ip ${comment(e.ip)}` : "", e.vlans ? `VLAN ${comment(e.vlans)}` : "", ...vlanIps].filter(Boolean).join(", ");
       if (extra) out.push(`    # ${comment(name.get(e.node) ?? "?")}:${comment(e.iface ?? "?")} : ${extra}`);
     }
     out.push(`    - endpoints: [${[l.a, l.b].map((e) => JSON.stringify(`${name.get(e.node)}:${e.iface}`)).join(", ")}]`);
