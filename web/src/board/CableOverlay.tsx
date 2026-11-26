@@ -1,7 +1,7 @@
 // What sits at each end of the cables (interface, IP, VLANs), drawn next to the ends, and the
 // small "int" button on the ends of the selected cable to fill it in.
 import { useEffect, useRef, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { AlertTriangle, Plus, X } from "lucide-react";
 import { Modal, toast } from "../components/ui.tsx";
 import { IP_RE, LABEL_RADIUS, parseVlans, vlanLines, vlanParts, type End, type EndInfo } from "./cables.ts";
 import { FileClient, IFACE_RE, filterProblem, type Signal } from "./fileTransfer.ts";
@@ -73,10 +73,13 @@ export function CableOverlay({
   onMoveLabel,
   links = {},
   mids = [],
+  schema = {},
 }: {
   marks: CableMark[];
   /** Reachability of the IPs at the cable ends (by `${cableId}:${end}`). */
   links?: LinkStates;
+  /** Discrepancies found by "Vérifier le schéma" (by `${cableId}:${end}`): messages shown on a badge. */
+  schema?: Record<string, string[]>;
   /** Middle of each cable with an IP, where its overall state shows. */
   mids?: { cableId: string; x: number; y: number }[];
   zoom: number;
@@ -138,6 +141,11 @@ export function CableOverlay({
                 onPointerDown={(e) => startDrag(e, m, key)}
                 onDoubleClick={() => editable && onEdit(m)}
               >
+                {schema[key] && (
+                  <span className="schema-badge" title={schema[key].join("\n")} role="img" aria-label={`Écart avec la machine : ${schema[key].join(", ")}`}>
+                    <AlertTriangle size={11} />
+                  </span>
+                )}
                 {i!.iface && <b>{i!.iface}</b>}
                 {i!.ip &&
                   (links[key] ? (

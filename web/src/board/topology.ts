@@ -211,7 +211,7 @@ export function extractTopology(elements: readonly El[], nameOf: (nodeId: string
 
 const RESERVED = new Set(["true", "false", "null", "yes", "no", "y", "n", "on", "off", "~"]);
 /** A YAML scalar: plain when it is obviously safe, else a double-quoted (JSON) string. */
-const yamlStr = (s: string) => (/^[a-z_][a-z0-9_-]*$/.test(s) && !RESERVED.has(s) ? s : JSON.stringify(s));
+export const yamlStr = (s: string) => (/^[a-z_][a-z0-9_-]*$/.test(s) && !RESERVED.has(s) ? s : JSON.stringify(s));
 /** Text for a YAML comment: one line, printable characters only. */
 const comment = (s: string) => s.replace(/[^\x20-\x7e]/g, "?");
 /** Strict whitelist for what goes into an `ip addr add` line: address with a prefix length. */

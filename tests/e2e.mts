@@ -9,7 +9,7 @@ const WebSocketServer = (WebSocket as any).WebSocketServer;
 import * as c from "../web/src/crypto.ts";
 import * as lib from "../web/src/library.tsx";
 import { solveChallenge } from "../web/src/pow.ts";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -586,6 +586,27 @@ const misbound = pr.status === 200 ? await c.unboxJson(mAlice.auth, pr.body.d, c
 ok(!misbound, "la réponse de la sonde est liée à sa requête");
 ok((await probe(alice, ["127.0.0.1"])).status === 429, "sondes trop rapprochées refusées par le serveur");
 ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder depuis la machine d'Alice");
+
+// "Vérifier le schéma": the same probe path with kind "ifaces" returns the machine's interfaces, sealed both ways.
+{
+  await new Promise((r) => setTimeout(r, 2100)); // one probe per machine every 2 s
+  const rid = c.randomId();
+  const ts = Date.now();
+  const d = await c.boxJson(mAlice.auth, { kind: "ifaces", targets: [] }, c.AAD.probe(rid, ts));
+  const r = await as(alice, () => api("POST", `/machines/${machine.id}/probe`, { rid, ts, d }));
+  const res = r.status === 200 ? await c.unboxJson<{ ifaces?: { name: string; up: boolean; addrs: string[] }[]; r?: unknown }>(mAlice.auth, r.body.d, c.AAD.probeRes(rid)) : null;
+  const lo = res?.ifaces?.find((i) => i.name === "lo" || i.name === "lo0");
+  ok(r.status === 200 && Array.isArray(res?.ifaces) && res.r === undefined, "sonde « ifaces » : l'agent répond avec ses interfaces, pas des pings");
+  ok(!!lo && lo.up && lo.addrs.includes("127.0.0.1/8"), "sonde « ifaces » : lo avec 127.0.0.1/8");
+  // What the server relays and keeps: neither the blob nor the log nor the database holds an address or a name in clear.
+  const relayed = Buffer.from(r.body.d, "base64").toString("latin1");
+  const dbText = [DB, `${DB}-wal`, `${dirname(DB)}/server.log`].filter((p) => existsSync(p)).map((p) => readFileSync(p).toString("latin1")).join("\n");
+  ok(![relayed, dbText].some((t) => t.includes("127.0.0.1/8") || t.includes('"name":"lo"') || t.includes('"ifaces"')), "sonde « ifaces » : ni adresse ni nom d'interface en clair côté serveur (blob relayé, base, journal)");
+  await new Promise((r) => setTimeout(r, 2100));
+  const old = await probe(alice, ["127.0.0.1"]);
+  const oldRes = old.status === 200 ? await c.unboxJson<{ r?: Record<string, unknown>; ifaces?: unknown }>(mAlice.auth, old.body.d, c.AAD.probeRes(old.rid)) : null;
+  ok(!!oldRes?.r && oldRes.ifaces === undefined, "sonde sans « kind » (ancien web) : toujours un ping");
+}
 
 // Machine sharing. Through the board: Alice's machine has a shell here, so her browser links it to
 // the board (its keys boxed under the board key) and Bob, editor, can use it from this board.

@@ -2331,3 +2331,72 @@ html.dark .term.broadcasting {
   border-radius: 8px;
   background: #fff;
 }
+
+/* ---- "Vérifier le schéma": badge on a cable end label, results panel ---------------------- */
+.cable-label .schema-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: #fff;
+  pointer-events: auto;
+  cursor: help;
+}
+.schema-panel {
+  right: auto;
+  left: 12px;
+  width: 340px;
+}
+.schema-panel:has(~ .history-panel) {
+  left: 304px;
+}
+.schema-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.schema-summary {
+  font-weight: 600;
+}
+.schema-machine h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+.schema-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+.schema-item > span {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.schema-item.ok {
+  color: var(--success);
+}
+.schema-item.err {
+  color: var(--danger);
+}
+.schema-extra,
+.schema-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.schema-note {
+  font-family: inherit;
+}
