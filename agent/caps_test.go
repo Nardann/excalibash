@@ -15,7 +15,7 @@ func TestHelloCaps(t *testing.T) {
 		}
 		seen[c] = true
 	}
-	for _, need := range []string{"files", "capture", "ifaces", "jupyter", "probe", "schema"} {
+	for _, need := range []string{"files", "capture", "ifaces", "jupyter", "probe", "schema", "update"} {
 		if !seen[need] {
 			t.Errorf("capability %q missing", need)
 		}

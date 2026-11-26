@@ -3,7 +3,7 @@
 // nothing predates the list: it is treated as old for every feature below.
 
 /** Every capability the current agent has: a machine lacking one of them can be updated. */
-export const KNOWN_CAPS = ["files", "capture", "ifaces", "jupyter", "probe", "schema"] as const;
+export const KNOWN_CAPS = ["files", "capture", "ifaces", "jupyter", "probe", "schema", "update"] as const;
 export type Cap = (typeof KNOWN_CAPS)[number];
 
 /** The features of the web app that need the agent to know something, and what that is. */

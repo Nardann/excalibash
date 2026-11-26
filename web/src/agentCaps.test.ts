@@ -22,7 +22,7 @@ for (const none of [undefined, null, []] as const) {
 // A partial agent: files but no capture.
 const partial = ["files", "ifaces"];
 ok(supports(partial, "files") && supports(partial, "code") && !supports(partial, "capture") && !supports(partial, "kernel"), "partial agent: only what it announced");
-ok(missingCaps(partial).join() === "capture,jupyter,probe,schema", "missing caps listed in a stable order");
+ok(missingCaps(partial).join() === "capture,jupyter,probe,schema,update", "missing caps listed in a stable order");
 
 ok(outdatedMessage("srv-1", "capture") === "L'agent de srv-1 est trop ancien pour la capture réseau : mets-le à jour.", "message names the machine and the feature");
 ok(outdatedMessage("  \n ", "files").includes("cette machine"), "blank machine name: generic");
