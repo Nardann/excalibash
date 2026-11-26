@@ -312,6 +312,10 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   ok(cleanBase64("AAAA") === "AAAA" && cleanBase64("") === null && cleanBase64("A\"B") === null && cleanBase64("A=B") === null && cleanBase64("<svg>") === null, "rendu : alphabet base64 strict");
   ok(classifyBundle({ "text/plain": "<b>x</b>" })?.kind === "text" && (classifyBundle({ "text/plain": "<b>x</b>" }) as any).text === "<b>x</b>", "rendu : le texte reste du texte (le DOM en fera un nœud texte)");
   ok(classifyBundle({ "application/vnd.jupyter.widget-view+json": "{}" })?.kind === "note" && classifyBundle({})?.kind === undefined, "rendu : widgets non pris en charge, bundle vide = rien");
+  {
+    const f = frameDoc('<p>a</p><META http-equiv="refresh" content="0;url=https://exemple.invalid/"><meta http-equiv=refresh content=0>', false);
+    ok(!/refresh/i.test(f) && !/exemple\.invalid/.test(f) && /<base target="_blank">/.test(f), "rendu : aucune balise meta du notebook (pas de redirection automatique), liens sans navigation");
+  }
   ok(/sandbox/.test("") === false && !/<script/.test(frameDoc("x", true).replace("</head>", "")) , "rendu : le gabarit du cadre ne contient aucun script");
 
   const items = classifyOutputs([

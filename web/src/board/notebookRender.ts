@@ -116,8 +116,12 @@ const IMAGE_MIMES = ["image/png", "image/jpeg", "image/gif"] as const;
  */
 export function frameDoc(body: string, dark: boolean): string {
   const fg = dark ? "#e5e7eb" : "#111827";
+  // CSP doesn't govern <meta http-equiv="refresh">: an output could otherwise send every viewer's
+  // frame to an outside URL on its own (leaking their IP). Notebook content gets no <meta> at all,
+  // and links can't navigate the frame either: <base> sends them to a new window, which the sandbox refuses.
+  body = body.replace(/<meta\b[^>]*>/gi, "");
   return (
-    `<!doctype html><html><head><meta charset="utf-8">` +
+    `<!doctype html><html><head><meta charset="utf-8"><base target="_blank">` +
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">` +
     `<style>html,body{margin:0;padding:6px;font:13px/1.45 system-ui,sans-serif;color:${fg};background:transparent}` +
     `img,svg{max-width:100%}table{border-collapse:collapse}th,td{border:1px solid #8885;padding:2px 6px}pre,code{font-family:ui-monospace,monospace}` +
