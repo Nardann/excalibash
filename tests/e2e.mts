@@ -469,6 +469,88 @@ const misbound = pr.status === 200 ? await c.unboxJson(mAlice.auth, pr.body.d, c
 ok(!misbound, "la réponse de la sonde est liée à sa requête");
 ok((await probe(alice, ["127.0.0.1"])).status === 429, "sondes trop rapprochées refusées par le serveur");
 ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder depuis la machine d'Alice");
+
+// Machine sharing. Through the board: Alice's machine has a shell here, so her browser links it to
+// the board (its keys boxed under the board key) and Bob, editor, can use it from this board.
+{
+  const vault = await import("../web/src/vault.ts");
+  const keyBobB = nB.get(B)!.key!;
+  const tryTerm = async (auth: c.SymKey, reqId: string) => {
+    const id = c.randomId();
+    const k = await c.newSymKey();
+    sb.send({
+      t: "term.create", reqId, id, machineId: machine.id, cols: 80, rows: 24,
+      keyForBoard: await c.wrapKey(keyBobB, k, c.AAD.termKey(B, id)),
+      keyForAgent: await c.box(auth, k.raw, c.AAD.termAgent(id)),
+      encLabel: await c.boxText(keyBobB, "partagée", c.AAD.termLabel(B, id)),
+    });
+    const r = await sb.next((m) => (m.t === "term.created" || m.t === "error") && m.reqId === reqId);
+    return { ok: r.t === "term.created", id, k };
+  };
+  const bogus = await c.newSymKey();
+  ok(!(await tryTerm(bogus, "s0")).ok, "partage : Bob ne peut pas ouvrir de shell sur la machine d'Alice sans partage");
+
+  const bobMachines = async (board: boolean) => {
+    vault.setMachineBoard(board ? { id: B, key: keyBobB } : null);
+    try {
+      return await as(bob, () => vault.listMachines(bob.keys));
+    } finally {
+      vault.setMachineBoard(null);
+    }
+  };
+  ok((await bobMachines(true)).length === 0, "partage : aucune machine liée au tableau tant qu'Alice ne l'a pas liée");
+  // The session list comes from the server: it alone never makes Alice's browser link her machine.
+  await as(alice, () => vault.syncBoardLinks(alice.keys, { id: B, key: keyB }, new Set([machine.id])));
+  ok((await bobMachines(true)).length === 0, "partage via le tableau : pas de lien sans action d'Alice (liste de sessions du serveur ignorée)");
+  await as(alice, () => vault.linkMachine({ id: B, key: keyB }, mAlice));
+  const viaBoard = (await bobMachines(true)).find((m) => m.id === machine.id);
+  ok(viaBoard?.access === "board" && viaBoard.name === "laptop-alice" && viaBoard.fingerprint === machine.fingerprint, "partage via le tableau : Bob voit la machine d'Alice depuis ce tableau");
+  ok(!(await bobMachines(false)).some((m) => m.id === machine.id), "partage via le tableau : la machine n'est pas proposée hors de ce tableau");
+  const sh = await tryTerm(viaBoard!.auth, "s1");
+  ok(sh.ok, "partage via le tableau : Bob ouvre un shell sur la machine d'Alice");
+  await sb.next((m) => m.t === "term" && m.terminal.id === sh.id && m.terminal.status === "running", 8000);
+  await subscribe(sb, sh.id);
+  await sendInput(sb, sh.k, sh.id, "bobshare", "echo SHARED_$((6*8))\n");
+  ok((await termOutput(sb, sh.k, sh.id, "SHARED_48")).includes("SHARED_48"), "partage via le tableau : le shell de Bob tourne sur l'agent d'Alice");
+
+  const lastProbe = Date.now();
+  await new Promise((r) => setTimeout(r, Math.max(0, 2100 - (Date.now() - lastProbe))));
+  const rid = c.randomId();
+  const ts = Date.now();
+  const d = await c.boxJson(viaBoard!.auth, { targets: ["127.0.0.1"] }, c.AAD.probe(rid, ts));
+  const noBoard = await as(bob, () => api("POST", `/machines/${machine.id}/probe`, { rid, ts, d }));
+  ok(noBoard.status === 404, "partage via le tableau : pas de sonde sans dire de quel tableau");
+  const withBoard = await as(bob, () => api("POST", `/machines/${machine.id}/probe`, { rid, ts, d, boardId: B }));
+  ok(withBoard.status === 200, "partage via le tableau : Bob sonde les câbles du tableau depuis la machine d'Alice");
+
+  for (const [path, body] of [
+    [`/machines/${machine.id}/shares/${bob.user.id}`, { sealed: "AAAA" }],
+    [`/machines/${machine.id}/links/${B}`, { wrapped: "AAAA" }],
+  ] as const) {
+    ok((await as(bob, () => api("PUT", path, body))).status === 404, `partage : Bob ne peut pas se donner la machine d'Alice (${path.split("/")[3]})`);
+  }
+  ok((await as(bob, () => api("GET", `/machines/${machine.id}/shares`))).status === 404, "partage : Bob ne voit pas les partages de la machine d'Alice");
+
+  await as(alice, () => vault.setShareBoards(machine.id, false));
+  const gone = await sb.next((m) => m.t === "term.gone" && m.id === sh.id).then(() => true, () => false);
+  ok(gone, "partage via les tableaux désactivé : le shell de Bob est fermé");
+  ok((await bobMachines(true)).length === 0 && !(await tryTerm(viaBoard!.auth, "s2")).ok, "partage via les tableaux désactivé : Bob n'a plus accès");
+  const relink = await as(alice, () => api("PUT", `/machines/${machine.id}/links/${B}`, { wrapped: "AAAA" }));
+  ok(relink.status === 409, "partage via les tableaux désactivé : plus aucun lien possible");
+
+  // Directly: the keys sealed to Bob's public key, usable from any board he edits.
+  await as(alice, () => vault.shareMachine(alice.user, alice.keys, mAlice, { id: bob.user.id, email: "bob@test.local", publicKey: c.toB64(bob.keys.pub) }));
+  const direct = (await bobMachines(false)).find((m) => m.id === machine.id);
+  ok(direct?.access === "shared" && direct.ownerName === "Alice" && c.toB64(direct.auth.raw) === c.toB64(mAlice.auth.raw), "partage direct : Bob reçoit la machine, scellée pour sa clé");
+  const sh2 = await tryTerm(direct!.auth, "s3");
+  ok(sh2.ok, "partage direct : Bob ouvre un shell sur la machine d'Alice");
+  const shares = await as(alice, () => vault.machineShares(machine.id));
+  ok(shares.shares.length === 1 && shares.shares[0].userId === bob.user.id, "partage direct : Alice voit avec qui elle partage");
+  await as(alice, () => vault.unshareMachine(machine.id, bob.user.id));
+  ok(await sb.next((m) => m.t === "term.gone" && m.id === sh2.id).then(() => true, () => false), "partage direct retiré : le shell de Bob est fermé");
+  ok(!(await bobMachines(false)).some((m) => m.id === machine.id) && !(await tryTerm(direct!.auth, "s4")).ok, "partage direct retiré : Bob n'a plus accès");
+  await as(alice, () => vault.setShareBoards(machine.id, true));
+}
 // WebSocket through the tunnel: sealed messages, sealed close, counters in the AAD.
 async function tunnelSocket(kw: c.SymKey, path: string, opts: { cookie?: string; protos?: string[]; badKey?: boolean } = {}) {
   const sid = c.randomId();

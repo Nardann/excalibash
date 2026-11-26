@@ -31,6 +31,7 @@ export type MachineRow = {
   arch: string | null;
   last_seen: number | null;
   created_at: number;
+  share_boards: number;
 };
 
 export function getItem(id: string): ItemRow | undefined {
@@ -89,4 +90,33 @@ export function visibleItems(userId: string): (ItemRow & { owner_name: string })
 
 export function getMachine(id: string): MachineRow | undefined {
   return db.prepare("SELECT * FROM machines WHERE id = ?").get(id) as MachineRow | undefined;
+}
+
+/**
+ * How a user may open sessions on a machine (from `boardId`, when given):
+ * - "owner": their own machine;
+ * - "shared": the owner shared it with them directly;
+ * - "board": the owner linked it to this board (sharing through boards is on) and both of
+ *   them can edit the board.
+ */
+export type MachineAccess = "owner" | "shared" | "board";
+
+export function machineAccess(userId: string, m: MachineRow, boardId?: string | null): MachineAccess | null {
+  if (m.owner_id === userId) return "owner";
+  if (db.prepare("SELECT 1 FROM machine_shares WHERE machine_id = ? AND user_id = ?").get(m.id, userId)) return "shared";
+  if (boardId && linkHolds(m, boardId) && atLeast(roleOn(userId, boardId), "editor")) return "board";
+  return null;
+}
+
+/**
+ * A board link still gives access: sharing through boards is on, the link exists, the board is
+ * not in the trash and the owner can still edit it.
+ */
+export function linkHolds(m: MachineRow, boardId: string): boolean {
+  return (
+    !!m.share_boards &&
+    !!db.prepare("SELECT 1 FROM machine_boards WHERE machine_id = ? AND board_id = ?").get(m.id, boardId) &&
+    !isTrashed(boardId) &&
+    atLeast(roleOn(m.owner_id, boardId), "editor")
+  );
 }

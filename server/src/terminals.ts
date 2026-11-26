@@ -286,6 +286,17 @@ export function activeTerminalCount(boardId: string): number {
   return n;
 }
 
+/** Kills and forgets the terminals of a machine that match (access to the machine withdrawn). */
+export function dropMachineTerminalsWhere(machineId: string, pred: (t: { boardId: string; createdBy: string | null }) => boolean): void {
+  const ids: string[] = [];
+  for (const t of terms.values()) if (t.machineId === machineId && pred(t)) ids.push(t.id);
+  for (const id of ids) {
+    const t = terms.get(id)!;
+    dropTerminals([id]);
+    broadcastToBoard(t.boardId, { t: "term.gone", id });
+  }
+}
+
 /** Disconnects a deleted machine and forgets its terminals. */
 export function dropMachine(machineId: string): void {
   agents.get(machineId)?.ws.close(4000, "machine supprimée");

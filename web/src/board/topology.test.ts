@@ -1,6 +1,7 @@
 // Unit tests of the topology export (pure, no framework):
 //   node --experimental-strip-types web/src/board/topology.test.ts     (or: npx tsx web/src/board/topology.test.ts)
 import { extractTopology, toContainerlab, toMermaid, toJSON, sanitizeName } from "./topology.ts";
+import { vlanLines } from "./cableData.ts";
 
 let failures = 0;
 const ok = (cond: unknown, msg: string) => {
@@ -97,6 +98,22 @@ const nameOf = (id: string) => names[id] ?? "Machine";
   ok(m.includes('["A #quot;q#quot; #lt;b#gt; #amp; #35;x"]'), "mermaid: node label escaped");
   ok(m.includes('---|"e-1 — eth2"|') || m.includes("e-1 — eth2"), "mermaid: edge label 'iface — iface'");
   ok(!/"[^"\n]*"[^"\n]*"[^"\n]*"\]$/m.test(m), "mermaid: no stray quote left inside a label");
+}
+
+// VLANs with an address: kept for listed single VLANs, exec on a VLAN subinterface, label lines.
+{
+  const t = extractTopology(
+    [tile("m1"), tile("m2"), cable("c1", { id: "m1" }, { id: "m2" }, { a: { iface: "eth1", vlans: "10, 20, 30-35", vlanIps: { "10": "10.0.10.1/24", "99": "1.2.3.4/24", "20": "nope" } }, b: { iface: "eth2" } })],
+    nameOf,
+  );
+  const a = t.links[0].a;
+  ok(JSON.stringify(a.vlanIps) === JSON.stringify({ "10": "10.0.10.1/24" }), "vlan ips: only well-formed addresses of listed VLANs kept");
+  ok(t.warnings.some((w) => w.includes("du VLAN 20 invalide")), "vlan ips: invalid address warned");
+  const y = toContainerlab(t, "lab");
+  ok(y.includes('"ip link add link eth1 name eth1.10 type vlan id 10"') && y.includes('"ip addr add 10.0.10.1/24 dev eth1.10"'), "containerlab: VLAN subinterface with its address");
+  ok(y.includes("VLAN 10 ip 10.0.10.1/24"), "containerlab: VLAN address as comment");
+  const lines = vlanLines({ vlans: "10, 20, 30-35", vlanIps: { "10": "10.0.10.1/24" } });
+  ok(lines.join("|") === "VLAN 20, 30-35|VLAN 10 10.0.10.1/24", `label: plain VLANs together, one line per VLAN with an address (${lines.join(" | ")})`);
 }
 
 console.log(failures ? `\n${failures} ÉCHEC(S)` : "\nTOUT EST OK");

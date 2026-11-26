@@ -19,12 +19,12 @@ export function ipOf(v?: string): string | null {
   return ip && /^[0-9A-Fa-f:.]{2,45}$/.test(ip) ? ip : null;
 }
 
-/** Asks one of the user's machines which of these addresses it can reach. */
-export async function probeMachine(machine: Machine, ips: string[]): Promise<Record<string, { up: boolean; ms?: number }>> {
+/** Asks a machine the user can use which of these addresses it can reach (`boardId`: for a board's machine). */
+export async function probeMachine(machine: Machine, ips: string[], boardId?: string): Promise<Record<string, { up: boolean; ms?: number }>> {
   const rid = randomId();
   const ts = Date.now();
   const d = await boxJson(machine.auth, { targets: ips }, AAD.probe(rid, ts));
-  const r = await api.post<{ d: string }>(`/machines/${machine.id}/probe`, { rid, ts, d });
+  const r = await api.post<{ d: string }>(`/machines/${machine.id}/probe`, { rid, ts, d, boardId: machine.access === "board" ? boardId : undefined });
   const res = await unboxJson<{ r?: Record<string, { up: boolean; ms?: number }> }>(machine.auth, r.d, AAD.probeRes(rid));
   return res.r ?? {};
 }
@@ -67,8 +67,8 @@ export function planProbes(x: ExcalidrawImperativeAPI, liveMachine: (nodeId: str
 export const planKey = (plan: ProbePlan) =>
   JSON.stringify([...plan].sort(([a], [b]) => a.localeCompare(b)).map(([m, l]) => [m, l.map((e) => `${e.key}=${e.ip}`).sort()]));
 
-/** Runs a plan on the user's own online machines; ends with no such machine are left out. */
-export async function runProbes(plan: ProbePlan, machines: Machine[]): Promise<LinkStates> {
+/** Runs a plan on the online machines the user can use; ends with no such machine are left out. */
+export async function runProbes(plan: ProbePlan, machines: Machine[], boardId?: string): Promise<LinkStates> {
   const out: LinkStates = {};
   await Promise.all(
     [...plan].map(async ([machineId, ends]) => {
@@ -76,7 +76,7 @@ export async function runProbes(plan: ProbePlan, machines: Machine[]): Promise<L
       if (!m?.online) return;
       const ips = [...new Set(ends.map((e) => e.ip))].slice(0, 32);
       try {
-        const r = await probeMachine(m, ips);
+        const r = await probeMachine(m, ips, boardId);
         for (const e of ends) if (r[e.ip]) out[e.key] = { up: r[e.ip].up, ms: r[e.ip].ms, from: m.name };
       } catch {
         // Busy, offline or no answer: those ends stay without a state this round.

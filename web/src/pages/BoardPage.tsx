@@ -10,7 +10,7 @@ import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } 
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
-import { listMachines, type Machine } from "../vault.ts";
+import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
 import { TileCustomizer, type TilePatch } from "../board/TileCustomizer.tsx";
@@ -208,6 +208,44 @@ function Editor({ node }: { node: Node }) {
     session.setApi(excalidraw);
   }, [session, excalidraw]);
 
+  // Machines their owners linked to this board are offered to its editors too (see vault.ts).
+  useEffect(() => {
+    setMachineBoard(editor ? { id: node.id, key: node.key! } : null);
+    return () => setMachineBoard(null);
+  }, [node.id, node.key, editor]);
+
+  // Our machines get linked to this board when we open a shell or a site on them (linkMachine);
+  // here the links are kept in step: removed once the machine has no session here, refreshed
+  // after a rename, restored after a key rotation.
+  useEffect(() => {
+    if (!editor || !excalidraw || conn !== "online") return;
+    let last = "";
+    let running = false;
+    const sync = async () => {
+      if (running) return;
+      const mine = (m: { machineOwnerId: string | null; machineId: string }) => m.machineOwnerId === user.id;
+      const used = new Set([...session.terminals.values()].filter(mine).map((t) => t.machineId).concat([...session.webs.values()].filter(mine).map((w) => w.machineId)));
+      const key = JSON.stringify([...used].sort());
+      if (key === last) return;
+      running = true;
+      try {
+        await syncBoardLinks(keys, { id: node.id, key: node.key! }, used);
+        last = key;
+      } catch {
+        // Try again on the next change or tick.
+      } finally {
+        running = false;
+      }
+    };
+    const off = session.on("terminals", () => void sync());
+    const timer = setInterval(sync, 30_000);
+    void sync();
+    return () => {
+      off();
+      clearInterval(timer);
+    };
+  }, [editor, excalidraw, conn, session, keys, user.id, node.id, node.key]);
+
   // Once the scene is in, convert terminals from before machine icons existed (editors only).
   const migrated = useRef(false);
   useEffect(() => {
@@ -250,6 +288,7 @@ function Editor({ node }: { node: Node }) {
       setPicker(null);
       try {
         const info = await session.createTerminal(machine, 100, 30, target);
+        linkMachine({ id: session.boardId, key: session.key }, machine).catch(() => {});
         localStorage.setItem(LAST_MACHINE, machine.id);
         const near = nodeId ? findEl(x, nodeId) : undefined;
         const owner = near && !near.isDeleted ? near : undefined;
@@ -351,7 +390,10 @@ function Editor({ node }: { node: Node }) {
             !!live ||
             (await confirmDialog({
               title: `Ouvrir un shell sur ${m.name} ?`,
-              text: `Le shell s'ouvre sur ta machine ${m.name}, et les éditeurs de ce tableau pourront s'en servir.`,
+              text:
+                m.access === "owner"
+                  ? `Le shell s'ouvre sur ta machine ${m.name}, et les éditeurs de ce tableau pourront s'en servir.`
+                  : `Le shell s'ouvre sur ${m.name}, la machine de ${m.ownerName ?? "quelqu'un d'autre"}, et les éditeurs de ce tableau pourront s'en servir.`,
               confirm: "Ouvrir",
             }));
           if (ok) newShell(m, nodeId);
@@ -620,7 +662,7 @@ function Editor({ node }: { node: Node }) {
           machines = await listMachines(keys);
           machinesAt = Date.now();
         }
-        const states = await runProbes(plan, machines);
+        const states = await runProbes(plan, machines, node.id);
         if (!stopped) setLinks((prev) => (JSON.stringify(prev) === JSON.stringify(states) ? prev : states));
         lastKey = key;
         lastRun = Date.now();
@@ -1080,6 +1122,7 @@ function Editor({ node }: { node: Node }) {
                   setAccess(null);
                   try {
                     const web = await session.createWeb(machine, target);
+                    linkMachine({ id: session.boardId, key: session.key }, machine).catch(() => {});
                     if (x) addWeb(x, nodeId, web.id, machine.id, machine.name);
                   } catch (e) {
                     toast.error(e);
@@ -1251,7 +1294,7 @@ function MachinePicker({ anchor, onClose, onPick, onRemote }: { anchor: MenuAnch
       )}
       {machines?.length === 0 && (
         <div style={{ padding: "6px 10px 10px", fontSize: 13, color: "var(--text-2)", maxWidth: 260 }}>
-          Aucune machine. Ajoute un agent sur une de tes machines pour ouvrir des terminaux (tu ne peux utiliser que les tiennes).
+          Aucune machine. Ajoute un agent sur une de tes machines pour ouvrir des terminaux, ou demande à quelqu'un de te partager la sienne.
         </div>
       )}
       {machines?.map((m) => (
@@ -1260,6 +1303,7 @@ function MachinePicker({ anchor, onClose, onPick, onRemote }: { anchor: MenuAnch
           <span style={{ flex: 1 }}>
             {m.name}
             {m.hostname && <span style={{ color: "var(--muted)", fontSize: 12 }}> · {m.hostname}</span>}
+            {m.ownerName && <span style={{ color: "var(--muted)", fontSize: 12 }}> · de {m.ownerName}</span>}
           </span>
           {m.id === last && <Check size={14} style={{ color: "var(--muted)" }} />}
         </button>

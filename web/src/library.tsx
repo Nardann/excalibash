@@ -333,12 +333,13 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
       grants.push({ itemId: g.itemId, userId: g.userId, wrappedKey: await sealKey(pub, newKeys.get(g.itemId)!, AAD.grant(g.itemId, g.userId)) });
     }
 
-    // Terminals on our own machines get a fresh key; the others are closed by the server.
-    const machines = new Map((await listMachines(ctx.keys)).map((m) => [m.id, m]));
+    // Terminals on machines whose auth key we hold (ours, or shared with us directly) get a fresh
+    // key; the others are closed by the server.
+    const machines = new Map((await listMachines(ctx.keys)).filter((m) => m.access !== "board").map((m) => [m.id, m]));
     const terminals = [];
     for (const t of snap.terminals) {
       const m = machines.get(t.machineId);
-      if (t.machineOwnerId !== ctx.user.id || !m) continue;
+      if (!m) continue;
       const label = await unboxText(oldKeys.get(t.boardId)!, t.encLabel, AAD.termLabel(t.boardId, t.id)).catch(() => m.name);
       const kt = await newSymKey();
       const nk = newKeys.get(t.boardId)!;
@@ -354,7 +355,7 @@ export async function revokeAccess(ctx: Ctx, rootId: string, userId: string, onP
     const webs = [];
     for (const w of snap.webs ?? []) {
       const m = machines.get(w.machineId);
-      if (w.machineOwnerId !== ctx.user.id || !m) continue;
+      if (!m) continue;
       const target = await unboxJson<{ url: string; insecure: boolean; machine: string }>(oldKeys.get(w.boardId)!, w.encLabel, AAD.webLabel(w.boardId, w.id)).catch(() => null);
       if (!target) continue;
       const kw = await newSymKey();

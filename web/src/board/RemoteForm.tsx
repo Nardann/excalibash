@@ -38,6 +38,7 @@ export function MachineField({ label, choice }: { label: string; choice: ReturnT
         {choice.machines?.map((m) => (
           <option key={m.id} value={m.id}>
             {m.name}
+            {m.ownerName ? ` · de ${m.ownerName}` : ""}
             {m.online ? "" : " (hors ligne)"}
           </option>
         ))}

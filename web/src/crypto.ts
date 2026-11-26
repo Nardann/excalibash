@@ -244,5 +244,9 @@ export const AAD = {
   machine: (machineId: string) => `eb:machine:${machineId}`,
   machineName: (machineId: string) => `eb:machine:${machineId}:name`,
   machineAuth: (machineId: string) => `eb:machine-auth:${machineId}`,
+  /** A machine shared with one person: sealed to their public key (which the seal already binds). */
+  machineShare: (machineId: string) => `eb:machine-share:${machineId}`,
+  /** A machine linked to a board: boxed under the board key, for its editors. */
+  machineLink: (boardId: string, machineId: string) => `eb:machine-link:${boardId}:${machineId}`,
   vault: (userId: string) => `eb:vault:${userId}`,
 };

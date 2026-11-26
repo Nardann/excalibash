@@ -31,6 +31,20 @@ export type RawMachine = {
   arch: string | null;
   lastSeen: number | null;
   online: boolean;
+  shareBoards: boolean;
+};
+
+/** A machine someone else shared (directly, or through a board): its keys sealed or boxed for us. */
+export type RawSharedMachine = {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  key: string;
+  hostname: string | null;
+  os: string | null;
+  arch: string | null;
+  lastSeen: number | null;
+  online: boolean;
 };
 
 /** Element as the server sees it: merge metadata + ciphertext. */
