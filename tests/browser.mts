@@ -203,6 +203,9 @@ try {
   const agent = spawn(agentBin, ["--server", BASE, "--pair", code.toLowerCase(), "--config", join(agentHome, "agent.json"), "--name", "vm-tp"], { cwd: agentHome, env: { ...process.env, HOME: agentHome }, stdio: ["ignore", "ignore", "pipe"] });
   agent.stderr!.on("data", (d) => agentLog.push(String(d)));
   children.push(agent);
+  // The machine prints a confirmation code under its fingerprint; it never goes through the server.
+  const confirmCode = await until("code de confirmation de la machine", () => agentLog.join("").match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 30000);
+  await A.page.getByLabel("Code de confirmation affiché sur la machine").fill(confirmCode);
   await A.page.getByRole("button", { name: "C'est la même" }).click({ timeout: 30000 });
   const fp = (await A.page.locator(".pair-fp").innerText().catch(() => "")).trim();
   await until("agent en ligne", () => A.page.locator(".dot.on").first().isVisible(), 30000);
