@@ -530,7 +530,9 @@ passe par un terminal **local** déjà ouvert et est autorisé par sa clé `K_t`
   que l'agent tourne en root, ou que `tcpdump` ait `CAP_NET_RAW` : sinon l'agent renvoie un message clair (avec la commande
   `setcap`) et la ligne d'origine de tcpdump en détail ; toutes les lignes d'erreur sont lues, pas seulement la première.
   « Arrêter » termine la capture proprement et livre ce qui a été capturé. Dans le tableau, la capture se lance depuis
-  l'extrémité d'un câble dont l'interface est renseignée, sur une icône qui a un shell local en cours.
+  l'extrémité d'un câble, sur une icône qui a un shell local en cours ; l'interface se choisit dans la liste de celles de la
+  machine (opération `ifaces` du canal de fichiers : noms, état et adresses lus par `net.Interfaces`, sans rien exécuter,
+  scellés comme le reste ; le serveur ne les voit pas). Les erreurs de tcpdump restent affichées dans le panneau.
 
 ## Client MCP
 

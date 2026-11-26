@@ -172,6 +172,10 @@ func (h *fileHub) handle(msg message, out *outbox) {
 		}
 	case "ls":
 		go h.ls(msg.ID, msg.Rid, c, op)
+	case "ifaces":
+		// The capture panel offers the machine's real interfaces. Names and addresses only, from the
+		// kernel's list (net.Interfaces): nothing is executed, and the answer is sealed like the rest.
+		go h.replyOnce(msg.ID, msg.Rid, map[string]any{"ifaces": listIfaces(systemIfaces)})
 	case "put":
 		x, text := h.register(msg.ID, op.Xfer, msg.Rid, true)
 		if x == nil {

@@ -58,6 +58,11 @@ export class FileClient {
     private term: string,
   ) {}
 
+  /** The terminal this client talks through (a stable identity: the client itself is cheap and rebuilt often). */
+  get terminal(): string {
+    return this.term;
+  }
+
   /**
    * Refuses early, with the update instructions, what the machine's agent announced it cannot do.
    * Unknown terminals and hosts without a terminal list are not judged (the agent will answer).
