@@ -49,7 +49,9 @@ function endData(v: any): EndInfo | undefined {
 const isVlan = (k: string) => /^\d{1,4}$/.test(k) && +k >= 1 && +k <= 4094;
 function vlanIpsData(v: any): Record<string, string> | undefined {
   if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-  const out: Record<string, string> = Object.create(null);
+  // A plain object: it ends up in the element's customData, which Excalidraw deep-copies with
+  // hasOwnProperty. Keys are VLAN numbers only, so "__proto__" and the like never get in.
+  const out: Record<string, string> = {};
   for (const [k, ip] of Object.entries(v).slice(0, 128)) if (isVlan(k) && s(ip)) out[k] = (ip as string).slice(0, 64);
   return Object.keys(out).length ? out : undefined;
 }
