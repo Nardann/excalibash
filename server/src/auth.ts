@@ -1,9 +1,10 @@
 import { isIPv4, isIPv6 } from "node:net";
-import { scryptSync, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
+import { scrypt, scryptSync, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Request, Response, NextFunction } from "express";
 import { db, serverSecret } from "./db.ts";
 import { config } from "./config.ts";
+import { tlsOn } from "./tls.ts";
 
 export type User = {
   id: string;
@@ -33,6 +34,19 @@ export type UserRow = {
 };
 
 export const COOKIE = "eb_session";
+/**
+ * Over HTTPS the session cookie carries the __Host- prefix: the browser then only accepts it
+ * Secure, for this exact host and path /. The tunnel origin (same host, another port, so
+ * "same-site") can neither set one to log someone in as another account nor overwrite it.
+ */
+export const SECURE_COOKIE = "__Host-eb_session";
+
+/** When HTTPS is certain, a cookie without the prefix (one any same-site page could set) is ignored. */
+const strictCookies = () => config.cookieSecure || tlsOn();
+
+function sessionToken(header: string | undefined): string | undefined {
+  return readCookie(header, SECURE_COOKIE) ?? (strictCookies() ? undefined : readCookie(header, COOKIE));
+}
 
 const COLORS = ["#4f46e5", "#e11d48", "#059669", "#d97706", "#0891b2", "#7c3aed", "#db2777", "#65a30d"];
 
@@ -63,6 +77,41 @@ const DUMMY_HASH = hashSecret("excalibash-dummy");
 /** Same cost as a real check, so unknown emails cannot be told apart by timing. */
 export function burnVerify(secret: string): false {
   verifySecret(secret, DUMMY_HASH);
+  return false;
+}
+
+// The same, off the main thread (libuv pool), for routes anyone can call: a burst of logins must not
+// stall every board and terminal. At most a few at once; the others wait their turn.
+const SCRYPT_SLOTS = 4;
+let scryptBusy = 0;
+const scryptQueue: (() => void)[] = [];
+
+async function scryptAsync(secret: string, salt: Buffer, len: number): Promise<Buffer> {
+  if (scryptBusy >= SCRYPT_SLOTS) await new Promise<void>((r) => scryptQueue.push(r));
+  scryptBusy++;
+  try {
+    return await new Promise<Buffer>((resolve, reject) => scrypt(secret, salt, len, (e, k) => (e ? reject(e) : resolve(k))));
+  } finally {
+    scryptBusy--;
+    scryptQueue.shift()?.();
+  }
+}
+
+export async function hashSecretAsync(secret: string): Promise<string> {
+  const salt = randomBytes(16);
+  const hash = await scryptAsync(secret, salt, 32);
+  return `scrypt$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+export async function verifySecretAsync(secret: string, stored: string): Promise<boolean> {
+  const [, salt, hash] = stored.split("$");
+  if (!salt || !hash) return false;
+  const expected = Buffer.from(hash, "base64");
+  return timingSafeEqual(expected, await scryptAsync(secret, Buffer.from(salt, "base64"), expected.length));
+}
+
+export async function burnVerifyAsync(secret: string): Promise<false> {
+  await verifySecretAsync(secret, DUMMY_HASH);
   return false;
 }
 
@@ -140,17 +189,18 @@ export function createSession(req: Request, res: Response, userId: string): void
     "INSERT INTO sessions (token_hash, user_id, expires_at, public_id, created_at, last_used_at, user_agent_label, ip_prefix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(sha256(token), userId, expires, randomBytes(8).toString("hex"), now, now, uaLabel(req.headers["user-agent"]), ipPrefix(req.ip));
   used.set(sha256(token), now);
-  res.cookie(COOKIE, token, {
+  const secure = config.cookieSecure || req.secure;
+  res.cookie(secure ? SECURE_COOKIE : COOKIE, token, {
     httpOnly: true,
     sameSite: "strict",
-    secure: config.cookieSecure || req.secure,
+    secure,
     expires: new Date(expires),
     path: "/",
   });
 }
 
 export function currentSessionHash(req: IncomingMessage): string | undefined {
-  const token = readCookie(req.headers.cookie, COOKIE);
+  const token = sessionToken(req.headers.cookie);
   return token ? sha256(token) : undefined;
 }
 
@@ -158,6 +208,7 @@ export function destroySession(req: Request, res: Response): void {
   const hash = currentSessionHash(req);
   if (hash) db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hash);
   res.clearCookie(COOKIE, { path: "/" });
+  res.clearCookie(SECURE_COOKIE, { path: "/", secure: true });
 }
 
 export function readCookie(header: string | undefined, name: string): string | undefined {

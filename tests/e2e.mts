@@ -882,6 +882,7 @@ site.close();
   ok(pairOut.includes(fp), "l'empreinte affichée sur la machine est celle montrée dans le navigateur");
   const confirm = pairOut.match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1];
   ok(!!confirm, "la machine affiche un code de confirmation");
+  ok(c.confirmValid(c.normalizeConfirm(confirm!)) && !c.confirmValid("7KQ4FDX6") && c.confirmValid("7KQ4FDX5"), "le code de confirmation porte une lettre de contrôle (même calcul que l'agent)");
   await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, confirm!, "vm-tp"));
   const exit = await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
   ok(exit === 0, "l'agent est appairé et sa configuration enregistrée");
@@ -1175,6 +1176,7 @@ if (process.env.UPDATE_V1_BIN && process.env.UPDATE_SIGN && process.env.UPDATE_K
   ok(lb.text.includes("Tableau confidentiel") && lb.text.includes(B), "MCP : lister_tableaux déchiffre les noms localement");
   const board = await m1.call("lire_tableau", { tableau: "Tableau confidentiel" });
   ok(!board.isError && board.text.includes("Tableau confidentiel"), "MCP : lire_tableau accepte le nom exact");
+  ok(lb.text.startsWith("[Contenu écrit par des tiers") && board.text.startsWith("[Contenu écrit par des tiers"), "MCP : noms et textes de tableau marqués comme non fiables");
   const lt = await m1.call("lister_terminaux", { tableau: B });
   ok(lt.text.includes(tid2) && lt.text.includes("shell"), "MCP : lister_terminaux");
   const rd = await m1.call("lire_terminal", { tableau: B, terminal: tid2, lignes: 50 });
@@ -1981,7 +1983,9 @@ if (process.env.UPDATE_V1_BIN && process.env.UPDATE_SIGN && process.env.UPDATE_K
       ok(codeDoc.readOutputs(crA.ydoc)[0]?.text === "7\n" && codeDoc.readOutputs(crA.ydoc).length === 2, "code : la nouvelle exécution a remplacé les sorties précédentes");
       await nap(300);
       const rawNow = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
-      ok(!rawNow.includes("calc.py") && !rawNow.includes("ValueError") && !rawNow.includes("('boum')"), "code : ni le nom du fichier ni les sorties en clair dans la base");
+      // A whole word only: a short word turns up by chance inside megabytes of base64 ciphertext.
+      const clear = (w: string) => new RegExp(`(^|[^A-Za-z0-9_-])${w.replace(".", "\\.")}($|[^A-Za-z0-9_-])`).test(rawNow);
+      ok(!clear("calc.py") && !clear("ValueError") && !clear("boum"), "code : ni le nom du fichier ni les sorties en clair dans la base");
       codeRun.destroy();
       codeRunB.destroy();
       crA.destroy();

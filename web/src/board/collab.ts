@@ -94,6 +94,8 @@ export class BoardSession {
   private webKeys = new Map<string, Promise<SymKey>>();
   private pendingWebs = new Map<string, { resolve: (w: WebInfo) => void; reject: (e: Error) => void }>();
   private termKeys = new Map<string, Promise<SymKey>>();
+  /** Output generations each terminal has moved past (a restart, a rekey): refused from then on. */
+  private oldGens = new Map<string, Set<string>>();
   private termListeners = new Map<string, Set<TermListener>>();
   /** Last output sequence accepted per terminal, to drop replayed or reordered chunks. */
   private termSeq = new Map<string, { gen: string; seq: number }>();
@@ -335,7 +337,9 @@ export class BoardSession {
       case "term.replay": {
         const ls = this.termListeners.get(msg.id);
         if (!ls?.size || !this.awaitingReplay.delete(msg.id)) return;
+        // A replay starts over (scrollback may span a restart); within it, generations still only move forward.
         this.termSeq.delete(msg.id);
+        this.oldGens.delete(msg.id);
         const parts: Uint8Array[] = [];
         for (const c of msg.chunks as Chunk[]) {
           const d = await this.decryptOutput(msg.id, c);
@@ -548,8 +552,17 @@ export class BoardSession {
     if (!kp) return null;
     const last = this.termSeq.get(id);
     if (last && last.gen === c.gen && c.seq <= last.seq) return null;
+    // A generation left behind never comes back: otherwise the server could slip one old chunk in,
+    // then replay the current generation's chunks from the start.
+    const left = this.oldGens.get(id);
+    if (left?.has(c.gen)) return null;
     try {
       const data = await unbox(await kp, c.d, AAD.termOut(id, c.gen, c.seq));
+      if (last && last.gen !== c.gen) {
+        const seen = left ?? new Set<string>();
+        seen.add(last.gen);
+        this.oldGens.set(id, seen);
+      }
       if (last?.gen !== c.gen) this.termSeq.set(id, { gen: c.gen, seq: c.seq });
       else last.seq = c.seq;
       for (const wake of this.genWaiters.get(id)?.splice(0) ?? []) wake();

@@ -91,7 +91,7 @@ export function ShareModal({ node, onClose, giving = false }: { node: Node; onCl
   const changeRole = async (m: Member, next: Role) => {
     setBusy(m.userId);
     try {
-      await shareItem(ctx, node.id, { id: m.userId, email: m.email, publicKey: m.publicKey }, next);
+      await shareItem(ctx, node.id, { id: m.userId, email: m.email, publicKey: m.publicKey }, next, false, true);
       await load();
     } catch (e) {
       toast.error(e);

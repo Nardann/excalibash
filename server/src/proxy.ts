@@ -18,13 +18,22 @@ const ID = /^[A-Za-z0-9_-]{16,43}$/;
 /** Excalibash's own origin, the only one allowed to hand tunnel keys to this origin. */
 export function mainOrigin(req: Request): string {
   if (config.publicUrl) return new URL(config.publicUrl).origin;
-  return `${req.protocol}://${req.hostname}:${config.port}`;
+  return `${req.protocol}://${hostOf(req)}:${config.port}`;
 }
 
 /** Public URL of the proxy origin, as seen from Excalibash's own origin. */
 export function proxyUrl(req: Request): string {
   if (config.proxyUrl) return config.proxyUrl.replace(/\/$/, "");
-  return `${req.protocol}://${req.hostname}:${config.proxyPort}`;
+  return `${req.protocol}://${hostOf(req)}:${config.proxyPort}`;
+}
+
+/**
+ * The Host of a request when no URL is configured. It ends up inside served JavaScript and CSP
+ * headers: anything but a plain name or address becomes "localhost" (no quote, no space, no $).
+ */
+function hostOf(req: Request): string {
+  const h = req.hostname ?? "";
+  return /^[a-z0-9.-]{1,253}$/i.test(h) || /^\[[0-9a-f:.]{2,45}\]$/i.test(h) ? h : "localhost";
 }
 
 const asset = (name: string) => readFileSync(join(import.meta.dirname, "proxy", name), "utf8");
@@ -111,7 +120,8 @@ const LOCAL_PEER = /^(::1$|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|f[cd]
 function clientIp(req: IncomingMessage): string {
   const peer = req.socket.remoteAddress ?? "?";
   const fwd = req.headers["x-forwarded-for"];
-  if (config.trustProxy !== "false" && LOCAL_PEER.test(peer) && typeof fwd === "string") return fwd.split(",")[0]!.trim() || peer;
+  // The last entry is the one our proxy added; earlier ones come from the client and can be anything.
+  if (config.trustProxy !== "false" && LOCAL_PEER.test(peer) && typeof fwd === "string") return fwd.split(",").at(-1)!.trim() || peer;
   return peer;
 }
 
@@ -131,7 +141,14 @@ function upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
   if (!rateLimit(`proxyws:${clientIp(req)}`, 600)) return reject(429, "Too Many Requests");
   const id = m[1]!;
   if (!tunnelExists(id)) return reject(404, "Not Found");
-  socketWss.handleUpgrade(req, socket, head, (ws) => attachTunnelSocket(ws, id));
+  socketWss.handleUpgrade(req, socket, head, (ws) => {
+    try {
+      attachTunnelSocket(ws, id);
+    } catch (e) {
+      console.error("[proxy ws]", e);
+      ws.close(1011, "erreur serveur");
+    }
+  });
 }
 
 export function startProxy(): Listener {

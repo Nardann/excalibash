@@ -15,7 +15,7 @@ import {
   type Machine,
   type MachineShare,
 } from "../vault.ts";
-import { CONFIRM_RE, fingerprint, fromB64, normalizeConfirm } from "../crypto.ts";
+import { confirmValid, fingerprint, fromB64, normalizeConfirm } from "../crypto.ts";
 import { Modal, Switch, confirmDialog, copyText, toast } from "../components/ui.tsx";
 import { ShareMachineModal } from "../components/ShareMachineModal.tsx";
 import { UpdateHowTo, useUpdateCommand } from "../components/AgentOutdated.tsx";
@@ -90,7 +90,7 @@ export function Machines() {
     const { shares } = await machineShares(m.id).catch(() => ({ shares: [] as MachineShare[] }));
     const stale: string[] = [];
     for (const sh of shares) {
-      await shareMachine(user, keys, { ...m, name: name.trim() }, { id: sh.userId, email: sh.email, publicKey: sh.publicKey }).catch(() => stale.push(sh.name));
+      await shareMachine(user, keys, { ...m, name: name.trim() }, { id: sh.userId, email: sh.email, publicKey: sh.publicKey }, false, true).catch(() => stale.push(sh.name));
     }
     if (stale.length) toast.error(`Nouveau nom non transmis à ${stale.join(", ")} (clé changée ou erreur) : partage à vérifier.`);
     load();
@@ -354,6 +354,11 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
               onChange={(e) => setConfirm(e.target.value)}
             />
           </label>
+          {normalizeConfirm(confirm).length === 8 && !confirmValid(normalizeConfirm(confirm)) && (
+            <p className="sub" style={{ margin: "6px 0 0" }}>
+              Ce code ne correspond pas : vérifie chaque caractère.
+            </p>
+          )}
           <label className="field" style={{ marginTop: 16 }}>
             Nom dans Excalibash (chiffré)
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
@@ -363,7 +368,7 @@ function PairingModal({ onClose, onShare }: { onClose: () => void; onShare: (mac
             <button className="btn" onClick={cancel}>
               Ce n'est pas la même
             </button>
-            <button className="btn btn-primary" disabled={busy || !CONFIRM_RE.test(normalizeConfirm(confirm))} onClick={approve}>
+            <button className="btn btn-primary" disabled={busy || !confirmValid(normalizeConfirm(confirm))} onClick={approve}>
               C'est la même
             </button>
           </div>

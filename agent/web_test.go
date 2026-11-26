@@ -163,3 +163,21 @@ func TestWebRequestForgedDoesNotBurnNonce(t *testing.T) {
 		t.Fatalf("%d forwards, want 1", hits.Load())
 	}
 }
+
+func TestUnderTarget(t *testing.T) {
+	for _, c := range []struct{ prefix, p, want string }{
+		{"/app", "/x", "/app/x"},
+		{"/app/", "/x/", "/app/x/"},
+		{"/app", "/../admin", "/app/admin"},
+		{"/app", "/a/../../../etc", "/app/etc"},
+		{"", "/", "/"},
+		{"/app", "/", "/app/"},
+		{"/app", "/redirect/http://x", "/app/redirect/http://x"},
+		{"/app", "/a//b/./c", "/app/a//b/./c"},
+		{"/app", "/a/b/..", "/app/a/"},
+	} {
+		if got := underTarget(c.prefix, c.p); got != c.want {
+			t.Errorf("underTarget(%q, %q) = %q, want %q", c.prefix, c.p, got, c.want)
+		}
+	}
+}
