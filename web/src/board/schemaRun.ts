@@ -5,6 +5,7 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { ApiError, api } from "../api.ts";
 import { AAD, boxJson, randomId, unboxJson } from "../crypto.ts";
 import type { Machine } from "../vault.ts";
+import { OutdatedError, supports } from "../agentCaps.ts";
 import { cableOf, type End } from "./cables.ts";
 import { findEl, nodeDataOf } from "./nodes.ts";
 import { compareEnds, type Comparison, type IfaceInfo, type NodeEnd } from "./schemaCheck.ts";
@@ -17,8 +18,8 @@ export type SchemaPlan = {
 };
 
 export type MachineCheck =
-  | ({ machineId: string; name: string } & Comparison & { error?: undefined })
-  | { machineId: string; name: string; error: string; ends?: undefined; extra?: undefined };
+  | ({ machineId: string; name: string } & Comparison & { error?: undefined; outdated?: undefined })
+  | { machineId: string; name: string; error: string; /** The agent is too old for the check: shown with the way to update it. */ outdated?: boolean; ends?: undefined; extra?: undefined };
 
 /** The tile an anchor stands for: the element itself, or the tile inside a group. */
 function tileOf(x: ExcalidrawImperativeAPI, a: { id?: string; group?: string }) {
@@ -110,6 +111,7 @@ export async function runSchemaCheck(plan: SchemaPlan, machines: Machine[], boar
       const name = m?.name ?? "Machine";
       if (!m) out[i] = { machineId, name, error: "machine introuvable" };
       else if (!m.online) out[i] = { machineId, name, error: "machine hors ligne" };
+      else if (!supports(m.agentCaps, "schema")) out[i] = { machineId, name, error: new OutdatedError(name, "schema").message, outdated: true };
       else {
         try {
           out[i] = { machineId, name, ...compareEnds(ends, await probeWithRetry(m, boardId)) };

@@ -31,7 +31,7 @@ import { MonacoBinding } from "y-monaco";
 import type * as Monaco from "monaco-editor";
 import { monaco } from "./monacoEnv.ts";
 import type { BoardSession } from "./collab.ts";
-import { openSharedDoc, type SharedDoc } from "./sharedDoc.ts";
+import type { SharedDoc } from "./sharedDoc.ts";
 import { cursorStyleSheet, isDirty, safeColor, safeLabel, sha256Hex } from "./codeDoc.ts";
 import { openMachineFile, pickLocalShell, saveMachineFile } from "./machineFiles.ts";
 import {
@@ -39,6 +39,7 @@ import {
   NotebookFormatError,
   cellViews,
   cellsOf,
+  orderOf,
   clearOutputs,
   deleteCell,
   exportIpynb,
@@ -62,8 +63,11 @@ import {
   type CellType,
   type NotebookMeta,
 } from "./notebookDoc.ts";
-import { classifyOutputs, frameHeight, markdownFrame, parseAnsi, type RenderItem } from "./notebookRender.ts";
-import { NotebookRunner, type TermPort } from "./notebookRunner.ts";
+import { classifyOutputs, frameHeight, markdownFrame } from "./notebookRender.ts";
+import { Outputs } from "./OutputView.tsx";
+import type { NotebookRunner } from "./notebookRunner.ts";
+import { acquireNotebook, sessionEnv } from "./notebookService.ts";
+import { bindPythonKernel, type KernelQuery } from "./pyKernel.ts";
 
 /** What the window needs from the app (handed in by the board page: this chunk must not import the UI kit, see BoardPage). */
 export type NotebookHost = {
@@ -73,7 +77,7 @@ export type NotebookHost = {
   /** The machine of the node when this user may open a kernel session on it (holds its machine key); null otherwise. */
   kernelMachine: (nodeId: string) => Promise<{ name: string } | null>;
   /** Asks the user, then starts a kernel session on the node's machine. Resolves with the terminal id, null if cancelled. */
-  startKernel: (nodeId: string, cwd?: string) => Promise<string | null>;
+  startKernel: (nodeId: string, cwd?: string, purpose?: "code" | "notebook") => Promise<string | null>;
 };
 
 type Props = {
@@ -87,6 +91,8 @@ type Props = {
   title?: string | null;
   onHide?: () => void;
   onRemove?: () => void;
+  /** The file name changed (opened, saved as): the node remembers it as the label of this window. */
+  onLabel?: (name: string) => void;
 };
 
 type Person = { clientId: number; name: string; color: string; self: boolean };
@@ -122,15 +128,21 @@ function useMarkdown(): ((md: string) => string) | undefined {
   return fn;
 }
 
-/** The document handle of this window: opened with it, released with it. */
+/**
+ * The notebook service of this window (document + kernel runner, see notebookService.ts): joined with the
+ * window, released with it. The service itself outlives the window while a run is in flight.
+ */
 function useDoc(session: BoardSession, docId: string, toast: (t: string) => void) {
   const [doc, setDoc] = useState<SharedDoc | null>(null);
+  const [runner, setRunner] = useState<NotebookRunner | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    const d = openSharedDoc(session, docId);
+    const h = acquireNotebook(session, sessionEnv(session), docId);
+    const d = h.doc;
     setDoc(d);
+    setRunner(h.runner);
     setReady(false);
     const off = d.onError((m) => live && setError(m));
     d.synced.then(async () => {
@@ -153,65 +165,10 @@ function useDoc(session: BoardSession, docId: string, toast: (t: string) => void
     return () => {
       live = false;
       off();
-      d.destroy();
+      h.release();
     };
   }, [session, docId, toast]);
-  return { doc, ready, error };
-}
-
-// ---- outputs ----------------------------------------------------------------------------------------------------------
-
-function AnsiText({ text }: { text: string }) {
-  return (
-    <>
-      {parseAnsi(text).map((s, i) =>
-        s.fg || s.bg || s.bold || s.dim || s.italic || s.underline ? (
-          <span key={i} style={{ color: s.fg, background: s.bg, fontWeight: s.bold ? 700 : undefined, opacity: s.dim ? 0.7 : undefined, fontStyle: s.italic ? "italic" : undefined, textDecoration: s.underline ? "underline" : undefined }}>
-            {s.text}
-          </span>
-        ) : (
-          s.text
-        ),
-      )}
-    </>
-  );
-}
-
-/** Output items as DOM: text nodes, data: images and sandboxed frames. Never innerHTML. */
-function Outputs({ items }: { items: RenderItem[] }) {
-  return (
-    <>
-      {items.map((it, i) => {
-        switch (it.kind) {
-          case "text":
-            return (
-              <pre key={i} className={`nb-text ${it.stream === "stderr" ? "err" : ""}`}>
-                <AnsiText text={it.text} />
-              </pre>
-            );
-          case "error":
-            return (
-              <pre key={i} className="nb-text nb-error">
-                <b>{it.ename}</b>
-                {it.evalue ? `: ${it.evalue}` : ""}
-                {it.traceback ? `\n${it.traceback}` : ""}
-              </pre>
-            );
-          case "image":
-            return <img key={i} className="nb-img" src={it.src} alt="Sortie du notebook" />;
-          case "frame":
-            // sandbox="" : no script, no same-origin, no forms, no popups, no top navigation.
-            return <iframe key={i} className="nb-frame" sandbox="" srcDoc={it.srcdoc} title={it.label} style={{ height: it.height }} referrerPolicy="no-referrer" loading="lazy" />;
-          case "note":
-            return (
-              <div key={i} className="nb-note">
-                {it.text}
-              </div>
-            );
-        }
-      })}
-    </>
-  );
+  return { doc, runner, ready, error };
 }
 
 // ---- one cell -----------------------------------------------------------------------------------------------------------
@@ -227,6 +184,8 @@ type CellApi = {
   move: (id: string, delta: -1 | 1) => void;
   setType: (id: string, type: CellType) => void;
   clear: (id: string) => void;
+  /** The kernel that answers completion and docstring requests, if there is one. */
+  kernel: () => KernelQuery | null;
 };
 
 type CellProps = {
@@ -324,7 +283,10 @@ const NotebookCell = memo(function NotebookCell(p: CellProps) {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => (type === "markdown" ? setEditing(false) : api.run(id)));
     if (type === "markdown") editor.addCommand(monaco.KeyCode.Escape, () => setEditing(false));
     if (type === "markdown" && editing) editor.focus();
+    // Completion and docstrings of a code cell come from the notebook's kernel (Ctrl+Espace, ".", Maj+Tab).
+    const unbind = type === "code" ? bindPythonKernel(editor, model, api.kernel) : undefined;
     return () => {
+      unbind?.();
       mountedRef.current = false;
       d1.dispose();
       d2.dispose();
@@ -446,9 +408,9 @@ const NotebookCell = memo(function NotebookCell(p: CellProps) {
 
 // ---- the window --------------------------------------------------------------------------------------------------------
 
-export default function NotebookEmbed({ host, session, docId, nodeId, active, shells, title, onHide, onRemove }: Props) {
+export default function NotebookEmbed({ host, session, docId, nodeId, active, shells, title, onHide, onRemove, onLabel }: Props) {
   const { theme, confirm: confirmDialog, toast } = host;
-  const { doc, ready, error } = useDoc(session, docId, toast);
+  const { doc, runner, ready, error } = useDoc(session, docId, toast);
   const rootRef = useRef<HTMLDivElement>(null);
   const [meta, setMeta] = useState<NotebookMeta>(() => ({ name: "sans-titre.ipynb", language: "python", nbformatMinor: 5 }));
   const [cellMaps, setCellMaps] = useState<{ id: string; map: Cell }[]>([]);
@@ -461,6 +423,12 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
   const [kStatus, setKStatus] = useState<{ status: string; fatal: string | null }>({ status: "absent", fatal: null });
   const [machine, setMachine] = useState<{ name: string } | null>(null);
   const readOnly = !session.canEdit || !!doc?.readOnly;
+  // The dock shows the file name: editors keep it in the node (a no-op when it is already there).
+  const labelRef = useRef(onLabel);
+  labelRef.current = onLabel;
+  useEffect(() => {
+    if (ready && !readOnly) labelRef.current?.(meta.name);
+  }, [ready, readOnly, meta.name]);
   const markdown = useMarkdown();
 
   // Terminal statuses (the kernel session among them) live in the session.
@@ -487,6 +455,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
     const ydoc = doc.ydoc;
     const mmap = metaOf(ydoc);
     const cells = cellsOf(ydoc);
+    const order = orderOf(ydoc);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let dupTimer: ReturnType<typeof setTimeout> | undefined;
     let gen = 0;
@@ -515,6 +484,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
     hash();
     mmap.observe(readM);
     cells.observe(readC);
+    order.observe(readC);
     ydoc.on("update", hash);
     const aw = doc.awareness;
     const readP = () => {
@@ -532,6 +502,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
       gen++;
       mmap.unobserve(readM);
       cells.unobserve(readC);
+      order.unobserve(readC);
       ydoc.off("update", hash);
       aw.off("change", readP);
     };
@@ -555,32 +526,15 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
   const termAlive = !!term && (term.status === "running" || term.status === "starting");
   const termGone = !!kernelTerm && (term ? !termAlive : session.state === "online");
   const runnerRef = useRef<NotebookRunner | null>(null);
+  runnerRef.current = runner;
+  // The runner belongs to the service (it follows the kernel session and the outputs even when this window is
+  // hidden): the window only mirrors its status.
   useEffect(() => {
-    if (!doc || !ready) return;
-    const port: TermPort = {
-      subscribe: (t, l) => session.subscribeTerminal(t, l),
-      input: (t, data) => session.terminalInput(t, data),
-    };
-    const r = new NotebookRunner(doc.ydoc, port, { awareness: doc.awareness, canEdit: !readOnly });
-    runnerRef.current = r;
-    const sync = () => setKStatus({ status: r.status, fatal: r.fatal });
-    const off = r.on(sync);
+    if (!runner) return;
+    const sync = () => setKStatus({ status: runner.status, fatal: runner.fatal });
     sync();
-    return () => {
-      off();
-      r.destroy();
-      runnerRef.current = null;
-    };
-  }, [doc, ready, readOnly, session]);
-  useEffect(() => {
-    const r = runnerRef.current;
-    if (!r || !ready) return;
-    r.attach(kernelTerm);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kernelTerm, ready, doc, readOnly, session]);
-  useEffect(() => {
-    if (termGone) runnerRef.current?.terminalGone();
-  }, [termGone, kernelTerm]);
+    return runner.on(sync);
+  }, [runner]);
 
   // May this user start a kernel on the node's machine? (Holding its machine key, like for a remote session.)
   const shellKey = shells.join();
@@ -650,6 +604,7 @@ export default function NotebookEmbed({ host, session, docId, nodeId, active, sh
       move: (id, delta) => void moveCell(ydoc(), id, delta),
       setType: (id, type) => void setCellType(ydoc(), id, type),
       clear: (id) => void clearOutputs(ydoc(), id),
+      kernel: () => runnerRef.current,
     };
   }, [toast]);
 

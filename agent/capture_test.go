@@ -127,3 +127,38 @@ func TestCaptureStop(t *testing.T) {
 		t.Fatalf("stopped capture is empty (%d bytes)", len(data))
 	}
 }
+
+func TestTcpdumpError(t *testing.T) {
+	cases := []struct {
+		name, stderr string
+		want         string // substring of the message
+		detail       string // substring of the details, if any
+	}{
+		{
+			"non-root, the real two lines",
+			"tcpdump: lo: You don't have permission to perform this capture on that device\n(socket: Operation not permitted)\n",
+			"sudo setcap cap_net_raw,cap_net_admin=eip", "You don't have permission",
+		},
+		{
+			"hint on the second line only",
+			"tcpdump: verbose output suppressed, use -v[v]... for full protocol decode\ntcpdump: eth0: something odd\n(socket: Operation not permitted)\n",
+			"Capture refusée", "Operation not permitted",
+		},
+		{"permission denied", "tcpdump: eth0: Permission denied\n", "Capture refusée", "Permission denied"},
+		{"EPERM spelled out", "tcpdump: eth0: socket: EPERM\n", "Capture refusée", "EPERM"},
+		{"no such device", "tcpdump: eth9: No such device exists\n(SIOCGIFHWADDR: No such device)\n", "L'interface eth9 n'existe pas", "No such device exists"},
+		{"not installed", "fork/exec tcpdump: executable file not found in $PATH", "tcpdump n'est pas installé", "executable file not found"},
+		{"unknown error keeps its first line", "tcpdump: syntax error in filter expression: syntax error\n", "tcpdump: syntax error in filter expression", ""},
+		{"only noise", "tcpdump: listening on lo, link-type EN10MB\n0 packets captured\n", "sans message", ""},
+	}
+	for _, c := range cases {
+		got := tcpdumpError(c.stderr)
+		msg, detail, _ := strings.Cut(got, detailSep)
+		if !strings.Contains(msg, c.want) {
+			t.Errorf("%s: message %q lacks %q", c.name, msg, c.want)
+		}
+		if c.detail != "" && !strings.Contains(detail, c.detail) {
+			t.Errorf("%s: details %q lack %q", c.name, detail, c.detail)
+		}
+	}
+}

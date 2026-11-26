@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +71,7 @@ func findTcpdump() (string, error) {
 			return p, nil
 		}
 	}
-	return "", errors.New("tcpdump introuvable sur la machine")
+	return "", errors.New(errNoTcpdump)
 }
 
 type headBuffer struct {
@@ -87,24 +88,50 @@ func (b *headBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// tcpdumpError picks the first meaningful line of tcpdump's stderr.
+const (
+	errNoTcpdump = "tcpdump n'est pas installé sur la machine (apt install tcpdump)"
+	errNoRights  = "Capture refusée : l'agent n'a pas le droit de capturer. Sur la machine : sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump) — ou lance l'agent en root."
+	// detailSep splits an error into the message shown first and tcpdump's own line, shown as details.
+	detailSep = "\nDétail : "
+)
+
+var (
+	noRightsRe   = regexp.MustCompile(`(?i)permission|not permitted|EPERM`)
+	noDeviceRe   = regexp.MustCompile(`^tcpdump: (\S+): No such device exists`)
+	tcpdumpNoise = []string{"tcpdump: verbose output suppressed", "tcpdump: listening on", "packets captured", "packets received", "packets dropped"}
+)
+
+// tcpdumpError turns tcpdump's stderr into a message for the user. It reads every line: the
+// permission problem is often the second one ("lo: You don't have permission…" then
+// "(socket: Operation not permitted)"), and the first line alone would hide the hint.
 func tcpdumpError(stderr string) string {
+	var lines []string
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "tcpdump: verbose output suppressed") || strings.HasPrefix(line, "tcpdump: listening on") ||
-			strings.Contains(line, "packets captured") || strings.Contains(line, "packets received") || strings.Contains(line, "packets dropped") {
+		if line == "" || slices.ContainsFunc(tcpdumpNoise, func(n string) bool { return strings.Contains(line, n) }) {
 			continue
 		}
 		if len(line) > 200 {
 			line = line[:200]
 		}
-		low := strings.ToLower(line)
-		if strings.Contains(low, "permission denied") || strings.Contains(low, "operation not permitted") {
-			line += " — l'agent doit tourner en root, ou tcpdump avoir le droit de capturer : sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)"
-		}
-		return line
+		lines = append(lines, line)
 	}
-	return "tcpdump s'est arrêté sans message"
+	if len(lines) == 0 {
+		return "tcpdump s'est arrêté sans message"
+	}
+	detail := detailSep + strings.Join(lines[:min(len(lines), 3)], " / ")
+	for _, l := range lines {
+		if noRightsRe.MatchString(l) {
+			return errNoRights + detail
+		}
+		if strings.Contains(l, "command not found") || strings.Contains(l, "executable file not found") {
+			return errNoTcpdump + detail
+		}
+	}
+	if m := noDeviceRe.FindStringSubmatch(lines[0]); m != nil {
+		return "L'interface " + m[1] + " n'existe pas sur la machine." + detail
+	}
+	return lines[0]
 }
 
 func (h *fileHub) capture(x *xfer, op fileOp) {
@@ -146,6 +173,10 @@ func (h *fileHub) capture(x *xfer, op fileOp) {
 		return
 	}
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			s.fail(errNoTcpdump)
+			return
+		}
 		s.fail("lancement de tcpdump impossible : " + errText(err))
 		return
 	}

@@ -23,7 +23,7 @@ import {
 } from "./crypto.ts";
 import { checkContact, listMachines, loadPlacements, pinContact, setPlacement as savePlacement } from "./vault.ts";
 import { decryptEntry, decryptFile, encryptEntry, encryptPreview, reencryptFile } from "./board/boardCrypto.ts";
-import { reencryptDoc, type StoredDoc } from "./board/docCrypto.ts";
+import { copyDocState, reencryptDoc, sceneDocIds, sealDoc, type StoredDoc } from "./board/docCrypto.ts";
 
 export type Node = Omit<RawItem, "encName" | "keyWrap"> & {
   name: string;
@@ -200,7 +200,8 @@ async function placement(ctx: Ctx, id: string, key: SymKey, parentId: string | n
   return { parentId: null, ownerKey: await sealKey(ctx.keys.pub, key, AAD.grant(id, ctx.user.id)) };
 }
 
-export type BoardContent = { elements: any[]; files: Record<string, any>; preview?: string | null };
+/** `docs`: shared documents (code, notebooks) as plaintext Yjs states, sealed under the new board's key at creation. */
+export type BoardContent = { elements: any[]; files: Record<string, any>; preview?: string | null; docs?: { doc: string; state: Uint8Array }[] };
 
 export async function createItem(ctx: Ctx, kind: "folder" | "board", parentId: string | null, name: string, content?: BoardContent): Promise<string> {
   const id = randomId();
@@ -212,6 +213,8 @@ export async function createItem(ctx: Ctx, kind: "folder" | "board", parentId: s
           await Promise.all(Object.entries(content.files ?? {}).map(async ([fid, f]) => [fid, await reencryptFile(null, key, id, fid, f)])),
         ),
         preview: content.preview ? await encryptPreview(key, id, content.preview) : undefined,
+        // Epoch 0: the key of a new board is its first generation.
+        docs: content.docs?.length ? await Promise.all(content.docs.map((d) => sealDoc(d.doc, d.state, { boardId: id, key, epoch: 0 }))) : undefined,
       }
     : undefined;
   await api.post("/items", { id, kind, encName: await boxText(key, name, AAD.name(id)), ...(await placement(ctx, id, key, parentId)), board });
@@ -251,10 +254,23 @@ export async function fetchVersionContent(key: SymKey, boardId: string, versionI
   return { elements, files };
 }
 
+/**
+ * The shared documents (code, notebooks) the scene of a board refers to, decrypted with its key and cleaned of
+ * live kernel references, ready to be sealed under another board's key.
+ */
+export async function fetchBoardDocs(key: SymKey, boardId: string, elements: any[]): Promise<{ doc: string; state: Uint8Array }[]> {
+  const wanted = new Set(sceneDocIds(elements));
+  if (!wanted.size) return [];
+  const stored = await api.get<StoredDoc[]>(`/items/${boardId}/docs`);
+  return Promise.all(stored.filter((d) => wanted.has(d.doc)).map((d) => copyDocState(d, { boardId, key })));
+}
+
 export async function duplicateBoard(ctx: Ctx, id: string): Promise<string> {
   const node = ctx.nodes.get(id)!;
   const content = await fetchBoardContent(keyOf(ctx, id), id);
   content.preview = await fetchPreview(keyOf(ctx, id), id).catch(() => null);
+  // The copy gets its own documents: same ids, re-sealed under its own key (the old key can't read them).
+  content.docs = await fetchBoardDocs(keyOf(ctx, id), id, content.elements);
   const parent = node.parentId && ctx.nodes.get(node.parentId);
   const target = parent && RANK[parent.role] >= RANK.editor ? parent.id : null;
   return createItem(ctx, "board", target, `${node.name} (copie)`, content);

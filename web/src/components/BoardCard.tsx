@@ -73,6 +73,9 @@ export function ItemCard({ node, childCount, selected, selecting, draggableIds, 
   };
 
   const folder = node.kind === "folder";
+  // A click on the name waits a beat: a double-click renames instead of opening the item.
+  const openTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(openTimer.current), []);
 
   return (
     <div
@@ -97,7 +100,11 @@ export function ItemCard({ node, childCount, selected, selecting, draggableIds, 
       onClick={(e) => {
         if (editing) return;
         if (selecting || e.metaKey || e.ctrlKey || e.shiftKey) onToggleSelect(e.shiftKey);
-        else if (!trashed) onOpen();
+        else if (!trashed) {
+          clearTimeout(openTimer.current);
+          if (canEdit && (e.target as HTMLElement).closest(".card-title")) openTimer.current = setTimeout(onOpen, 280);
+          else onOpen();
+        }
       }}
       onContextMenu={onContextMenu}
     >
@@ -154,6 +161,7 @@ export function ItemCard({ node, childCount, selected, selecting, draggableIds, 
           onDoubleClick={(e) => {
             if (!canEdit) return;
             e.stopPropagation();
+            clearTimeout(openTimer.current);
             setDraft(node.name);
             setEditing(true);
           }}

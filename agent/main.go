@@ -17,6 +17,13 @@ import (
 
 var version = "dev"
 
+// activeTrial watches a process started by a self-update (nil otherwise); rolledBack is the note
+// a restored agent adds to its hello.
+var (
+	activeTrial *trial
+	rolledBack  string
+)
+
 type config struct {
 	endpoint string // ws(s)://host/agent
 	token    string
@@ -28,6 +35,9 @@ type config struct {
 func main() {
 	log.SetFlags(log.Ltime)
 	log.SetPrefix("[agent] ")
+	// First thing: a process started by an update must be able to roll back whatever happens next.
+	activeTrial = startTrial()
+	rolledBack = rolledBackNote()
 
 	server := flag.String("server", os.Getenv("EXCALIBASH_SERVER"), "base URL of the Excalibash server (env EXCALIBASH_SERVER)")
 	token := flag.String("token", os.Getenv("EXCALIBASH_TOKEN"), "machine token (env EXCALIBASH_TOKEN)")
@@ -126,6 +136,9 @@ func main() {
 	defer stop()
 
 	mgr := newManagerWithAuth(auth)
+	if err := mgr.update.configure(endpoint, *insecure, pin); err != nil {
+		log.Fatalf("invalid --server: %v", err)
+	}
 	cfg := config{endpoint: endpoint, token: *token, name: *name, insecure: *insecure, pin: pin}
 	log.Printf("excalibash-agent %s → %s", version, endpoint)
 	if *insecure {

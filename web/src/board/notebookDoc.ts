@@ -6,6 +6,12 @@
 //   Y.Map   "meta":  { path?, name, savedSha?, savedAt?, savedBy?, kernelTerm?, kernel?, language, nbformatMinor, nbMetadata? }
 //   Y.Array "cells": Y.Map { id, type: "code"|"markdown"|"raw", source: Y.Text, outputs: Y.Array<output>,
 //                            execution_count: number|null, metadata: object, running?: exec id }
+//   Y.Array "order": the cell ids in display order
+// "cells" is only the storage of the cells: a cell's Y.Map (and its Y.Text) is created once and never
+// copied, so a move only touches "order" and cannot lose a keystroke typed in the moved cell at the
+// same time. Documents written before "order" existed have none: their cells show in storage order,
+// and the first structural edit by an editor writes the order down (see ensureOrder: idempotent, and
+// two editors doing it at once leave repeated ids that readers ignore and removeDuplicates cleans).
 // `outputs` hold nbformat v4 output objects (plain JSON). Anyone who can edit the board can write any
 // of this: every reader below is defensive.
 import * as Y from "yjs";
@@ -40,6 +46,7 @@ const TERM_RE = /^[A-Za-z0-9_-]{22}$/;
 const KERNEL_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}$/;
 const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
+export const isTermId = (v: unknown): v is string => typeof v === "string" && TERM_RE.test(v);
 const jsonLen = (v: unknown) => JSON.stringify(v)?.length ?? 0;
 
 /** A random UUID v4 (crypto.randomUUID needs a secure context). */
@@ -67,7 +74,10 @@ export type NotebookMeta = {
 };
 
 export const metaOf = (ydoc: Y.Doc) => ydoc.getMap<unknown>("meta");
+/** The storage of the cells (not their display order, see orderOf). */
 export const cellsOf = (ydoc: Y.Doc) => ydoc.getArray<Cell>("cells");
+/** The display order: cell ids. May repeat an id (concurrent moves / migrations) or miss some (old documents). */
+export const orderOf = (ydoc: Y.Doc) => ydoc.getArray<string>("order");
 
 /** Document metadata, read defensively. */
 export function readMeta(meta: { get(k: string): unknown }): NotebookMeta {
@@ -116,7 +126,7 @@ export type CellView = {
   map: Cell;
 };
 
-const validOutput = (o: unknown): o is NbOutput =>
+export const validOutput = (o: unknown): o is NbOutput =>
   isObj(o) && (o.output_type === "stream" || o.output_type === "display_data" || o.output_type === "execute_result" || o.output_type === "error");
 
 /** One cell of the document, or null when it is not well formed. */
@@ -143,24 +153,55 @@ export function readCell(m: unknown, index = -1): CellView | null {
   };
 }
 
-/** The well-formed cells in order; a repeated id keeps its first cell only. */
+/**
+ * The well-formed cells in display order: the ids of `order` first (a repeated id keeps its first place,
+ * an id without a cell is skipped), then the cells `order` does not mention, in storage order. A repeated
+ * id in the storage keeps its first cell only.
+ */
 export function cellViews(ydoc: Y.Doc): CellView[] {
-  const seen = new Set<string>();
-  const out: CellView[] = [];
+  const byId = new Map<string, CellView>();
   cellsOf(ydoc).forEach((m, i) => {
     const v = readCell(m, i);
-    if (!v || seen.has(v.id)) return;
-    seen.add(v.id);
-    out.push(v);
+    if (v && !byId.has(v.id)) byId.set(v.id, v);
   });
-  return out;
+  const out: CellView[] = [];
+  const seen = new Set<string>();
+  for (const id of orderOf(ydoc).toArray()) {
+    const v = typeof id === "string" ? byId.get(id) : undefined;
+    if (!v || seen.has(id)) continue;
+    seen.add(id);
+    out.push(v);
+  }
+  for (const v of byId.values()) if (!seen.has(v.id)) out.push(v);
+  return out.map((v, i) => ({ ...v, index: i }));
 }
 
 export const findCell = (ydoc: Y.Doc, id: string): CellView | undefined => cellViews(ydoc).find((c) => c.id === id);
 
-function indexOfId(cells: Y.Array<Cell>, id: string): number {
-  for (let i = 0; i < cells.length; i++) if (cells.get(i)?.get("id") === id) return i;
-  return -1;
+/** Positions of an id in a Y.Array<Cell> / Y.Array<string>. */
+function indexesOf(arr: Y.Array<any>, id: string, of: (v: any) => unknown): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < arr.length; i++) if (of(arr.get(i)) === id) out.push(i);
+  return out;
+}
+const cellIdOf = (m: unknown) => (m instanceof Y.Map ? m.get("id") : undefined);
+const same = (v: unknown) => v;
+
+/**
+ * Writes the display order down for the cells it does not mention yet (every cell of an old document).
+ * Call it inside the transaction of a structural edit. Idempotent; when two editors do it at once the
+ * order repeats ids, which readers ignore and removeDuplicates removes. Returns whether it wrote.
+ */
+export function ensureOrder(ydoc: Y.Doc): boolean {
+  const order = orderOf(ydoc);
+  const known = new Set<string>();
+  for (const id of order.toArray()) if (typeof id === "string") known.add(id);
+  const missing = cellViews(ydoc)
+    .filter((c) => !known.has(c.id))
+    .map((c) => c.id);
+  if (!missing.length) return false;
+  ydoc.transact(() => order.push(missing));
+  return true;
 }
 
 export function newCellMap(o: { type: CellType; source?: string; id?: string; outputs?: NbOutput[]; executionCount?: number | null; metadata?: Record<string, unknown> }): Cell {
@@ -176,81 +217,91 @@ export function newCellMap(o: { type: CellType; source?: string; id?: string; ou
   return m;
 }
 
-/** A copy of a cell with the same id (a move is a delete + insert of the copy). */
-function cloneCell(c: CellView): Cell {
-  return newCellMap({ type: c.type, source: c.source.toString(), id: c.id, outputs: c.outputs, executionCount: c.executionCount, metadata: c.metadata });
-}
-
 export type InsertAt = "start" | "end" | { before: string } | { after: string };
 
 /** Inserts a new cell in one transaction and returns its id. Throws a French message when the notebook is full. */
 export function insertCell(ydoc: Y.Doc, o: { type: CellType; source?: string; at: InsertAt }): string {
-  const cells = cellsOf(ydoc);
-  if (cells.length >= MAX_CELLS) throw new Error(`Un notebook ne peut pas dépasser ${MAX_CELLS} cellules`);
-  const cell = newCellMap({ type: o.type, source: o.source });
+  if (cellViews(ydoc).length >= MAX_CELLS) throw new Error(`Un notebook ne peut pas dépasser ${MAX_CELLS} cellules`);
+  const id = uuid();
+  const cell = newCellMap({ type: o.type, source: o.source, id });
   ydoc.transact(() => {
-    let at = cells.length;
+    ensureOrder(ydoc);
+    const order = orderOf(ydoc);
+    let at = order.length;
     if (o.at === "start") at = 0;
     else if (typeof o.at === "object") {
-      const i = indexOfId(cells, "before" in o.at ? o.at.before : o.at.after);
+      const i = order.toArray().indexOf("before" in o.at ? o.at.before : o.at.after);
       if (i >= 0) at = "before" in o.at ? i : i + 1;
     }
-    cells.insert(at, [cell]);
+    cellsOf(ydoc).push([cell]);
+    order.insert(at, [id]);
   });
-  return cell.get("id") as string;
+  return id;
 }
 
 export function deleteCell(ydoc: Y.Doc, id: string): boolean {
-  const cells = cellsOf(ydoc);
   let done = false;
   ydoc.transact(() => {
-    const i = indexOfId(cells, id);
-    if (i >= 0) {
-      cells.delete(i, 1);
-      done = true;
-    }
-  });
-  return done;
-}
-
-/**
- * Moves a cell one step. Y.Array has no move: the cell is re-created next to its neighbour (same id,
- * same content). A keystroke typed in it at the very moment somebody moves it is lost; two people
- * moving the same cell at once leave a duplicate that removeDuplicates() cleans up.
- */
-export function moveCell(ydoc: Y.Doc, id: string, delta: -1 | 1): boolean {
-  const cells = cellsOf(ydoc);
-  let done = false;
-  ydoc.transact(() => {
-    const i = indexOfId(cells, id);
-    const j = i + delta;
-    if (i < 0 || j < 0 || j >= cells.length) return;
-    const view = readCell(cells.get(i));
-    if (!view) return;
-    const copy = cloneCell(view); // before the delete: a deleted Y.Text reads as empty
-    cells.delete(i, 1);
-    cells.insert(j, [copy]);
+    const cells = cellsOf(ydoc);
+    const hits = indexesOf(cells, id, cellIdOf);
+    if (!hits.length) return;
+    ensureOrder(ydoc);
+    for (const i of hits.reverse()) cells.delete(i, 1);
+    const order = orderOf(ydoc);
+    for (const i of indexesOf(order, id, same).reverse()) order.delete(i, 1);
     done = true;
   });
   return done;
 }
 
-/** Deletes the later cells that repeat an earlier id (concurrent moves). Idempotent across clients. Returns how many went. */
-export function removeDuplicates(ydoc: Y.Doc): number {
-  const cells = cellsOf(ydoc);
-  const seen = new Set<string>();
-  const dup: number[] = [];
-  cells.forEach((m, i) => {
-    const id = m instanceof Y.Map ? m.get("id") : undefined;
-    if (typeof id !== "string") return;
-    if (seen.has(id)) dup.push(i);
-    else seen.add(id);
-  });
-  if (!dup.length) return 0;
+/**
+ * Moves a cell one step. Only the order changes: the cell (its Y.Map, its Y.Text) is untouched, so what
+ * somebody types in it at that very moment is kept. Two people moving the same cell at once leave its id
+ * twice in the order: readers keep the first place, removeDuplicates cleans up.
+ */
+export function moveCell(ydoc: Y.Doc, id: string, delta: -1 | 1): boolean {
+  const list = cellViews(ydoc);
+  const i = list.findIndex((c) => c.id === id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return false;
+  const neighbour = list[j].id;
   ydoc.transact(() => {
-    for (const i of dup.reverse()) cells.delete(i, 1);
+    ensureOrder(ydoc);
+    const order = orderOf(ydoc);
+    const from = order.toArray().indexOf(id);
+    if (from >= 0) order.delete(from, 1);
+    const n = order.toArray().indexOf(neighbour);
+    order.insert(n >= 0 ? (delta < 0 ? n : n + 1) : order.length, [id]);
   });
-  return dup.length;
+  return true;
+}
+
+/**
+ * Deletes the later repeats of an id, in the order (concurrent moves, concurrent migrations) and in the
+ * storage. Idempotent across clients. Returns how many entries went.
+ */
+export function removeDuplicates(ydoc: Y.Doc): number {
+  const dups = (arr: Y.Array<any>, of: (v: any) => unknown) => {
+    const seen = new Set<unknown>();
+    const out: number[] = [];
+    arr.forEach((v, i) => {
+      const id = of(v);
+      if (typeof id !== "string") return;
+      if (seen.has(id)) out.push(i);
+      else seen.add(id);
+    });
+    return out;
+  };
+  const cells = cellsOf(ydoc);
+  const order = orderOf(ydoc);
+  const dc = dups(cells, cellIdOf);
+  const dord = dups(order, same);
+  if (!dc.length && !dord.length) return 0;
+  ydoc.transact(() => {
+    for (const i of dc.reverse()) cells.delete(i, 1);
+    for (const i of dord.reverse()) order.delete(i, 1);
+  });
+  return dc.length + dord.length;
 }
 
 /** Changes a cell's type; outputs and the execution count only make sense for code. */
@@ -400,16 +451,22 @@ function appendStream(outs: Y.Array<NbOutput>, name: "stdout" | "stderr", text: 
 export const eventWeight = (ev: KernelEvent): number =>
   ev.ev === "stream" ? ev.text.length + 64 : ev.ev === "display" || ev.ev === "result" || ev.ev === "update" ? jsonLen(ev.data) + 128 : ev.ev === "error" ? jsonLen(ev.traceback) + 256 : 32;
 
+/** Where a run's events land: an output list and the marks of the run. A notebook cell and a code window each give one. */
+export type RunSink = {
+  outs: Y.Array<NbOutput>;
+  /** The run is still the current one (not cancelled, not finalized by somebody else). */
+  active(): boolean;
+  /** `done`: record the count and end the run. */
+  finish(count: number | null | undefined): void;
+};
+
 /**
- * Writes kernel events into the cell running under `execId`, in one transaction. Events for a cell
- * that is not (or no longer) running under this id are dropped. `done` records the count and ends the
- * run. Returns true when a `done` was applied.
+ * Writes kernel events into a sink, in one transaction. Events for a run that is no longer the current one are
+ * dropped. `done` records the count and ends the run. Returns true when a `done` was applied.
  */
-export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, events: KernelEvent[], st: WriteState): boolean {
-  const c = findCell(ydoc, cellId);
-  if (!c || c.running !== execId) return false;
-  const outs = c.map.get("outputs") as Y.Array<NbOutput> | undefined;
-  if (!(outs instanceof Y.Array)) return false;
+export function applyEventsTo(ydoc: Y.Doc, sink: RunSink, events: KernelEvent[], st: WriteState): boolean {
+  if (!sink.active()) return false;
+  const outs = sink.outs;
   let finished = false;
   ydoc.transact(() => {
     const clear = () => {
@@ -474,8 +531,7 @@ export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, e
           break;
         }
         case "done":
-          c.map.set("execution_count", typeof ev.count === "number" ? ev.count : (c.executionCount ?? null));
-          c.map.delete("running");
+          sink.finish(typeof ev.count === "number" ? ev.count : undefined);
           finished = true;
           break;
       }
@@ -483,6 +539,31 @@ export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, e
     }
   });
   return finished;
+}
+
+/**
+ * Writes kernel events into the cell running under `execId`, in one transaction. Events for a cell
+ * that is not (or no longer) running under this id are dropped. `done` records the count and ends the
+ * run. Returns true when a `done` was applied.
+ */
+export function applyKernelEvents(ydoc: Y.Doc, cellId: string, execId: string, events: KernelEvent[], st: WriteState): boolean {
+  const c = findCell(ydoc, cellId);
+  if (!c || c.running !== execId) return false;
+  const outs = c.map.get("outputs") as Y.Array<NbOutput> | undefined;
+  if (!(outs instanceof Y.Array)) return false;
+  return applyEventsTo(
+    ydoc,
+    {
+      outs,
+      active: () => true,
+      finish(count) {
+        c.map.set("execution_count", count !== undefined ? count : (c.executionCount ?? null));
+        c.map.delete("running");
+      },
+    },
+    events,
+    st,
+  );
 }
 
 // ---- .ipynb import ---------------------------------------------------------------------------------------
@@ -673,7 +754,9 @@ export function initBlankNotebook(ydoc: Y.Doc, name = "sans-titre.ipynb"): boole
     meta.set("language", "python");
     meta.set("kernel", "python3");
     meta.set("nbformatMinor", NBFORMAT_MINOR);
-    cellsOf(ydoc).push([newCellMap({ type: "code" })]);
+    const id = uuid();
+    cellsOf(ydoc).push([newCellMap({ type: "code", id })]);
+    orderOf(ydoc).push([id]);
   });
   return true;
 }
@@ -688,6 +771,7 @@ const pause = () => new Promise<void>((r) => setTimeout(r, 70));
  */
 export async function fillNotebook(ydoc: Y.Doc, nb: ParsedNotebook, o: { name: string; path?: string; sha: string; by?: string; replace?: boolean; pause?: () => Promise<void> }): Promise<void> {
   const cells = cellsOf(ydoc);
+  const order = orderOf(ydoc);
   const meta = metaOf(ydoc);
   const batches: ParsedCell[][] = [[]];
   let weight = 0;
@@ -701,6 +785,7 @@ export async function fillNotebook(ydoc: Y.Doc, nb: ParsedNotebook, o: { name: s
     ydoc.transact(() => {
       if (b === 0) {
         if (o.replace && cells.length) cells.delete(0, cells.length);
+        if (o.replace && order.length) order.delete(0, order.length);
         if (o.path) meta.set("path", o.path);
         meta.set("name", o.name);
         meta.set("language", "python");
@@ -712,6 +797,7 @@ export async function fillNotebook(ydoc: Y.Doc, nb: ParsedNotebook, o: { name: s
         if (o.by) meta.set("savedBy", o.by);
       }
       cells.push(batches[b].map((c) => newCellMap({ type: c.type, source: c.source, id: c.id, outputs: c.outputs, executionCount: c.executionCount, metadata: c.metadata })));
+      order.push(batches[b].map((c) => c.id));
     });
     if (b < batches.length - 1) await wait();
   }

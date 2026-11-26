@@ -175,9 +175,9 @@ try {
     ok(!/code inconnu/.test(pairBad) && /attendu/.test(pairBad), "agent --pin : mauvaise épingle refusée à l'appairage");
     const creds = { EXCALIBASH_TOKEN: "eba_nope", EXCALIBASH_KEY: randomBytes(32).toString("base64url") };
     const wsOk = await run(["--server", base, "--pin", tls.pin], creds);
-    ok(/401/.test(wsOk), "agent --pin : websocket établie (jeton refusé par le serveur, 401)");
+    ok(/\b401\b/.test(wsOk), "agent --pin : websocket établie (jeton refusé par le serveur, 401)");
     const wsBad = await run(["--server", base, "--pin", wrong], creds);
-    ok(!/401/.test(wsBad) && /attendu/.test(wsBad), "agent --pin : mauvaise épingle refusée sur la websocket");
+    ok(!/\b401\b/.test(wsBad) && /attendu/.test(wsBad), "agent --pin : mauvaise épingle refusée sur la websocket");
     const wsPlain = await run(["--server", `http://127.0.0.1:${PORT}`], creds);
     ok(/401/.test(wsPlain), "agent en http:// : /agent toujours servi");
   } else {

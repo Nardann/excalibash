@@ -91,6 +91,55 @@ command -v curl >/dev/null 2>&1 || { echo "curl est nécessaire : ce serveur a u
 }
 
 /**
+ * Updates the agent in place: downloads the current binary, replaces it and restarts whatever runs
+ * it. The machine identity is untouched: agent.json (pairing) and agent.env (token and key) stay
+ * where they are, so the machine keeps its name, its keys and its shells' history in the boards.
+ * Nothing secret in it: the same for everyone.
+ */
+export function updateScript(server: string, pin: string | null): string {
+  const download = pin
+    ? `curl -k --pinnedpubkey "$PIN" -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"`
+    : `if command -v curl >/dev/null 2>&1; then curl -fsSL "$SERVER/downloads/excalibash-agent-$OS-$ARCH" -o "$BIN.tmp"
+else wget -qO "$BIN.tmp" "$SERVER/downloads/excalibash-agent-$OS-$ARCH"; fi`;
+  return `#!/bin/sh
+# Excalibash : met l'agent de cette machine à jour (garde son identité, ses clés et son service).
+set -eu
+SERVER='${server.replace(/'/g, "")}'
+${pinPreamble(pin)}UNIT=excalibash-agent.service
+BIN="$HOME/.local/bin/excalibash-agent"
+CONFIG="$HOME/.config/excalibash/agent.json"
+[ -e "$BIN" ] || { echo "Aucun agent trouvé dans $BIN : lance cette commande avec le compte (ou sudo) qui a installé l'agent." >&2; exit 1; }
+if [ -f "/etc/systemd/system/$UNIT" ] && [ "$(id -u)" != 0 ]; then
+  echo "L'agent est un service système : relance cette commande avec « sudo sh »." >&2
+  exit 1
+fi
+case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=darwin ;; *) echo "OS non supporté : $(uname -s)" >&2; exit 1 ;; esac
+case "$(uname -m)" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "architecture non supportée : $(uname -m)" >&2; exit 1 ;; esac
+echo "→ téléchargement de l'agent $OS/$ARCH"
+${download}
+chmod +x "$BIN.tmp"
+"$BIN.tmp" --version >/dev/null 2>&1 || { rm -f "$BIN.tmp"; echo "Le fichier téléchargé n'est pas un agent valide." >&2; exit 1; }
+echo "  version $("$BIN.tmp" --version) (avant : $("$BIN" --version 2>/dev/null || echo inconnue))"
+mv "$BIN.tmp" "$BIN"
+
+if [ -f "/etc/systemd/system/$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl restart "$UNIT"
+  echo "✓ agent mis à jour et service système relancé"
+elif [ -f "$HOME/.config/systemd/user/$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl --user restart "$UNIT"
+  echo "✓ agent mis à jour et service utilisateur relancé"
+elif command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'excalibash-agent'; then
+  command -v pkill >/dev/null 2>&1 && pkill -f "^$BIN( |\$)" 2>/dev/null || true
+  sleep 1
+  nohup "$BIN" --config "$CONFIG" >/dev/null 2>&1 &
+  echo "✓ agent mis à jour et relancé"
+else
+  echo "✓ agent mis à jour dans $BIN. Il n'est lancé par aucun service connu : arrête-le et relance-le à la main pour utiliser la nouvelle version."
+fi
+`;
+}
+
+/**
  * Removes the agent from a machine, whichever way it was installed (system service as root, user
  * service, @reboot crontab entry, or started by hand): stops it, then deletes its binary and its
  * configuration (machine key, token, known SSH hosts). Nothing secret in it: the same for everyone.

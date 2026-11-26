@@ -20,6 +20,8 @@ import * as codeDoc from "../web/src/board/codeDoc.ts";
 import * as mf from "../web/src/board/machineFiles.ts";
 import * as nbDoc from "../web/src/board/notebookDoc.ts";
 import { NotebookRunner } from "../web/src/board/notebookRunner.ts";
+import * as nbSvc from "../web/src/board/notebookService.ts";
+import { CodeRunner } from "../web/src/board/codeRunner.ts";
 import { LineSplitter, parseEvent } from "../web/src/board/kernelProtocol.ts";
 import { FileClient } from "../web/src/board/fileTransfer.ts";
 import * as Y from "../web/node_modules/yjs/dist/yjs.mjs";
@@ -610,7 +612,7 @@ ok((await probe(bob, ["127.0.0.1"])).status === 404, "Bob ne peut pas sonder dep
   // What the server relays and keeps: neither the blob nor the log nor the database holds an address or a name in clear.
   const relayed = Buffer.from(r.body.d, "base64").toString("latin1");
   const dbText = [DB, `${DB}-wal`, `${dirname(DB)}/server.log`].filter((p) => existsSync(p)).map((p) => readFileSync(p).toString("latin1")).join("\n");
-  ok(![relayed, dbText].some((t) => t.includes("127.0.0.1/8") || t.includes('"name":"lo"') || t.includes('"ifaces"')), "sonde « ifaces » : ni adresse ni nom d'interface en clair côté serveur (blob relayé, base, journal)");
+  ok(![relayed, dbText].some((t) => t.includes("127.0.0.1/8") || t.includes('"name":"lo"') || t.includes('"kind":"ifaces"')), "sonde « ifaces » : ni adresse ni nom d'interface en clair côté serveur (blob relayé, base, journal)");
   await new Promise((r) => setTimeout(r, 2100));
   const old = await probe(alice, ["127.0.0.1"]);
   const oldRes = old.status === 200 ? await c.unboxJson<{ r?: Record<string, unknown>; ifaces?: unknown }>(mAlice.auth, old.body.d, c.AAD.probeRes(old.rid)) : null;
@@ -902,10 +904,15 @@ site.close();
     keyForAgent: await c.box(pm!.auth, pk.raw, c.AAD.termAgent(pt)),
     encLabel: await c.boxText(nowKeyB, "vm-tp", c.AAD.termLabel(B, pt)),
   });
-  await sp.next((m) => m.t === "term" && m.terminal.id === pt && m.terminal.status === "running", 8000);
+  const runningMsg = await sp.next((m) => m.t === "term" && m.terminal.id === pt && m.terminal.status === "running", 8000);
   await subscribe(sp, pt);
   await sendInput(sp, pk, pt, "pairtab", "echo PAIRED_$((5*5))\n");
   ok((await termOutput(sp, pk, pt, "PAIRED_25")).includes("PAIRED_25"), "un shell s'ouvre sur la machine appairée");
+  // The hello carries the agent's version and features: plain metadata, in the machine list and in the terminal's state.
+  const mine = (await as(alice, () => api("GET", "/machines"))).body.machines.find((m: any) => m.id === pm!.id);
+  ok(Array.isArray(mine?.agentCaps) && ["files", "capture", "ifaces", "jupyter", "probe", "schema"].every((k) => mine.agentCaps.includes(k)) && typeof mine.agentVersion === "string", "le hello de l'agent annonce sa version et ses fonctions (liste des machines)");
+  const tinfo = runningMsg.terminal;
+  ok(tinfo.agentCaps.includes("capture") && typeof tinfo.agentVersion === "string" && !("hostname" in tinfo), "l'état d'un terminal porte les fonctions de l'agent, sans autre métadonnée de la machine");
   paired.kill();
   sp.ws.close();
   // Removing the machine hands back the command that removes its agent from the machine itself.
@@ -914,6 +921,154 @@ site.close();
   ok(del.status === 200 && /^curl .*\/uninstall\.sh \| sh$/.test(del.body.uninstall ?? ""), "suppression d'une machine : commande de désinstallation de l'agent fournie");
   const script = await (await realFetch(`${BASE}/uninstall.sh`)).text();
   ok(script.startsWith("#!/bin/sh") && script.includes(".config/excalibash") && script.includes("systemctl --user disable"), "/uninstall.sh retire le service, le programme et la configuration");
+  const upd = await (await realFetch(`${BASE}/update.sh`)).text();
+  ok(upd.startsWith("#!/bin/sh") && upd.includes("excalibash-agent-$OS-$ARCH") && upd.includes("systemctl --user restart") && !/rm -rf|--token|EXCALIBASH_KEY|agent\.env/.test(upd), "/update.sh remplace le programme et relance le service, sans toucher à l'identité ni contenir de secret");
+}
+
+// Agent self-update (tests/run.sh builds a v1 agent with a throwaway release key, serves a signed v2 release
+// from AGENT_DIST_DIR, and gives us the tools). Real crypto end to end: the browser boxes the request under the
+// machine auth key, the server relays blind, the agent verifies the signature with the key compiled into it.
+if (process.env.UPDATE_V1_BIN && process.env.UPDATE_SIGN && process.env.UPDATE_KEY && process.env.UPDATE_DIST) {
+  const { approvePairing, listMachines: lm } = await import("../web/src/vault.ts");
+  const { execFileSync } = await import("node:child_process");
+  const { copyFileSync, chmodSync, mkdirSync, rmSync } = await import("node:fs");
+  const sign = (key: string, version: string) => execFileSync(process.env.UPDATE_SIGN!, ["sign", "--key", key, "--dist", process.env.UPDATE_DIST!, "--version", version], { stdio: "pipe" });
+  const home = mkdtempSync(join(tmpdir(), "eb-upd-"));
+  const exe = join(home, "excalibash-agent");
+  copyFileSync(process.env.UPDATE_V1_BIN, exe);
+  chmodSync(exe, 0o755);
+  const cfgPath = join(home, "agent.json");
+
+  // Pair a v1 agent (it runs from its own directory, so it can replace itself).
+  const pr = (await as(alice, () => api("POST", "/machines/pairings"))).body;
+  const pairProc = spawn(exe, ["--server", BASE, "--pair", pr.code.toLowerCase(), "--pair-only", "--config", cfgPath, "--name", "maj-agent"], { stdio: ["ignore", "ignore", "pipe"] });
+  let pairErr = "";
+  pairProc.stderr.on("data", (d) => (pairErr += d));
+  let claim: any = null;
+  for (let i = 0; i < 30 && !claim; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    const st = (await as(alice, () => api("GET", `/machines/pairings/${pr.code}`))).body;
+    if (st.status === "claimed") claim = st;
+  }
+  let confirmCode: string | undefined;
+  for (let i = 0; i < 30 && !confirmCode; i++) {
+    confirmCode = pairErr.match(/Code de confirmation : ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1];
+    if (!confirmCode) await new Promise((r) => setTimeout(r, 200));
+  }
+  await as(alice, () => approvePairing(alice.keys, pr.code, claim.agentPub, confirmCode!, "maj-agent"));
+  await new Promise<number>((r) => pairProc.on("exit", (code) => r(code ?? -1)));
+  const upProc = spawn(exe, ["--config", cfgPath], { stdio: ["ignore", "ignore", "pipe"] });
+  let upLog = "";
+  upProc.stderr.on("data", (d) => (upLog += d));
+  const listUm = async () => (await as(alice, () => lm(alice.keys))).find((m) => m.name === "maj-agent");
+  const waitFor = async (cond: (m: any) => boolean, ms = 20_000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 300))) {
+      const m = await listUm();
+      if (m && cond(m)) return m;
+    }
+    return null;
+  };
+  const um = (await waitFor((m) => m.online && !!m.agentVersion))!;
+  ok(um?.agentVersion === "1.0.0" && um.agentCaps.includes("update"), "mise à jour : l'agent v1 annonce sa version et la fonction « update »");
+  const machineId = um.id;
+
+  const latest = await (await realFetch(`${BASE}/api/agent/latest`)).json();
+  ok(latest.version === "2.0.0" && latest.signed === true, "GET /api/agent/latest annonce la version signée publiée");
+  const dl = async (f: string) => realFetch(`${BASE}/downloads/${f}`);
+  ok((await dl("agent-manifest.json")).status === 200 && (await dl("agent-manifest.json.sig")).status === 200, "le manifeste et sa signature sont servis par /downloads");
+  ok((await dl("agent-manifest.json.bak")).status === 404 && (await dl("agent-manifest.json.sig.old")).status === 404 && (await dl("..%2Fserver.log")).status === 404, "/downloads : liste blanche stricte des noms");
+  ok(((await (await realFetch(`${BASE}/downloads`)).json()) as any).files.includes("agent-manifest.json"), "/downloads liste le manifeste");
+
+  /** POST /machines/:id/update with real crypto, then reads the boxed progress frames for at most `ms`. */
+  async function trigger(who: U, key: any, ms: number, o: { rid?: string; ts?: number; d?: string } = {}) {
+    const rid = o.rid ?? c.randomId();
+    const ts = o.ts ?? Date.now();
+    const d = o.d ?? (await c.boxJson(key, { op: "update" }, c.AAD.update(rid, ts)));
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ms);
+    const frames: any[] = [];
+    let raw = "";
+    let status = 0;
+    try {
+      const r = await realFetch(`${BASE}/api/machines/${machineId}/update`, { method: "POST", headers: { "content-type": "application/json", cookie: who.cookie }, body: JSON.stringify({ rid, ts, d }), signal: ctl.signal });
+      status = r.status;
+      if (status !== 200) return { status, frames, raw, rid, ts, d, error: ((await r.json().catch(() => ({}))) as any).error };
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        raw += dec.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.trim()) frames.push(await c.unboxJson(key, JSON.parse(line).d, c.AAD.updateRes(rid)));
+        }
+      }
+    } catch {
+      // aborted: the agent said nothing more
+    } finally {
+      clearTimeout(timer);
+    }
+    return { status, frames, raw, rid, ts, d, error: undefined as string | undefined };
+  }
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const cool = (ms = 1700) => pause(ms); // UPDATE_INTERVAL_MS=1500 on this server: one request per machine every 1.5 s here
+
+  // Who may ask, and how often.
+  ok((await trigger(bob, um.auth, 2000)).status === 404, "mise à jour : Bob ne peut pas la demander sur la machine d'Alice");
+  const wrongKey = await c.newSymKey();
+  const wrong = await trigger(alice, wrongKey, 1000);
+  ok(wrong.status === 200 && wrong.frames.length === 0 && wrong.raw === "", "une requête chiffrée avec une autre clé que machineAuth est ignorée par l'agent");
+  ok((await listUm())?.agentVersion === "1.0.0", "…l'agent reste en version 1.0.0");
+  const tooFast = await trigger(alice, um.auth, 1000);
+  ok(tooFast.status === 429, "mises à jour trop rapprochées refusées par le serveur (1 par intervalle et par machine)");
+  await cool();
+
+  // A manifest signed with another key is refused; the agent stays up on v1. The same request replayed is ignored.
+  const rogue = join(home, "rogue.key");
+  execFileSync(process.env.UPDATE_SIGN!, ["keygen", "--out", rogue], { stdio: "pipe" });
+  sign(rogue, "2.0.0");
+  const refused = await trigger(alice, um.auth, 15_000);
+  const last = refused.frames.at(-1);
+  ok(last?.phase === "error" && /signature/.test(last.msg) && refused.frames.every((f: any, i: number) => f.n === i + 1), `manifeste signé par une autre clé refusé : « ${last?.msg} »`);
+  ok(!refused.raw.includes("signature") && !refused.raw.includes("phase"), "le serveur ne relaie que des chiffrés (aucune phase ni message en clair)");
+  ok(refused.frames.some((f: any) => f.phase === "check"), "la progression commence par la vérification");
+  const stillV1 = await listUm();
+  ok(stillV1?.online && stillV1.agentVersion === "1.0.0", "…l'agent est toujours en ligne en 1.0.0");
+  await cool();
+  const replay = await trigger(alice, um.auth, 2500, { rid: refused.rid, ts: refused.ts, d: refused.d });
+  ok(replay.status === 200 && replay.frames.length === 0, "la même requête rejouée est ignorée par l'agent");
+  await cool();
+  const stale = await trigger(alice, um.auth, 2500, { ts: Date.now() - 6 * 60_000 });
+  ok(stale.frames.length === 0, "une requête de plus de 5 minutes est ignorée");
+  await cool();
+
+  // The real update: signed by the release key, v2 replaces v1, the process execs itself and reconnects.
+  sign(process.env.UPDATE_KEY!, "2.0.0");
+  const pid1 = upProc.pid;
+  const okRun = await trigger(alice, um.auth, 60_000);
+  const phases = okRun.frames.map((f: any) => f.phase).join(",");
+  ok(/^check,download,install,restarting$/.test(phases), `mise à jour réelle : ${phases}`);
+  const v2 = await waitFor((m) => m.online && m.agentVersion === "2.0.0", 30_000);
+  ok(!!v2 && v2.id === machineId, "l'agent revient en 2.0.0 avec le même identifiant de machine");
+  ok(upProc.exitCode === null && upProc.pid === pid1, "même processus (exec) : le service garde son PID");
+  ok(/excalibash-agent 2\.0\.0/.test(upLog), "l'agent journalise son redémarrage en 2.0.0");
+  await pause(1500);
+  ok(!existsSync(join(home, ".excalibash-agent.old")) && !existsSync(join(home, ".excalibash-agent.new")), "après connexion réussie, l'ancien binaire est supprimé");
+  ok((v2 as any)?.agentNote == null, "pas de note « mise à jour annulée »");
+  await cool();
+  const again = await trigger(alice, v2!.auth, 15_000);
+  ok(again.frames.at(-1)?.phase === "error" && /déjà à jour/.test(again.frames.at(-1).msg), "même version : réinstallation refusée par l'agent");
+
+  upProc.kill();
+  await as(alice, () => api("DELETE", `/machines/${machineId}`));
+  rmSync(home, { recursive: true, force: true });
+} else {
+  console.log("⚠ mise à jour des agents : ignorée (UPDATE_V1_BIN / UPDATE_SIGN / UPDATE_KEY / UPDATE_DIST absents, voir tests/run.sh)");
 }
 
 // Active sessions: list, revoke one (cuts its websocket), isolation between users, coarse metadata only.
@@ -1781,6 +1936,85 @@ site.close();
     runA.run(bad);
     ok(await until(() => nbDoc.findCell(na.ydoc, bad)?.outputs.some((o) => o.output_type === "error" && o.ename === "ZeroDivisionError") === true && !nbDoc.findCell(na.ydoc, bad)!.running, 40000), "notebook : une exception arrive comme sortie d'erreur (ZeroDivisionError)");
 
+    // Completion and docstrings go through the same encrypted terminal (complete / inspect ops of the bridge).
+    {
+      await until(() => runA.status === "idle", 20000);
+      const src = "import math\nmath.sq";
+      const comp = await runA.complete(src, src.length);
+      ok(!!comp && comp.matches.includes("sqrt") && comp.start === src.length - 2 && comp.end === src.length, `notebook : « complete » sur « import math / math.sq » renvoie « sqrt », par le terminal chiffré (${JSON.stringify(comp)})`);
+      const emojiSrc = "import math\nt = '😀é'\nmath.sq";
+      const comp2 = await runA.complete(emojiSrc, emojiSrc.length);
+      ok(!!comp2 && comp2.matches.includes("sqrt") && comp2.start === emojiSrc.length - 2, "notebook : la position part en points de code (emoji, accents) et revient en UTF-16");
+      const imp = nbDoc.insertCell(na.ydoc, { type: "code", source: "import math", at: "end" });
+      runA.run(imp);
+      await until(() => !nbDoc.findCell(na.ydoc, imp)?.running && nbDoc.findCell(na.ydoc, imp)?.executionCount != null, 40000);
+      await until(() => runA.status === "idle", 20000);
+      const doc = await runA.inspect("math.sqrt", "math.sqrt".length);
+      ok(!!doc && /sqrt/.test(doc) && doc.startsWith("```text\n") && !doc.includes("\u001b"), "notebook : « inspect » renvoie la documentation de math.sqrt, sans ANSI, en bloc de code");
+      ok((await runB.complete(src, src.length)) !== null, "notebook : Bob, éditeur, complète aussi sur le même noyau");
+      ok(nbDoc.findCell(na.ydoc, imp)!.outputs.length === 0 && !bobErrors.length, "notebook : une requête de complétion n'écrit rien dans le document");
+      nbDoc.deleteCell(na.ydoc, imp);
+    }
+
+    // A code window runs its CURRENT buffer in a kernel session kept in the code document; everybody sees the last run.
+    {
+      const runDoc = sd.newDocId();
+      const crA = sd.openSharedDoc(hA3.host, runDoc);
+      const crB = sd.openSharedDoc(hB3.host, runDoc);
+      await Promise.all([crA.synced, crB.synced]);
+      codeDoc.initBlank(crA.ydoc, "calc.py");
+      crA.ydoc.getText("content").insert(0, "x = 6\nprint(x * 7)\n");
+      codeDoc.setKernelTerm(crA.ydoc, kid);
+      ok(await until(() => codeDoc.kernelTermOf(crB.ydoc) === kid), "code : la session de noyau du fichier est partagée par son document (meta.kernelTerm)");
+      const codeRun = new CodeRunner(crA.ydoc, kernelPort(sAl, kk, "code-alice"), { awareness: crA.awareness, canEdit: true });
+      const codeRunB = new CodeRunner(crB.ydoc, kernelPort(sBo, kkBob!, "code-bob"), { awareness: crB.awareness, canEdit: true });
+      codeRun.attach(kid);
+      codeRunB.attach(kid);
+      await until(() => codeRun.status === "idle", 20000);
+      const cr1 = codeRun.run(crA.ydoc.getText("content").toString());
+      ok(cr1.ok && (await until(() => codeDoc.readMeta(crB.ydoc.getMap("meta")).running === (cr1.ok ? cr1.execId : ""), 4000)), "code : Bob voit « en cours » dès qu'Alice lance le fichier");
+      const gotRun = await until(() => !codeDoc.readMeta(crB.ydoc.getMap("meta")).running && codeDoc.readOutputs(crB.ydoc).some((o) => o.output_type === "stream" && o.text === "42\n"), 40000);
+      ok(gotRun && codeDoc.readOutputs(crB.ydoc).length === 1 && codeDoc.readMeta(crB.ydoc.getMap("meta")).runCount !== undefined, "code : « 42 » est écrit dans les sorties du document de code (une seule fois), Bob le voit");
+      ok(codeRunB.localRuns.length === 0, "code : Bob, abonné au même noyau, n'écrit rien");
+      // The window is hidden / the file is edited meanwhile: what runs is what was on screen at the click.
+      crA.ydoc.getText("content").insert(0, "import sys\n");
+      const cr2 = codeRunB.run("print(x + 1)\nraise ValueError('boum')");
+      ok(cr2.ok && (await until(() => !codeDoc.readMeta(crA.ydoc.getMap("meta")).running && codeDoc.readOutputs(crA.ydoc).some((o) => o.output_type === "error" && o.ename === "ValueError"), 40000)), "code : le noyau du fichier garde son état (x), une exception arrive comme sortie d'erreur, lancée par Bob");
+      ok(codeDoc.readOutputs(crA.ydoc)[0]?.text === "7\n" && codeDoc.readOutputs(crA.ydoc).length === 2, "code : la nouvelle exécution a remplacé les sorties précédentes");
+      await nap(300);
+      const rawNow = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+      // A whole word only: a short word turns up by chance inside megabytes of base64 ciphertext.
+      const clear = (w: string) => new RegExp(`(^|[^A-Za-z0-9_-])${w.replace(".", "\\.")}($|[^A-Za-z0-9_-])`).test(rawNow);
+      ok(!clear("calc.py") && !clear("ValueError") && !clear("boum"), "code : ni le nom du fichier ni les sorties en clair dans la base");
+      codeRun.destroy();
+      codeRunB.destroy();
+      crA.destroy();
+      crB.destroy();
+    }
+
+    // The runner belongs to the board session, not to the window: hide the window in the middle of a run and
+    // the outputs keep coming (real kernel, real encrypted terminal stream).
+    const svcDocId = sd.newDocId();
+    const svcEnv: nbSvc.ServiceEnv = { port: kernelPort(sAl, kk, "nb-svc"), watchTerminals: () => () => {}, terminalOver: () => false, onClose: () => () => {} };
+    const svcWin = nbSvc.acquireNotebook(hA3.host, svcEnv, svcDocId, { idleMs: 1500 });
+    const svcBob = sd.openSharedDoc(hB3.host, svcDocId);
+    await Promise.all([svcWin.doc.synced, svcBob.synced]);
+    nbDoc.initBlankNotebook(svcWin.doc.ydoc, "svc.ipynb");
+    nbDoc.setKernelTerm(svcWin.doc.ydoc, kid);
+    const svcCell = nbDoc.cellViews(svcWin.doc.ydoc)[0].id;
+    nbDoc.findCell(svcWin.doc.ydoc, svcCell)!.source.insert(0, "import time\nfor i in range(3):\n    print('tick', i, flush=True)\n    time.sleep(0.4)\nprint('fin')");
+    const svcRun = svcWin.runner.run(svcCell);
+    svcWin.release(); // the window is hidden right after the click
+    ok(svcRun.ok && nbSvc.hasNotebookService(hA3.host, svcDocId), "notebook : fenêtre masquée en pleine exécution, le service du tableau garde le runner");
+    const svcDone = await until(() => {
+      const v = nbDoc.findCell(svcBob.ydoc, svcCell);
+      return !!v && !v.running && v.outputs.map((o) => String(o.text ?? "")).join("").includes("fin");
+    }, 40000);
+    const svcOut = nbDoc.findCell(svcBob.ydoc, svcCell)?.outputs.map((o) => String(o.text ?? "")).join("") ?? "";
+    ok(svcDone && svcOut === "tick 0\ntick 1\ntick 2\nfin\n", `notebook : les sorties d'une exécution lancée puis masquée arrivent toutes dans le document (${JSON.stringify(svcOut)})`);
+    ok(await until(() => !nbSvc.hasNotebookService(hA3.host, svcDocId), 8000), "notebook : sans fenêtre ni exécution, le service se libère tout seul");
+    svcBob.destroy();
+
     // Save the .ipynb on the machine through the sealed file channel.
     const nbText = nbDoc.exportIpynb(na.ydoc);
     const nbSaved = await mf.saveMachineFile(client, "demo.ipynb", nbText, { baseSha: undefined, confirm: confirm(true), limit: nbDoc.MAX_NOTEBOOK_BYTES });
@@ -1832,6 +2066,56 @@ site.close();
     sDel.send({ t: "doc.sub", doc: nbId });
     const reSub = await sDel.next((m) => m.t === "doc.state", 4000);
     ok(!reSub.snap && reSub.ups.length === 0, "documents : un document supprimé se réabonne vide");
+    // ---- Duplicating a board copies its documents (re-sealed under the copy's own key) ----
+    {
+      const dupNb = sd.newDocId();
+      const dupCode = sd.newDocId();
+      const nodeEl = { ...rect, id: "dupnode", customData: { node: true, shells: [], codes: [{ docId: dupCode, label: "demo.py" }], notebooks: [{ docId: dupNb }] } };
+      const SRC = await as(alice, async () => lib.createItem(ctxOf(alice, await tree(alice)), "board", null, "Source avec documents", { elements: [nodeEl], files: {} }));
+      const kSrc = await keyOf(alice, SRC);
+      const hSrc = docHost(alice, SRC, kSrc, "editor");
+      const dn = sd.openSharedDoc(hSrc.host, dupNb);
+      const dc = sd.openSharedDoc(hSrc.host, dupCode);
+      await Promise.all([dn.synced, dc.synced]);
+      nbDoc.initBlankNotebook(dn.ydoc, "copie.ipynb");
+      nbDoc.findCell(dn.ydoc, nbDoc.cellViews(dn.ydoc)[0].id)!.source.insert(0, "SECRET_DUP_CELL = 1");
+      nbDoc.setKernelTerm(dn.ydoc, kid);
+      codeDoc.initBlank(dc.ydoc, "copie.py");
+      dc.ydoc.getText("content").insert(0, "print('SECRET_DUP_CODE')\n");
+      await until(() => upRows(SRC, dupNb) > 0 && upRows(SRC, dupCode) > 0);
+      await nap(200);
+      const NEW = await as(alice, async () => lib.duplicateBoard(ctxOf(alice, await tree(alice)), SRC));
+      const kNew = await keyOf(alice, NEW);
+      const stored = (await as(alice, () => api("GET", `/items/${NEW}/docs`))).body as { doc: string; epoch: number; snap: string | null; snapSeq: number; seq: number; ups: any[] }[];
+      ok(stored.length === 2 && stored.map((d) => d.doc).sort().join() === [dupNb, dupCode].sort().join() && stored.every((d) => d.epoch === 0 && d.snap && d.ups.length === 0), "duplication : le tableau copié a ses deux documents (mêmes identifiants), chacun en un instantané");
+      const read = async (key: c.SymKey, board: string, d: (typeof stored)[number]) => {
+        const y = new Y.Doc();
+        Y.applyUpdate(y, await c.unbox(key, d.snap!, c.AAD.doc(board, d.doc, d.epoch)));
+        return y;
+      };
+      const copyNb = await read(kNew, NEW, stored.find((d) => d.doc === dupNb)!);
+      const copyCode = await read(kNew, NEW, stored.find((d) => d.doc === dupCode)!);
+      ok(nbDoc.cellViews(copyNb)[0].source.toString() === "SECRET_DUP_CELL = 1" && nbDoc.readMeta(copyNb.getMap("meta")).name === "copie.ipynb" && copyCode.getText("content").toString() === "print('SECRET_DUP_CODE')\n", "duplication : la copie se déchiffre avec la clé du nouveau tableau et garde le contenu");
+      ok(nbDoc.readMeta(copyNb.getMap("meta")).kernelTerm === undefined && nbDoc.kernelTermOf(dn.ydoc) === kid, "duplication : la référence à la session de noyau est effacée dans la copie, pas dans l'original");
+      const oldCantRead = await c.unbox(kSrc, stored[0].snap!, c.AAD.doc(NEW, stored[0].doc, 0)).then(() => false, () => true);
+      const crossBoard = await c.unbox(kNew, stored[0].snap!, c.AAD.doc(SRC, stored[0].doc, 0)).then(() => false, () => true);
+      ok(oldCantRead && crossBoard, "duplication : l'ancienne clé ne lit pas la copie, et le chiffré ne vaut que pour le nouveau tableau");
+      const rawDup = [DB, `${DB}-wal`].filter(existsSync).map((f) => readFileSync(f).toString("latin1")).join("");
+      ok(!rawDup.includes("SECRET_DUP_CELL") && !rawDup.includes("SECRET_DUP_CODE") && !rawDup.includes("copie.ipynb"), "duplication : rien en clair dans la base");
+      // The copy is a live board: its documents open and accept edits with the new key.
+      const hNew = docHost(alice, NEW, kNew, "editor");
+      const openedCopy = sd.openSharedDoc(hNew.host, dupCode);
+      await openedCopy.synced;
+      openedCopy.ydoc.getText("content").insert(0, "# édité dans la copie\n");
+      ok(openedCopy.ydoc.getText("content").toString().endsWith("SECRET_DUP_CODE')\n") && (await until(() => upRows(NEW, dupCode) > 0)), "duplication : le document copié s'ouvre sur le nouveau tableau et accepte des modifications");
+      ok(dc.ydoc.getText("content").toString() === "print('SECRET_DUP_CODE')\n", "duplication : l'original n'est pas modifié par la copie");
+      openedCopy.destroy();
+      dn.destroy();
+      dc.destroy();
+      hSrc.close();
+      hNew.close();
+    }
+
     sDel.ws.close();
     runA.destroy();
     runB.destroy();

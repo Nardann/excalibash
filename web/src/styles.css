@@ -1006,6 +1006,11 @@ input.board-title {
 .board-canvas .excalidraw {
   --color-primary: #4f46e5;
 }
+/* Windows (terminal, code, notebook) can overflow the canvas: focusing their input must not scroll the clipped canvas
+   (overflow: hidden can still be scrolled by the browser to reveal a caret, which shifts the whole board). */
+.board-canvas .excalidraw.excalidraw-container {
+  overflow: clip;
+}
 .public-title {
   min-width: 0;
   overflow: hidden;
@@ -2177,6 +2182,49 @@ html.dark .term.broadcasting {
   font-size: 13px;
   pointer-events: none;
 }
+.capture-dock {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: grid;
+  gap: 6px;
+  max-width: min(420px, 90vw);
+}
+.capture-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #334155);
+  border-radius: 999px;
+  background: var(--surface, #111827);
+  color: var(--text, #e2e8f0);
+  font-size: 12.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+.capture-chip-error {
+  border-color: var(--danger, #dc2626);
+  border-radius: 10px;
+  color: var(--danger, #dc2626);
+}
+.inline-error {
+  padding: 8px 10px;
+  border: 1px solid var(--danger, #dc2626);
+  border-radius: 8px;
+  color: var(--danger, #dc2626);
+  background: color-mix(in srgb, var(--danger, #dc2626) 8%, transparent);
+  font-size: 13px;
+  white-space: pre-line;
+}
+.inline-error .codebox {
+  color: var(--text, inherit);
+}
+.inline-error details {
+  margin-top: 4px;
+  color: var(--text-2, inherit);
+  font-size: 12px;
+}
 .term-files {
   position: absolute;
   top: 6px;
@@ -2262,10 +2310,66 @@ html.dark .term.broadcasting {
 .term.code .term-body.code-body {
   padding: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.code-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 90px;
 }
 .code-host {
   position: absolute;
   inset: 0;
+}
+.code-out {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 45%;
+  border-top: 1px solid var(--line, rgba(128, 128, 128, 0.35));
+  background: var(--term-bg, transparent);
+}
+.code-out-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.code-out-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.code-out-state.on::before,
+.code-out-state.busy::before,
+.code-out-state.off::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+.code-out-state.busy::before {
+  background: #f59e0b;
+}
+.code-out-state.off::before {
+  background: #94a3b8;
+}
+.code-out-fatal {
+  color: #ef4444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.code-out-body {
+  overflow: auto;
+  min-height: 40px;
+  padding: 2px 8px 6px;
 }
 .code-dirty {
   display: inline-block;

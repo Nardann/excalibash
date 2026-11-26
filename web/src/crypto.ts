@@ -280,6 +280,9 @@ export const AAD = {
   /** Reachability probe asked of an agent by its owner, and its answer (agent/probe.go). */
   probe: (rid: string, ts: number) => `eb:probe:${rid}:${ts}`,
   probeRes: (rid: string) => `eb:probe-res:${rid}`,
+  /** Self-update request asked of an agent, and its progress frames (agent/update.go). */
+  update: (rid: string, ts: number) => `eb:update:${rid}:${ts}`,
+  updateRes: (rid: string) => `eb:update-res:${rid}`,
   /** File transfer and capture requests ridden on a local shell (agent/files.go), and their answers. */
   fileReq: (termId: string, rid: string, ts: number) => `eb:file-req:${termId}:${rid}:${ts}`,
   fileRes: (termId: string, rid: string, n: number) => `eb:file-res:${termId}:${rid}:${n}`,

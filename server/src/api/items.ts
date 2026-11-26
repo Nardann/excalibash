@@ -7,7 +7,7 @@ import { evictRoom, flushRoom } from "../rooms.ts";
 import { dropBoardTunnels, dropTunnels, rekeyTunnel, tunnelsOfBoards } from "../tunnels.ts";
 import { HttpError, blob, mailLink, pid } from "../http.ts";
 import { purgeHistory } from "../history.ts";
-import { MAX_DOC_BYTES, isDocId, listDocs, replaceDocs, type RotatedDoc } from "../docs.ts";
+import { MAX_DOC_BYTES, MAX_DOCS_PER_BOARD, MAX_SNAPSHOT, createDocs, isDocId, listDocs, replaceDocs, type NewDoc, type RotatedDoc } from "../docs.ts";
 import { kindLabel, notify, usersWithAccess } from "../notify.ts";
 import { recheckBoardSessions } from "./machines.ts";
 import { linksApi } from "./links.ts";
@@ -108,6 +108,18 @@ itemsApi.get("/tree", (req, res) => {
 
 // ---- Create / rename / move -----------------------------------------------------
 
+/** Snapshots of the documents of a board being created (a duplicate): one per id, sealed by the client under the new key. */
+function newDocs(v: unknown): NewDoc[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v) || v.length > MAX_DOCS_PER_BOARD) throw new HttpError(400, "Documents invalides");
+  const seen = new Set<string>();
+  return v.map((d) => {
+    if (!d || !isDocId(d.doc) || seen.has(d.doc)) throw new HttpError(400, "Document invalide");
+    seen.add(d.doc);
+    return { doc: d.doc, d: blob(d.d, MAX_SNAPSHOT) };
+  });
+}
+
 itemsApi.post("/items", (req, res) => {
   const uid = req.user!.id;
   const b = req.body;
@@ -126,6 +138,8 @@ itemsApi.post("/items", (req, res) => {
   const els = entries(b.board?.elements);
   const fls = files(b.board?.files);
   const preview = b.board?.preview ? blob(b.board.preview, 8_000_000) : null;
+  const docs = newDocs(b.board?.docs);
+  if (docs.length && b.kind !== "board") throw new HttpError(400, "Seul un tableau a des documents");
   const now = Date.now();
   tx(() => {
     db.prepare(
@@ -136,6 +150,8 @@ itemsApi.post("/items", (req, res) => {
     }
     if (b.kind === "board") {
       db.prepare("INSERT INTO boards (id, elements, files, preview) VALUES (?, ?, ?, ?)").run(b.id, JSON.stringify(els), JSON.stringify(fls), preview);
+      const bad = createDocs(b.id, docs);
+      if (bad) throw new HttpError(400, bad);
     }
   });
   res.json({ id: b.id });

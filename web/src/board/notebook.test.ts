@@ -14,9 +14,12 @@ import {
   findCell,
   initBlankNotebook,
   insertCell,
+  newCellMap,
   kernelCwd,
   moveCell,
   newWriteState,
+  ensureOrder,
+  orderOf,
   parseIpynb,
   readMeta,
   removeDuplicates,
@@ -26,6 +29,12 @@ import {
 } from "./notebookDoc.ts";
 import { classifyBundle, classifyOutputs, cleanBase64, collapseCarriage, frameDoc, frameHeight, parseAnsi, stripAnsi, markdownFrame } from "./notebookRender.ts";
 import { NotebookRunner } from "./notebookRunner.ts";
+import { CodeRunner } from "./codeRunner.ts";
+import { acquireCode, acquireNotebook, hasNotebookService, type ServiceEnv } from "./notebookService.ts";
+import { AAD, box, newSymKey, unbox } from "../crypto.ts";
+import { beginCodeRun, clearCodeOutputs, finishCodeRun, initBlank, kernelTermOf as codeKernelTermOf, outputsOf, readMeta as readCodeMeta, readOutputs, setKernelTerm as setCodeKernelTerm } from "./codeDoc.ts";
+import { codePointsToUtf16, docMarkdown, mapComplete, utf16ToCodePoints, wordAt } from "./pyComplete.ts";
+import { copyDocState, sceneDocIds, sealDoc, type StoredDoc } from "./docCrypto.ts";
 import { LineSplitter } from "./kernelProtocol.ts";
 import { MAX_NOTEBOOKS, nodeDataOf } from "./nodeData.ts";
 
@@ -186,16 +195,18 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   // Move, and the duplicate left by two simultaneous moves.
   const c2 = insertCell(a, { type: "code", source: "2", at: "end" });
   const c3 = insertCell(a, { type: "code", source: "3", at: "end" });
-  ok(moveCell(a, c3, -1) && ids(b).join() === [first, c3, c2].join() && text(b, c3) === "3", "cellules : monter une cellule (copie fidèle, même identifiant)");
+  ok(moveCell(a, c3, -1) && ids(b).join() === [first, c3, c2].join() && text(b, c3) === "3", "cellules : monter une cellule (même cellule, même identifiant, seul l'ordre change)");
   ok(!moveCell(a, first, -1) && !moveCell(a, c2, 1), "cellules : on ne sort pas des bornes");
   offline();
   moveCell(a, c2, -1);
   moveCell(b, c2, -1);
   sync();
-  ok(ids(a).length === 3 && cellViews(a).length === 3, "cellules : deux déplacements simultanés laissent un doublon que la lecture ignore");
+  ok(ids(a).length === 3 && ids(a).join() === ids(b).join() && orderOf(a).length === 4, "cellules : deux déplacements simultanés laissent un identifiant en double dans l'ordre, que la lecture ignore");
   const removedA = removeDuplicates(a);
   const removedB = removeDuplicates(b);
-  ok(removedA === 1 && (removedB === 0 || removedB === 1) && a.getArray("cells").length === 3 && b.getArray("cells").length === 3, "cellules : le nettoyage des doublons converge (idempotent entre clients)");
+  ok(removedA === 1 && removedB <= 1 && orderOf(a).length === 3 && orderOf(b).length === 3 && ids(a).join() === ids(b).join(), "cellules : le nettoyage des doublons converge (idempotent entre clients)");
+  sync();
+  ok(orderOf(a).length === 3 && orderOf(b).length === 3 && a.getArray("cells").length === 3, "cellules : …et la cellule elle-même n'a jamais été dupliquée");
 
   // Type change drops outputs.
   const cc = ids(a)[0];
@@ -492,6 +503,458 @@ const SAMPLE_TEXT = JSON.stringify(SAMPLE, null, 1) + "\n";
   const tooLong = rg.run(ids(d4)[0]);
   ok(!tooLong.ok && /trop long/.test((tooLong as any).reason) && !findCell(d4, ids(d4)[0])!.running, "noyau : un code de plus de 1 Mio est refusé avant de marquer la cellule en cours");
   rg.destroy();
+}
+
+// 7. The notebook service: the runner outlives the window
+{
+  const enc = new TextEncoder();
+  const key = await newSymKey();
+  const handlers = new Map<string, any>();
+  const host = {
+    boardId: "board",
+    key,
+    canEdit: true,
+    currentEpoch: 1,
+    you: { name: "Alice", color: "#336699" },
+    docSend(m: any) {
+      if (m.t === "doc.sub") queueMicrotask(() => handlers.get(m.doc)?.onMessage({ t: "doc.state", ups: [] }));
+      return true;
+    },
+    docRegister(doc: string, h: any) {
+      handlers.set(doc, h);
+      queueMicrotask(() => h.onOpen());
+      return () => handlers.delete(doc);
+    },
+    on: () => () => {},
+  };
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  const listeners = new Set<L>();
+  const sent: string[] = [];
+  const emit = (ev: object) => {
+    const b = enc.encode(JSON.stringify(ev) + "\n");
+    for (const l of listeners) l.onData(b);
+  };
+  let over = false;
+  let watcher: (() => void) | undefined;
+  let closeBoard: (() => void) | undefined;
+  const env: ServiceEnv = {
+    port: {
+      subscribe: (_t, l) => (listeners.add(l), () => listeners.delete(l)),
+      input: (_t, d) => void sent.push(new TextDecoder().decode(d)),
+    },
+    watchTerminals: (fn) => ((watcher = fn), () => (watcher = undefined)),
+    terminalOver: () => over,
+    onClose: (fn) => ((closeBoard = fn), () => (closeBoard = undefined)),
+  };
+  const TERM = "K".repeat(22);
+  const docId = "S".repeat(22);
+
+  const win = acquireNotebook(host, env, docId, { idleMs: 200 });
+  await win.doc.synced;
+  initBlankNotebook(win.doc.ydoc);
+  const cell = ids(win.doc.ydoc)[0];
+  findCell(win.doc.ydoc, cell)!.source.insert(0, "print(1)");
+  setKernelTerm(win.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  ok(win.runner.term === TERM, "service : le runner suit la session de noyau du document, sans fenêtre pour le lui dire");
+  const run = win.runner.run(cell);
+  ok(run.ok && sent.length === 1, "service : la cellule part au noyau");
+  const execId = run.ok ? run.execId : "";
+
+  // The window is hidden in the middle of the run: its handle goes away, the service stays.
+  const again = acquireNotebook(host, env, docId, { idleMs: 200 });
+  ok(again.runner === win.runner && again.doc === win.doc, "service : une seconde fenêtre rejoint le même runner et le même document");
+  win.release();
+  again.release();
+  await nap(260);
+  ok(hasNotebookService(host, docId) && !win.disposed, "service : sans fenêtre mais avec une exécution en cours, il reste en vie");
+  emit({ ev: "stream", id: execId, name: "stdout", text: "1\n" });
+  emit({ ev: "done", id: execId, count: 1, status: "ok" });
+  await nap(200);
+  const got = findCell(win.doc.ydoc, cell)!;
+  ok(got.outputs[0]?.text === "1\n" && got.executionCount === 1 && !got.running, "service : les sorties arrivent dans le document alors que plus aucune fenêtre n'est ouverte");
+  await nap(450);
+  ok(!hasNotebookService(host, docId) && win.disposed && !handlers.has(docId) && listeners.size === 0, "service : plus d'exécution ni de fenêtre depuis un moment → libéré (document et noyau)");
+
+  // A window shown again during the grace period finds the service warm; a later one starts a new one.
+  const w2 = acquireNotebook(host, env, docId, { idleMs: 150 });
+  w2.release();
+  await nap(60);
+  const w3 = acquireNotebook(host, env, docId, { idleMs: 150 });
+  ok(w3.runner === w2.runner && !w3.disposed, "service : rouvrir la fenêtre avant l'échéance retrouve le même service");
+  w3.release();
+  await nap(300);
+  ok(w3.disposed, "service : …et il disparaît une fois l'échéance passée");
+
+  // Document deleted: the service goes away even with a window open.
+  const w4 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  await w4.doc.synced;
+  handlers.get(docId).onMessage({ t: "doc.gone", doc: docId });
+  ok(w4.disposed && !hasNotebookService(host, docId), "service : document supprimé → runner et abonnement libérés");
+  w4.release();
+
+  // Board closed.
+  const w5 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  closeBoard?.();
+  ok(w5.disposed && listeners.size === 0, "service : tableau fermé → tout est libéré");
+  w5.release();
+
+  // The kernel session ends while a run is in flight: the service (not a window) ends it with an error.
+  const w6 = acquireNotebook(host, env, docId, { idleMs: 5000 });
+  await w6.doc.synced;
+  initBlankNotebook(w6.doc.ydoc);
+  const c6 = ids(w6.doc.ydoc)[0];
+  setKernelTerm(w6.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  ok(w6.runner.run(c6).ok, "service : exécution lancée");
+  w6.release();
+  over = true;
+  watcher?.();
+  ok(!findCell(w6.doc.ydoc, c6)!.running && findCell(w6.doc.ydoc, c6)!.outputs.at(-1)!.output_type === "error", "service : la session de noyau disparaît fenêtre masquée → l'exécution se termine par une erreur");
+  closeBoard?.();
+}
+
+// 8. Stable cell identity: moving only touches the order
+{
+  // Typing in a cell while somebody moves it: nothing is lost, in both directions.
+  const { a, b, offline, sync } = pair();
+  initBlankNotebook(a);
+  const c1 = ids(a)[0];
+  const c2 = insertCell(a, { type: "code", source: "deux", at: "end" });
+  const c3 = insertCell(a, { type: "code", source: "trois", at: "end" });
+  offline();
+  moveCell(a, c1, 1);
+  findCell(b, c1)!.source.insert(0, "frappé pendant le déplacement ");
+  findCell(b, c1)!.source.insert(findCell(b, c1)!.source.length, " et la suite");
+  sync();
+  ok(ids(a).join() === [c2, c1, c3].join() && ids(b).join() === ids(a).join() && text(a, c1) === "frappé pendant le déplacement  et la suite" && text(b, c1) === text(a, c1), "déplacement : la frappe simultanée dans la cellule déplacée n'est pas perdue");
+  const mapBefore = findCell(a, c1)!.map;
+  moveCell(a, c1, 1);
+  ok(findCell(a, c1)!.map === mapBefore && a.getArray("cells").length === 3, "déplacement : la cellule est la même (même Y.Map), pas une copie");
+  offline();
+  moveCell(a, c3, -1);
+  findCell(b, c3)!.source.insert(5, "!");
+  findCell(a, c2)!.source.insert(0, "A:");
+  moveCell(b, c2, 1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && text(a, c3) === "trois!" && text(b, c2) === "A:deux", `déplacements croisés + frappes : tout converge (${ids(a).length} cellules)`);
+  // A move concurrent with the deletion of the same cell leaves no ghost.
+  offline();
+  deleteCell(a, c3);
+  moveCell(b, c3, -1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && !ids(a).includes(c3) && ids(a).length === 2, "déplacement : déplacer une cellule supprimée en même temps ne la ressuscite pas");
+  // Insert next to a cell that moves concurrently.
+  offline();
+  const neu = insertCell(a, { type: "markdown", source: "n", at: { after: c1 } });
+  moveCell(b, c1, -1);
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).includes(neu) && ids(a).length === 3, "déplacement : une insertion pendant un déplacement converge");
+  removeDuplicates(a);
+  removeDuplicates(b);
+  sync();
+  ok(orderOf(a).length === ids(a).length && orderOf(b).length === ids(b).length, "déplacement : le nettoyage ne laisse que les identifiants utiles");
+}
+
+// 9. Migration of documents written before "order" existed
+{
+  /** An old notebook: the cells in the "cells" array only, no order. */
+  const legacy = (n = 4) => {
+    const d = new Y.Doc();
+    d.transact(() => {
+      d.getMap("meta").set("name", "vieux.ipynb");
+      d.getMap("meta").set("nbformatMinor", 5);
+      d.getArray("cells").push(Array.from({ length: n }, (_, i) => newCellMap({ type: "code", source: `cellule ${i}`, id: `c${i}` })));
+    });
+    return d;
+  };
+  const d = legacy();
+  ok(orderOf(d).length === 0 && ids(d).join() === "c0,c1,c2,c3", "migration : un ancien document se lit sans conversion, dans l'ordre de stockage");
+  const before = exportIpynb(d);
+  ok(ensureOrder(d) && orderOf(d).toArray().join() === "c0,c1,c2,c3" && !ensureOrder(d), "migration : ensureOrder écrit l'ordre une fois (idempotent)");
+  ok(exportIpynb(d) === before, "migration : l'export .ipynb est identique avant et après");
+  const back = parseIpynb(before);
+  const d2 = new Y.Doc();
+  await fillNotebook(d2, back, { name: "r.ipynb", sha: "f".repeat(64), pause: noPause });
+  ok(JSON.stringify(JSON.parse(exportIpynb(d2)).cells) === JSON.stringify(JSON.parse(before).cells) && ids(d2).join() === "c0,c1,c2,c3" && orderOf(d2).length === 4, "migration : l'import .ipynb écrit cellules et ordre");
+
+  // First edit by an editor converts: a move on an old document.
+  const old = legacy();
+  const { a, b, offline, sync } = pair();
+  Y.applyUpdate(a, Y.encodeStateAsUpdate(old), "net");
+  Y.applyUpdate(b, Y.encodeStateAsUpdate(old), "net");
+  ok(orderOf(a).length === 0 && ids(a).length === 4, "migration : deux éditeurs ouvrent le même ancien document");
+  // Both convert at the same moment (one by moving, one by inserting), while a third edit types.
+  offline();
+  moveCell(a, "c3", -1);
+  const ins = insertCell(b, { type: "code", source: "nouvelle", at: { after: "c0" } });
+  findCell(b, "c2")!.source.insert(0, "# ");
+  sync();
+  ok(ids(a).join() === ids(b).join() && ids(a).length === 5 && new Set(ids(a)).size === 5, `migration : conversions simultanées, même liste partout (${ids(a).join()})`);
+  ok(text(a, "c2") === "# cellule 2" && text(b, "c2") === text(a, "c2") && a.getArray("cells").length === 5, "migration : aucune cellule copiée, la frappe simultanée est gardée");
+  const ra = removeDuplicates(a);
+  const rb = removeDuplicates(b);
+  sync();
+  ok(ra > 0 && rb <= ra && orderOf(a).length === 5 && orderOf(b).length === 5 && ids(a).join() === ids(b).join() && ids(a).includes(ins), "migration : le nettoyage supprime les identifiants répétés des deux conversions, identique des deux côtés");
+  const afterIds = ids(a).join();
+  removeDuplicates(a);
+  removeDuplicates(b);
+  sync();
+  ok(ids(a).join() === afterIds && ids(b).join() === afterIds, "migration : nettoyer à nouveau ne change plus rien");
+
+  // Cells the order does not mention (written by an older client) are shown after the known ones; deleting works.
+  const mixed = legacy(3);
+  ensureOrder(mixed);
+  mixed.getArray("cells").push([newCellMap({ type: "markdown", source: "tard", id: "late" })]);
+  ok(ids(mixed).join() === "c0,c1,c2,late", "migration : une cellule absente de l'ordre apparaît à la fin");
+  ok(moveCell(mixed, "late", -1) && ids(mixed).join() === "c0,c1,late,c2" && orderOf(mixed).length === 4, "migration : la déplacer l'inscrit dans l'ordre");
+  ok(deleteCell(mixed, "c1") && ids(mixed).join() === "c0,late,c2" && orderOf(mixed).length === 3, "migration : supprimer retire la cellule et son identifiant");
+  // An id that points to nothing and a non-string entry are ignored.
+  mixed.getArray("order").push(["fantôme", 42 as any]);
+  ok(ids(mixed).join() === "c0,late,c2", "migration : un identifiant sans cellule, ou qui n'est pas une chaîne, est ignoré");
+}
+
+// 10. Duplicating a board: documents re-sealed under the new board's key
+{
+  const oldKey = await newSymKey();
+  const newKey = await newSymKey();
+  const SRC = "src-board";
+  const DST = "dst-board";
+  const doc = "D".repeat(22);
+  // A notebook with a live kernel session and a running cell, stored as a snapshot plus two updates.
+  const y = new Y.Doc();
+  const ups: Uint8Array[] = [];
+  y.on("update", (u: Uint8Array) => ups.push(u));
+  initBlankNotebook(y, "orig.ipynb");
+  const cell = ids(y)[0];
+  findCell(y, cell)!.source.insert(0, "print('é😀')");
+  setKernelTerm(y, "K".repeat(22));
+  beginRun(y, cell, "exec:1");
+  const stored: StoredDoc = {
+    doc,
+    epoch: 3,
+    snap: await box(oldKey, ups[0], AAD.doc(SRC, doc, 3)),
+    snapSeq: 1,
+    seq: 3,
+    ups: await Promise.all(ups.slice(1).map(async (u, i) => ({ seq: i + 2, d: await box(oldKey, u, AAD.doc(SRC, doc, 3)) }))),
+  };
+  const copied = await copyDocState(stored, { boardId: SRC, key: oldKey });
+  const c = new Y.Doc();
+  Y.applyUpdate(c, copied.state);
+  ok(copied.doc === doc && findCell(c, cell)!.source.toString() === "print('é😀')" && readMeta(c.getMap("meta")).name === "orig.ipynb", "duplication : le document est relu avec l'ancienne clé, même identifiant, même contenu");
+  ok(readMeta(c.getMap("meta")).kernelTerm === undefined && !c.getMap("meta").has("kernelTerm") && !findCell(c, cell)!.running, "duplication : la session de noyau et les cellules « en cours » ne sont pas copiées");
+  ok(readMeta(y.getMap("meta")).kernelTerm === "K".repeat(22) && !!findCell(y, cell)!.running, "duplication : l'original n'est pas touché");
+  const sealed = await sealDoc(copied.doc, copied.state, { boardId: DST, key: newKey, epoch: 0 });
+  const reopened = new Y.Doc();
+  Y.applyUpdate(reopened, await unbox(newKey, sealed.d, AAD.doc(DST, doc, 0)));
+  ok(findCell(reopened, cell)!.source.toString() === "print('é😀')", "duplication : la copie se lit avec la clé, le tableau et l'epoch du nouveau tableau");
+  const fails = async (f: () => Promise<unknown>) => f().then(() => false, () => true);
+  ok(
+    (await fails(() => unbox(oldKey, sealed.d, AAD.doc(DST, doc, 0)))) && (await fails(() => unbox(newKey, sealed.d, AAD.doc(SRC, doc, 0)))) && (await fails(() => unbox(newKey, sealed.d, AAD.doc(DST, doc, 1)))),
+    "duplication : l'ancienne clé ne lit pas la copie, et elle ne se rejoue ni dans l'ancien tableau ni à un autre epoch",
+  );
+  const bad: StoredDoc = { ...stored, ups: [...stored.ups, { seq: 9, d: await box(newKey, ups[1], AAD.doc(SRC, doc, 3)) }] };
+  ok(await fails(() => copyDocState(bad, { boardId: SRC, key: oldKey })), "duplication : une mise à jour qui ne s'authentifie pas interrompt la copie");
+  const mk = (customData: unknown, isDeleted = false) => ({ customData, isDeleted });
+  const A = "A".repeat(22);
+  const B = "B".repeat(22);
+  ok(
+    sceneDocIds([mk({ node: true, codes: [{ docId: A }], notebooks: [{ docId: B }, { docId: "court" }, { docId: A }, null] }), mk({ node: true, codes: [{ docId: "C".repeat(22) }] }, true), mk({ codeId: "x" }), mk(undefined)]).join() === `${A},${B}`,
+    "duplication : les documents à copier sont ceux des icônes du schéma (valides, sans doublon, sans icône supprimée)",
+  );
+}
+
+// 11. Completion and docstrings: offsets, mapping, requests
+{
+  const emoji = "x = '😀é'; 😀.na";
+  const at = emoji.length;
+  ok(utf16ToCodePoints("abc", 2) === 2 && utf16ToCodePoints("é😀é", 3) === 2 && utf16ToCodePoints("é😀é", 4) === 3, "complétion : UTF-16 → points de code (accents : 1, emoji : 2 unités UTF-16 mais 1 point)");
+  ok(utf16ToCodePoints("é😀é", 2) === 1 && utf16ToCodePoints("é😀é", 99) === 3 && utf16ToCodePoints("é😀é", -4) === 0, "complétion : un offset au milieu d'une paire de substitution ne compte pas l'emoji ; bornes");
+  ok(codePointsToUtf16("é😀é", 2) === 3 && codePointsToUtf16("é😀é", 3) === 4 && codePointsToUtf16("é😀é", 50) === 4 && codePointsToUtf16("😀", 1) === 2, "complétion : points de code → UTF-16");
+  ok(utf16ToCodePoints(emoji, at) === [...emoji].length && codePointsToUtf16(emoji, [...emoji].length) === at, "complétion : aller-retour sur un texte avec emoji et accents");
+  const code = "s = '😀'\nmath.sq";
+  const pos = code.length;
+  ok(JSON.stringify(mapComplete(code, pos, { matches: ["sqrt"], start: 13, end: 15 })) === JSON.stringify({ start: pos - 2, end: pos, matches: ["sqrt"] }), "complétion : début et fin du noyau (points de code) convertis en UTF-16 (l'emoji décale de 1)");
+  ok(mapComplete(code, pos, { matches: ["a", "a", "", 3 as any, "b\nc", "b"], start: 0, end: 0 })?.matches.join() === "a,b" && mapComplete(code, pos, { matches: [] }) === null && mapComplete(code, pos, { matches: "x" as any }) === null, "complétion : correspondances nettoyées (doublons, vides, non-chaînes, retours à la ligne), rien = null");
+  const wild = mapComplete(code, pos, { matches: ["q"], start: 999, end: 3 });
+  ok(wild!.start === pos && wild!.end === pos, "complétion : une plage qui n'entoure pas le curseur est ramenée au curseur");
+  ok(mapComplete("ab", 2, { matches: ["abc"] })!.start === 2, "complétion : sans bornes, au curseur");
+  ok(mapComplete("x", 1, { matches: Array.from({ length: 500 }, (_, i) => `m${i}`) })!.matches.length === 200, "complétion : 200 propositions au plus");
+  const md = docMarkdown("\u001b[1;31mSignature:\u001b[0m sqrt(x)\r\nDoc avec ``` et `code` <script>alert(1)</script> [lien](http://x)")!;
+  ok(md.startsWith("````text\n") && md.endsWith("\n````") && !md.includes("\u001b") && md.includes("<script>") && !md.includes("\r"), "docstring : ANSI retiré, bloc de code dont la clôture est plus longue que toute série de ` du texte (rien n'est interprété)");
+  ok(docMarkdown("x\n".repeat(10000))!.length < 8100 && docMarkdown("   ") === null && docMarkdown(null) === null && docMarkdown(42) === null, "docstring : plafonnée, vide ou pas du texte = rien");
+  ok(wordAt("a = math.sqrt(2)", 10)?.start === 9 && wordAt("a = math.sqrt(2)", 8)?.end === 8 && wordAt("a = (", 5) === null && wordAt("é😀x", 3) !== null, "docstring : le mot sous le curseur");
+
+  // Requests through a runner: what goes to the kernel, what comes back, what is never sent.
+  const dec = new TextDecoder();
+  const enc = new TextEncoder();
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  let listener: L | undefined;
+  const lines: any[] = [];
+  const reply = (ev: object) => listener!.onData(enc.encode(JSON.stringify(ev) + "\n"));
+  const port = {
+    subscribe: (_t: string, l: L) => ((listener = l), () => (listener = undefined)),
+    input: (_t: string, d: Uint8Array) => void lines.push(...dec.decode(d).split("\n").filter(Boolean).map((l) => JSON.parse(l))),
+  };
+  const run = new NotebookRunner(new Y.Doc(), port, { canEdit: true });
+  run.attach("Q".repeat(22));
+  reply({ ev: "status", state: "idle" });
+  const asked = run.complete(code, pos);
+  const req = lines.at(-1);
+  ok(req.op === "complete" && req.code === code && req.pos === [...code].length && typeof req.id === "string" && req.id.length <= 64, "complétion : la requête envoie le code et la position en points de code");
+  reply({ ev: "complete", id: "autre", matches: ["non"], start: 0, end: 0 });
+  reply({ ev: "complete", id: req.id, matches: ["sqrt", "sin"], start: 13, end: 15 });
+  const got = await asked;
+  ok(got?.matches.join() === "sqrt,sin" && got.start === pos - 2 && got.end === pos, "complétion : seule la réponse portant l'identifiant de la requête est prise, convertie en UTF-16");
+  const insp = run.inspect(code, pos);
+  const ireq = lines.at(-1);
+  reply({ ev: "inspect", id: ireq.id, found: true, data: { "text/plain": "\u001b[31mdoc\u001b[0m de sqrt" } });
+  ok((await insp) === "```text\ndoc de sqrt\n```", "docstring : la réponse devient un bloc Markdown, ANSI retiré");
+  const none = run.inspect(code, pos);
+  reply({ ev: "inspect", id: lines.at(-1).id, found: false, data: {} });
+  ok((await none) === null, "docstring : « introuvable » = rien");
+  const t0 = Date.now();
+  ok((await run.complete(code, pos, { timeoutMs: 120 })) === null && Date.now() - t0 < 1000, "complétion : sans réponse, rendue vide à l'échéance (3 s par défaut)");
+  const ac = new AbortController();
+  const before = lines.length;
+  const stale = run.complete(code, pos, { signal: ac.signal, timeoutMs: 5000 });
+  ac.abort();
+  ok((await stale) === null && lines.length === before + 1, "complétion : une requête abandonnée rend aussitôt (la réponse tardive est ignorée)");
+  reply({ ev: "complete", id: lines.at(-1).id, matches: ["tard"], start: 0, end: 0 });
+  reply({ ev: "status", state: "busy" });
+  const nb = lines.length;
+  ok((await run.complete(code, pos)) === null && (await run.inspect(code, pos)) === null && lines.length === nb && !run.canQuery, "complétion : noyau occupé, rien n'est envoyé (la requête attendrait derrière la cellule en cours)");
+  reply({ ev: "status", state: "idle" });
+  const viewer = new NotebookRunner(new Y.Doc(), port, { canEdit: false });
+  viewer.attach("Q".repeat(22));
+  const nv = lines.length;
+  ok((await viewer.complete(code, pos)) === null && lines.length === nv && !viewer.canQuery, "complétion : un lecteur ne peut pas taper dans la session, donc rien n'est envoyé");
+  const pend = run.complete(code, pos, { timeoutMs: 5000 });
+  run.attach(null);
+  ok((await pend) === null && (await run.complete(code, pos)) === null, "complétion : session détachée, les requêtes en attente rendent vide");
+  run.destroy();
+  viewer.destroy();
+}
+
+// 12. A code window runs its buffer on a kernel: same executor rules as a notebook cell
+{
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  type L = { onReplay(d: Uint8Array): void; onData(d: Uint8Array): void };
+  const listeners = new Set<L>();
+  const sent: any[] = [];
+  const emit = (ev: object) => {
+    const b = enc.encode(JSON.stringify(ev) + "\n");
+    for (const l of listeners) l.onData(b);
+  };
+  const port = {
+    subscribe: (_t: string, l: L) => (listeners.add(l), () => listeners.delete(l)),
+    input: (_t: string, d: Uint8Array) => void sent.push(...dec.decode(d).split("\n").filter(Boolean).map((l) => JSON.parse(l))),
+  };
+  const TERM = "C".repeat(22);
+  const { a, b } = pair();
+  initBlank(a, "run.py");
+  a.getText("content").insert(0, "print(6 * 7)\n");
+  ok(codeKernelTermOf(b) === null && !readCodeMeta(b.getMap("meta")).running, "code : un document neuf n'a ni noyau ni exécution");
+  b.getMap("meta").set("kernelTerm", "pas un identifiant");
+  ok(codeKernelTermOf(b) === null, "code : un identifiant de session invalide est ignoré");
+  setCodeKernelTerm(a, TERM);
+  ok(codeKernelTermOf(b) === TERM, "code : l'identifiant de la session de noyau est partagé par le document");
+  const ra = new CodeRunner(a, port, { canEdit: true });
+  const rb = new CodeRunner(b, port, { canEdit: true });
+  ra.attach(TERM);
+  rb.attach(TERM);
+  emit({ ev: "status", state: "idle" });
+  const r = ra.run(a.getText("content").toString());
+  const execId = r.ok ? r.execId : "";
+  ok(r.ok && sent.length === 1 && sent[0].op === "exec" && sent[0].code === "print(6 * 7)\n" && sent[0].id === execId, "code : la ligne exec porte le contenu actuel de la fenêtre");
+  ok(readCodeMeta(b.getMap("meta")).running === execId && !rb.run("x").ok && !ra.run("x").ok, "code : « en cours » est visible partout et on ne lance pas deux fois");
+  a.getText("content").insert(0, "# modifié après le lancement\n");
+  emit({ ev: "status", state: "busy" });
+  emit({ ev: "stream", id: execId, name: "stdout", text: "42\n" });
+  emit({ ev: "result", id: execId, count: 3, data: { "text/plain": "42" } });
+  emit({ ev: "done", id: execId, count: 3, status: "ok" });
+  emit({ ev: "status", state: "idle" });
+  await nap(250);
+  const outs = readOutputs(b);
+  ok(outs[0]?.text === "42\n" && outs[1]?.output_type === "execute_result" && outs.length === 2 && readCodeMeta(b.getMap("meta")).runCount === 3 && !readCodeMeta(b.getMap("meta")).running, "code : les sorties (« 42 »), le compteur et la fin arrivent chez l'autre participant, une seule fois");
+  ok(ra.localRuns.length === 0 && rb.localRuns.length === 0, "code : seul l'exécuteur écrivait");
+  // A second run replaces the outputs.
+  const r2 = rb.run("print('bis')");
+  ok(r2.ok && readOutputs(a).length === 0, "code : relancer efface les sorties précédentes, dans la même transaction");
+  const exec2 = r2.ok ? r2.execId : "";
+  emit({ ev: "stream", id: exec2, name: "stderr", text: "oups\n" });
+  emit({ ev: "error", id: exec2, ename: "ValueError", evalue: "x", traceback: ["\u001b[31mTraceback\u001b[0m"] });
+  emit({ ev: "done", id: exec2, count: 4, status: "error" });
+  await nap(250);
+  ok(readOutputs(a).map((o) => o.output_type).join() === "stream,error" && readCodeMeta(a.getMap("meta")).runCount === 4, "code : flux et erreur sont des sorties nbformat");
+  // The executor vanishes: another editor finalizes after 5 s.
+  const r3 = ra.run("while True: pass");
+  const exec3 = r3.ok ? r3.execId : "";
+  ra.destroy();
+  emit({ ev: "done", id: exec3, count: 5, status: "ok" });
+  await nap(100);
+  rb.sweep(Date.now() + 1000);
+  ok(readCodeMeta(b.getMap("meta")).running === exec3, "code : un exécuteur disparu laisse « en cours »…");
+  rb.sweep(Date.now() + 7000);
+  ok(!readCodeMeta(b.getMap("meta")).running && readCodeMeta(b.getMap("meta")).runCount === 5, "code : …puis un autre éditeur termine l'exécution (compteur du `done`)");
+  // Kernel gone while the executor runs.
+  const rc = new CodeRunner(a, port, { canEdit: true });
+  rc.attach(TERM);
+  emit({ ev: "status", state: "idle" });
+  const r4 = rc.run("1");
+  rc.terminalGone();
+  ok(r4.ok && !readCodeMeta(a.getMap("meta")).running && readOutputs(a).at(-1)!.output_type === "error" && !rc.run("1").ok, "code : la session s'arrête → l'exécution se termine par une erreur");
+  // Viewers do not run; clearing is refused during a run.
+  const rv = new CodeRunner(b, port, { canEdit: false });
+  rv.attach(TERM);
+  ok(!rv.run("1").ok && !rv.interrupt() && !rv.restart(), "code : un lecteur ne peut ni lancer, ni interrompre, ni redémarrer");
+  const c = new Y.Doc();
+  initBlank(c, "x.py");
+  ok(beginCodeRun(c, "e:1").ok && !beginCodeRun(c, "e:2").ok && !clearCodeOutputs(c) && finishCodeRun(c, "e:1", 1) && clearCodeOutputs(c), "code : une seule exécution à la fois, effacer les sorties seulement hors exécution");
+  c.getMap("meta").set("running", "x".repeat(65));
+  ok(!readCodeMeta(c.getMap("meta")).running, "code : un marquage d'exécution trop long est ignoré");
+  c.getArray("outputs").push([{ output_type: "stream", name: "stdout", text: "ok" }, { output_type: "weird" }, "x"]);
+  ok(readOutputs(c).length === 1, "code : seules les sorties bien formées sont lues");
+  rc.destroy();
+  rb.destroy();
+  rv.destroy();
+
+  // The code service, like a notebook's: a hidden window does not lose the outputs.
+  const handlers = new Map<string, any>();
+  const host = {
+    boardId: "board",
+    key: await newSymKey(),
+    canEdit: true,
+    currentEpoch: 1,
+    you: { name: "Alice", color: "#336699" },
+    docSend(m: any) {
+      if (m.t === "doc.sub") queueMicrotask(() => handlers.get(m.doc)?.onMessage({ t: "doc.state", ups: [] }));
+      return true;
+    },
+    docRegister(doc: string, h: any) {
+      handlers.set(doc, h);
+      queueMicrotask(() => h.onOpen());
+      return () => handlers.delete(doc);
+    },
+    on: () => () => {},
+  };
+  let closeBoard: (() => void) | undefined;
+  const env: ServiceEnv = { port, watchTerminals: () => () => {}, terminalOver: () => false, onClose: (fn) => ((closeBoard = fn), () => (closeBoard = undefined)) };
+  const win = acquireCode(host, env, "R".repeat(22), { idleMs: 150 });
+  await win.doc.synced;
+  initBlank(win.doc.ydoc, "svc.py");
+  setCodeKernelTerm(win.doc.ydoc, TERM);
+  emit({ ev: "status", state: "idle" });
+  const rr = win.runner.run("print('svc')");
+  win.release();
+  emit({ ev: "stream", id: rr.ok ? rr.execId : "", name: "stdout", text: "svc\n" });
+  emit({ ev: "done", id: rr.ok ? rr.execId : "", count: 1, status: "ok" });
+  await nap(250);
+  ok(readOutputs(win.doc.ydoc)[0]?.text === "svc\n" && !readCodeMeta(win.doc.ydoc.getMap("meta")).running && outputsOf(win.doc.ydoc).length === 1, "code : fenêtre masquée en pleine exécution, les sorties arrivent quand même (service du tableau)");
+  await nap(400);
+  ok(win.disposed, "code : service libéré une fois inactif");
+  closeBoard?.();
 }
 
 if (failures) {

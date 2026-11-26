@@ -313,3 +313,31 @@ func TestFileLsAndGet(t *testing.T) {
 		t.Fatal("missing file download accepted")
 	}
 }
+
+func TestFileIfaces(t *testing.T) {
+	e := newFileEnv(t)
+	e.send(map[string]any{"op": "ifaces"})
+	_, body := e.next()
+	list, _ := body["ifaces"].([]any)
+	if len(list) == 0 || body["error"] != nil {
+		t.Fatalf("ifaces: %v", body)
+	}
+	var lo bool
+	for _, v := range list {
+		i := v.(map[string]any)
+		if n, _ := i["name"].(string); n == "lo" || n == "lo0" {
+			lo = i["up"] == true
+		}
+	}
+	if !lo {
+		t.Fatalf("loopback missing or down: %v", list)
+	}
+}
+
+func TestFileIfacesRefusedOnRemote(t *testing.T) {
+	e := newFileEnv(t)
+	e.m.files.handle(e.frame("r1", "rid-remote-ifaces", now(), map[string]any{"op": "ifaces"}), e.out)
+	if _, body := e.next(); body["error"] == nil {
+		t.Fatalf("interfaces listed through a remote session: %v", body)
+	}
+}

@@ -4,7 +4,7 @@ import { CaptureUpdateAction, Excalidraw, newElementWith, sceneCoordsToViewportC
 import "@excalidraw/excalidraw/index.css";
 import type { AppState, BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, NonDeleted, ExcalidrawEmbeddableElement, OrderedExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, FileCode2, FilePlus2, FolderOpen, Globe, NotebookPen, NotebookText, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Cable, Check, Cloud, CloudOff, Download, Eye, FileCode, FileCode2, FilePlus2, FolderOpen, Globe, NotebookPen, NotebookText, History, ListChecks, Loader2, Lock, Maximize2, Minimize2, Moon, Palette, Plus, RefreshCw, Server, Share2, Spline, Sun, TerminalSquare } from "lucide-react";
 import { useKeys, useUser } from "../auth.tsx";
 import { BoardSession, isRemoteLabel, terminalIdOf, type ConnState, type Peer } from "../board/collab.ts";
 import { TerminalEmbed } from "../board/TerminalEmbed.tsx";
@@ -12,6 +12,8 @@ import { HistoryPanel } from "../board/HistoryPanel.tsx";
 import { ConfigModal } from "../board/ConfigModal.tsx";
 import { savePreview } from "../board/files.ts";
 import { isInTrash, renameItem, useLibrary, useLibraryCtx, type Node } from "../library.tsx";
+import { UpdateDialog, useLatestRelease } from "../components/AgentUpdate.tsx";
+import { classify } from "../agentUpdate.ts";
 import { linkMachine, listMachines, setMachineBoard, syncBoardLinks, type Machine } from "../vault.ts";
 import { ShareModal } from "../components/ShareModal.tsx";
 import { libraryAdapter, type TileIcon } from "../board/personalLibrary.ts";
@@ -34,6 +36,9 @@ const CodeEmbed = lazy(() => import("../board/CodeEmbed.tsx"));
 // Same for notebooks (Monaco again, plus the Markdown converter): same rule, same `host` prop.
 const NotebookEmbed = lazy(() => import("../board/NotebookEmbed.tsx"));
 import { WindowDock, type DockGroup } from "../board/WindowDock.tsx";
+import { capturesOf } from "../board/captureManager.ts";
+import { CaptureDock } from "../board/CapturePanel.tsx";
+import { saveBlob } from "../board/termTools.ts";
 import { cableEnds, cableOf, finishCable, maintainCables, setCableEnd, type End } from "../board/cables.ts";
 import { FileClient } from "../board/fileTransfer.ts";
 import { CableEndForm, CableOverlay, type CableMark } from "../board/CableOverlay.tsx";
@@ -42,6 +47,8 @@ import { planKey, planProbes, runProbes, type LinkStates } from "../board/linkSt
 import { SchemaPanel, type SchemaReport } from "../board/SchemaPanel.tsx";
 import { applyFix, endMessages, type EndResult, type Finding } from "../board/schemaCheck.ts";
 import { planSchemaCheck, runSchemaCheck } from "../board/schemaRun.ts";
+import { OutdatedError, supports } from "../agentCaps.ts";
+import { reportOutdated } from "../outdatedBus.ts";
 import { exportDiagram, exportTopology, type TopologyFormat } from "../board/exportDiagram.ts";
 import { FormFrame, HOST_RE, MachineField, RemoteForm, useMachineChoice } from "../board/RemoteForm.tsx";
 import type { RemoteHop, RemoteTarget } from "../api.ts";
@@ -76,6 +83,7 @@ import {
   openNotebook,
   removeNotebook,
   toggleNotebook,
+  setDocLabel,
   openShell,
   openWebWindowOf,
   openWindowOf,
@@ -153,6 +161,8 @@ function Editor({ node }: { node: Node }) {
   themeRef.current = theme;
   const excalidrawTheme = useRef<string>(theme);
   const session = useMemo(() => new BoardSession(node.id, node.key!, node.epoch, node.role), [node.id, node.key, node.epoch, node.role]);
+  // Packet captures belong to the board, not to the cable-end window: closing it leaves them running.
+  const captures = useMemo(() => capturesOf(session, saveBlob, (text, error) => (error ? toast.error(text) : toast(text))), [session]);
   const [excalidraw, setExcalidraw] = useState<ExcalidrawImperativeAPI | null>(null);
   const [conn, setConn] = useState<ConnState>("connecting");
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -168,8 +178,8 @@ function Editor({ node }: { node: Node }) {
     collapsed: boolean;
     shells: { id: string; open: boolean }[];
     webs: { id: string; open: boolean }[];
-    codes: { id: string; open: boolean }[];
-    notebooks: { id: string; open: boolean }[];
+    codes: { id: string; open: boolean; label?: string }[];
+    notebooks: { id: string; open: boolean; label?: string }[];
     /** A Telnet / SSH device: no agent on it, no site through it. */
     remote: boolean;
     /** An SSH device: other devices can be reached by bouncing through it. */
@@ -201,6 +211,11 @@ function Editor({ node }: { node: Node }) {
   /** "Exporter" menu (PNG / SVG of the diagram, labels included). */
   const [exportMenu, setExportMenu] = useState<MenuAnchor | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Machines with a shell or a site on this board that this user can use, to offer updating their agents.
+  const latestRelease = useLatestRelease();
+  const [boardMachines, setBoardMachines] = useState<Machine[]>([]);
+  const [updatingAgents, setUpdatingAgents] = useState(false);
+  const refreshBoardMachines = useRef<() => void>(() => {});
   /** "Vérifier le schéma": the last report (never stored in the scene), and whether there is anything to check. */
   const [schema, setSchema] = useState<SchemaReport | null>(null);
   const [schemaPossible, setSchemaPossible] = useState(false);
@@ -267,6 +282,28 @@ function Editor({ node }: { node: Node }) {
     setMachineBoard(editor ? { id: node.id, key: node.key! } : null);
     return () => setMachineBoard(null);
   }, [node.id, node.key, editor]);
+
+  useEffect(() => {
+    if (!latestRelease?.signed) {
+      setBoardMachines([]);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      const inUse = new Set([...session.terminals.values()].map((t) => t.machineId).concat([...session.webs.values()].map((w) => w.machineId)));
+      if (!inUse.size) return alive && setBoardMachines([]);
+      const all = await listMachines(keys).catch(() => null);
+      if (alive && all) setBoardMachines(all.filter((m) => inUse.has(m.id)));
+    };
+    refreshBoardMachines.current = () => void tick();
+    void tick();
+    const timer = setInterval(tick, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [latestRelease, session, keys, editor]);
+  const outdatedAgents = latestRelease ? boardMachines.filter((m) => classify(m, latestRelease) === "outdated").length : 0;
 
   // Our machines get linked to this board when we open a shell or a site on them (linkMachine);
   // here the links are kept in step: removed once the machine has no session here, refreshed
@@ -419,6 +456,11 @@ function Editor({ node }: { node: Node }) {
       const x = excalidrawRef.current;
       if (!x) return;
       setPicker(null);
+      if (target?.kind === "jupyter" && !supports(machine.agentCaps, "kernel")) {
+        const e = new OutdatedError(machine.name, "kernel");
+        reportOutdated(e);
+        return toast(e.message);
+      }
       try {
         const info = await session.createTerminal(machine, 100, 30, target);
         linkMachine({ id: session.boardId, key: session.key }, machine).catch(() => {});
@@ -697,8 +739,8 @@ function Editor({ node }: { node: Node }) {
               collapsed: !!(el.customData as TileData | undefined)?.collapsed,
               shells: nd ? nd.shells.map((s) => ({ id: s.terminalId, open: !!(x && openWindowOf(x, s.terminalId)) })) : [],
               webs: nd ? (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!(x && openWebWindowOf(x, w.webId)) })) : [],
-              codes: nd ? (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!(x && openCodeWindowOf(x, c.docId)) })) : [],
-              notebooks: nd ? (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!(x && openNotebookWindowOf(x, c.docId)) })) : [],
+              codes: nd ? (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!(x && openCodeWindowOf(x, c.docId)), label: c.label })) : [],
+              notebooks: nd ? (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!(x && openNotebookWindowOf(x, c.docId)), label: c.label })) : [],
               remote: !!nd?.remote,
               bounce: nd?.remote?.target.kind === "ssh",
             }
@@ -749,8 +791,8 @@ function Editor({ node }: { node: Node }) {
               title: nd.title?.split("\n")[0] || null,
               shells: nd.shells.map((s) => ({ id: s.terminalId, open: !!openWindowOf(x, s.terminalId) })),
               webs: (nd.webs ?? []).map((w) => ({ id: w.webId, open: !!openWebWindowOf(x, w.webId) })),
-              codes: (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!openCodeWindowOf(x, c.docId) })),
-              notebooks: (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!openNotebookWindowOf(x, c.docId) })),
+              codes: (nd.codes ?? []).map((c) => ({ id: c.docId, open: !!openCodeWindowOf(x, c.docId), label: c.label })),
+              notebooks: (nd.notebooks ?? []).map((c) => ({ id: c.docId, open: !!openNotebookWindowOf(x, c.docId), label: c.label })),
               remote: !!nd.remote,
               bounce: nd.remote?.target.kind === "ssh",
               machineName: nd.machineName,
@@ -815,6 +857,8 @@ function Editor({ node }: { node: Node }) {
       const machines = plan.machines.size ? await listMachines(keys) : [];
       const machinesChecked = await runSchemaCheck(plan, machines, node.id);
       setSchema({ running: false, machines: machinesChecked, remote: plan.remote });
+      const old = machinesChecked.find((c) => c.outdated);
+      if (old) reportOutdated(new OutdatedError(old.name, "schema"));
     } catch (e) {
       toast.error(e);
       setSchema(null);
@@ -958,8 +1002,6 @@ function Editor({ node }: { node: Node }) {
   const updateTerminalRef = useRef(updateTerminal);
   updateTerminalRef.current = updateTerminal;
 
-  const codeHost = useMemo(() => ({ theme, confirm: confirmDialog, toast }), [theme]);
-
   /** What a notebook window may ask of the app: the machine it could run a kernel on, and starting one (after asking). */
   const notebookHost = useMemo<NotebookHost>(() => {
     const machineOf = async (nodeId: string): Promise<Machine | null> => {
@@ -974,7 +1016,7 @@ function Editor({ node }: { node: Node }) {
         const m = await machineOf(nodeId);
         return m ? { name: m.name } : null;
       },
-      startKernel: async (nodeId, cwd) => {
+      startKernel: async (nodeId, cwd, purpose) => {
         const m = await machineOf(nodeId);
         if (!m) {
           toast("Machine introuvable, ou tu n'y as pas accès");
@@ -984,9 +1026,15 @@ function Editor({ node }: { node: Node }) {
           toast(`${m.name} est hors ligne`);
           return null;
         }
+        if (!supports(m.agentCaps, "kernel")) {
+          const e = new OutdatedError(m.name, "kernel");
+          reportOutdated(e);
+          toast(e.message);
+          return null;
+        }
         const ok = await confirmDialog({
           title: `Démarrer un noyau Python sur ${m.name} ?`,
-          text: `Le noyau exécute du code Python avec les droits de l'agent de ${m.name}${cwd ? `, dans ${cwd}` : ""}. Tous les éditeurs de ce tableau pourront y exécuter des cellules, comme dans un shell partagé. Il faut ipykernel et jupyter_client sur la machine.`,
+          text: `Le noyau exécute du code Python avec les droits de l'agent de ${m.name}${cwd ? `, dans ${cwd}` : ""}. Tous les éditeurs de ce tableau pourront y exécuter ${purpose === "code" ? "du code Python" : "des cellules"}, comme dans un shell partagé. Il faut ipykernel et jupyter_client sur la machine.`,
           confirm: "Démarrer",
         });
         if (!ok) return null;
@@ -1034,13 +1082,16 @@ function Editor({ node }: { node: Node }) {
         return (
           <Suspense fallback={<div className="term code"><div className="term-body"><div className="term-veil">Chargement de l'éditeur…</div></div></div>}>
             <CodeEmbed
-              host={codeHost}
+              host={notebookHost}
+              nodeId={nid}
               session={session}
               docId={codeId}
               active={active}
               shells={shells}
+              notebookDocs={(owner?.notebooks ?? []).map((n) => n.docId)}
               title={owner?.title?.split("\n")[0] ?? null}
               onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onLabel={editor && nid ? (n) => void setDocLabel(excalidrawRef.current!, "code", nid, codeId, n) : undefined}
               onRemove={
                 editor && nid
                   ? () => {
@@ -1070,6 +1121,7 @@ function Editor({ node }: { node: Node }) {
               shells={shells}
               title={owner?.title?.split("\n")[0] ?? null}
               onHide={editor && nid ? () => hideShell(excalidrawRef.current!, element.id) : undefined}
+              onLabel={editor && nid ? (n) => void setDocLabel(excalidrawRef.current!, "notebook", nid, notebookId, n) : undefined}
               onRemove={
                 editor && nid
                   ? () => {
@@ -1141,7 +1193,7 @@ function Editor({ node }: { node: Node }) {
         />
       );
     },
-    [session, editor, updateTerminal, codeHost],
+    [session, editor, updateTerminal, notebookHost],
   );
 
   const validateEmbeddable = useCallback((link: string) => (link.startsWith(LINK_BASE) ? true : undefined), []);
@@ -1197,6 +1249,16 @@ function Editor({ node }: { node: Node }) {
             <TerminalSquare size={16} /> Terminal
           </button>
         )}
+        {outdatedAgents > 0 && (
+          <button
+            className="btn btn-sm"
+            data-testid="update-agents-button"
+            title="Met à jour les agents des machines de ce tableau (version signée, redémarrage de l'agent)"
+            onClick={() => setUpdatingAgents(true)}
+          >
+            <RefreshCw size={16} /> Mettre à jour les agents ({outdatedAgents})
+          </button>
+        )}
         <button className="btn btn-icon btn-sm" title="Exporter le schéma (image, topologie Containerlab, Mermaid, JSON)" onClick={(e) => setExportMenu(exportMenu ? null : e.currentTarget)}>
           <Download size={16} />
         </button>
@@ -1240,7 +1302,11 @@ function Editor({ node }: { node: Node }) {
           }}
           UIOptions={{ canvasActions: { saveToActiveFile: false, toggleTheme: true, loadScene: editor } }}
         />
+        <CaptureDock manager={captures} />
         {schema && <SchemaPanel report={schema} editor={editor} labelOf={schemaEndLabel} onFix={fixSchema} onRecheck={() => void runSchema()} onClose={() => setSchema(null)} />}
+        {updatingAgents && latestRelease && (
+          <UpdateDialog machines={boardMachines} latest={latestRelease} boardId={node.id} onClose={() => setUpdatingAgents(false)} onChanged={() => refreshBoardMachines.current()} />
+        )}
         {historyOpen && <HistoryPanel boardId={node.id} boardKey={node.key!} api={excalidraw} editor={editor} onClose={() => setHistoryOpen(false)} />}
         {editor && dock.length > 0 && (
           <WindowDock
@@ -1342,11 +1408,11 @@ function Editor({ node }: { node: Node }) {
                     key={c.id}
                     className="chip"
                     aria-pressed={c.open}
-                    title={`${c.open ? "Masquer" : "Ouvrir"} le fichier de code ${i + 1}`}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} ${c.label ?? `le fichier de code ${i + 1}`}`}
                     onClick={() => toggleCode(excalidrawRef.current!, selTerm.id, c.id)}
                   >
                     <FileCode2 size={13} />
-                    <span className="lbl">Code {i + 1}</span>
+                    <span className="lbl">{c.label ?? `Code ${i + 1}`}</span>
                   </button>
                 ))}
                 {selTerm.notebooks.map((c, i) => (
@@ -1354,11 +1420,11 @@ function Editor({ node }: { node: Node }) {
                     key={c.id}
                     className="chip"
                     aria-pressed={c.open}
-                    title={`${c.open ? "Masquer" : "Ouvrir"} le notebook ${i + 1}`}
+                    title={`${c.open ? "Masquer" : "Ouvrir"} ${c.label ?? `le notebook ${i + 1}`}`}
                     onClick={() => toggleNotebook(excalidrawRef.current!, selTerm.id, c.id)}
                   >
                     <NotebookText size={13} />
-                    <span className="lbl">Notebook {i + 1}</span>
+                    <span className="lbl">{c.label ?? `Notebook ${i + 1}`}</span>
                   </button>
                 ))}
                 <button title="Nouveau shell sur cette icône" onClick={() => void newShellOnNode(selTerm.id, anchorBelow(selTerm.id) ?? { x: 0, y: 0 })}>
@@ -1622,7 +1688,7 @@ function Editor({ node }: { node: Node }) {
               capture={(() => {
                 // A capture runs through a running local shell of the item, for editors.
                 const sh = session.canEdit && nd ? nd.shells.find((r) => { const t = session.terminals.get(r.terminalId); return t?.status === "running" && !isRemoteLabel(t.label); }) : undefined;
-                return sh ? new FileClient(session, sh.terminalId) : null;
+                return sh ? { client: new FileClient(session, sh.terminalId), manager: captures, key: `${cableEdit.cableId}:${cableEdit.end}` } : null;
               })()}
               onClose={() => setCableEdit(null)}
               onSave={(info) => {
@@ -1862,7 +1928,7 @@ function NodeMenu(p: {
             }}
           >
             <FileCode2 size={16} />
-            <span style={{ flex: 1 }}>Fichier de code {i + 1}</span>
+            <span style={{ flex: 1 }}>{c.label ?? `Fichier de code ${i + 1}`}</span>
             <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
           </button>
         );
@@ -1879,7 +1945,7 @@ function NodeMenu(p: {
             }}
           >
             <NotebookText size={16} />
-            <span style={{ flex: 1 }}>Notebook {i + 1}</span>
+            <span style={{ flex: 1 }}>{c.label ?? `Notebook ${i + 1}`}</span>
             <span style={{ color: "var(--muted)", fontSize: 12 }}>{open ? "ouvert" : "masqué"}</span>
           </button>
         );

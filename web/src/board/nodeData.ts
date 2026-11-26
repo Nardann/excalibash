@@ -10,9 +10,29 @@ export type Geometry = { x?: number; y?: number; w?: number; h?: number };
 export type ShellRef = Geometry & { terminalId: string };
 export type WebRef = Geometry & { webId: string };
 /** A shared code document (see sharedDoc.ts): `docId` is the id of its Yjs document. */
-export type CodeRef = Geometry & { docId: string };
+export type CodeRef = Geometry & { docId: string; label?: string };
 /** A shared notebook document: same shape, its own list and window kind. */
-export type NotebookRef = Geometry & { docId: string };
+export type NotebookRef = Geometry & { docId: string; label?: string };
+/** Longest display name kept in a code / notebook entry of the scene. */
+export const MAX_LABEL = 80;
+/**
+ * The display name of a code or notebook window as the scene keeps it: a base name only (never a path),
+ * without control characters or surrounding blanks, 80 characters at most. Anything else (not a string,
+ * empty, too long, a bare "." or "..") is rejected: the entry then has no label.
+ */
+export function cleanLabel(v: unknown): string | undefined {
+  if (typeof v !== "string" || v.length > MAX_LABEL) return undefined;
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v)) return undefined;
+  const t = v.trim();
+  if (!t || t === "." || t === ".." || /[\\/]/.test(t)) return undefined;
+  return t;
+}
+/** What to store for a file: its base name (the path stays in the encrypted document), cut to fit, or null. */
+export function labelOfName(name: string): string | null {
+  const base = name.split(/[\\/]/).pop() ?? "";
+  const cut = [...base.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, "")].slice(0, MAX_LABEL).join("").trim();
+  return cleanLabel(cut) ?? null;
+}
 /** 128 random bits, base64url (same rule as the server's). */
 export const DOC_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 /** Most code windows one node may own (the server caps documents per board at 64). */
@@ -59,10 +79,13 @@ function refs<T extends string>(v: unknown, field: T): (Geometry & Record<T, str
 function docRefs(v: unknown, max: number): CodeRef[] {
   const seen = new Set<string>();
   const out: CodeRef[] = [];
-  for (const r of refs(v, "docId")) {
-    if (!DOC_ID_RE.test(r.docId) || seen.has(r.docId)) continue;
+  const raw: unknown[] = Array.isArray(v) ? v : [];
+  for (const entry of raw) {
+    const [r] = refs([entry], "docId");
+    if (!r || !DOC_ID_RE.test(r.docId) || seen.has(r.docId)) continue;
     seen.add(r.docId);
-    out.push(r);
+    const label = cleanLabel((entry as { label?: unknown }).label);
+    out.push(label ? { ...r, label } : r);
     if (out.length >= max) break;
   }
   return out;

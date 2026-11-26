@@ -25,5 +25,61 @@ export async function reencryptDoc(boardId: string, d: StoredDoc, oldKey: SymKey
   }
 }
 
+/**
+ * What a duplicate must not inherit from the source: the kernel session of the notebook (a terminal of the
+ * source board, whose key the copy does not have) and the "running" marks of cells and code runs, whose
+ * executors do not exist in the copy. Pure edits of a merged state.
+ */
+export function clearLiveState(ydoc: Y.Doc) {
+  ydoc.transact(() => {
+    const meta = ydoc.getMap("meta");
+    meta.delete("kernelTerm");
+    meta.delete("running");
+    const cells = ydoc.getArray("cells");
+    cells.forEach((c) => {
+      if (c instanceof Y.Map && c.has("running")) c.delete("running");
+    });
+  });
+}
+
+/**
+ * A document of another board, for a duplicate: decrypts it with the source board's key, merges snapshot and
+ * updates, drops the live kernel references and returns the plaintext Yjs state. The document id stays the
+ * same (the scene of the copy refers to it): ids are only unique per board. An update that fails to
+ * authenticate aborts the copy rather than silently dropping part of a document.
+ */
+export async function copyDocState(d: StoredDoc, from: { boardId: string; key: SymKey }): Promise<{ doc: string; state: Uint8Array }> {
+  const aad = AAD.doc(from.boardId, d.doc, d.epoch);
+  const ydoc = new Y.Doc();
+  try {
+    if (d.snap) Y.applyUpdate(ydoc, await unbox(from.key, d.snap, aad));
+    for (const u of d.ups) Y.applyUpdate(ydoc, await unbox(from.key, u.d, aad));
+    clearLiveState(ydoc);
+    return { doc: d.doc, state: Y.encodeStateAsUpdate(ydoc) };
+  } finally {
+    ydoc.destroy();
+  }
+}
+
+/** Boxes a document state as the first snapshot of a (new) board: its key, its id, its epoch. */
+export const sealDoc = async (doc: string, state: Uint8Array, to: { boardId: string; key: SymKey; epoch: number }): Promise<{ doc: string; d: string }> => ({
+  doc,
+  d: await box(to.key, state, AAD.doc(to.boardId, doc, to.epoch)),
+});
+
+/** The ids of the code and notebook documents a scene refers to (node entries, read defensively). */
+export function sceneDocIds(elements: { isDeleted?: boolean; customData?: any }[]): string[] {
+  const ids = new Set<string>();
+  for (const el of elements) {
+    const cd = el?.customData;
+    if (el?.isDeleted || !cd?.node) continue;
+    for (const list of [cd.codes, cd.notebooks]) {
+      if (!Array.isArray(list)) continue;
+      for (const r of list) if (r && typeof r.docId === "string" && /^[A-Za-z0-9_-]{22}$/.test(r.docId)) ids.add(r.docId);
+    }
+  }
+  return [...ids];
+}
+
 /** Base64url helpers re-exported for callers that handle raw updates (tests, tools). */
 export { fromB64, toB64 };
