@@ -6,9 +6,12 @@ import (
 	"errors"
 	"log"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -101,14 +104,42 @@ func run(ctx context.Context, cfg config, mgr *manager) {
 	}
 }
 
+// serverLink is the TCP connection of the agent to the server (or its proxy): packet captures
+// leave it out, or capturing on the interface that carries it would capture its own upload.
+type serverLink struct{ local, remote netip.AddrPort }
+
+var currentLink atomic.Pointer[serverLink]
+
+// recordLink wraps a transport's dialer to remember the addresses of the connection it opens.
+func recordLink(tr *http.Transport) *http.Transport {
+	dial := tr.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dial(ctx, network, addr)
+		if err == nil {
+			l, lok := c.LocalAddr().(*net.TCPAddr)
+			r, rok := c.RemoteAddr().(*net.TCPAddr)
+			if lok && rok {
+				currentLink.Store(&serverLink{local: l.AddrPort(), remote: r.AddrPort()})
+			}
+		}
+		return c, err
+	}
+	return tr
+}
+
 // connectOnce handles a single websocket connection lifetime.
 func connectOnce(ctx context.Context, cfg config, mgr *manager) error {
 	opts := &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + cfg.token}},
 	}
-	if tr := httpTransport(cfg.insecure, cfg.pin); tr != nil {
-		opts.HTTPClient = &http.Client{Transport: tr}
+	tr, _ := httpTransport(cfg.insecure, cfg.pin).(*http.Transport)
+	if tr == nil {
+		tr = http.DefaultTransport.(*http.Transport).Clone()
 	}
+	opts.HTTPClient = &http.Client{Transport: recordLink(tr)}
 	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
 	c, resp, err := websocket.Dial(dialCtx, cfg.endpoint, opts)
 	cancelDial()

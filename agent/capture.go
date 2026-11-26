@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,8 +30,9 @@ var (
 )
 
 // validateCapture checks the interface and filter, and returns the tcpdump arguments. Nothing
-// user-controlled reaches a shell: the arguments are passed to exec directly.
-func validateCapture(iface, filter string) ([]string, error) {
+// user-controlled reaches a shell: the arguments are passed to exec directly. `exclude` is the
+// agent's own connection to the server, left out of the capture.
+func validateCapture(iface, filter string, exclude *serverLink) ([]string, error) {
 	if !ifaceRe.MatchString(iface) {
 		return nil, errors.New("interface invalide")
 	}
@@ -44,7 +46,19 @@ func validateCapture(iface, filter string) ([]string, error) {
 			return nil, errors.New("filtre invalide : caractères ou option non autorisés")
 		}
 	}
-	return append(args, tokens...), nil
+	if exclude == nil || !exclude.remote.IsValid() {
+		return append(args, tokens...), nil
+	}
+	// Without this, capturing on the interface that reaches the server captures the capture
+	// itself as it is uploaded, and the file fills up in seconds with its own packets.
+	self := []string{"not", "(", "host", exclude.remote.Addr().Unmap().String(), "and", "tcp", "port", strconv.Itoa(int(exclude.remote.Port())), "and", "tcp", "port", strconv.Itoa(int(exclude.local.Port())), ")"}
+	if len(tokens) == 0 {
+		return append(args, self...), nil
+	}
+	args = append(args, "(")
+	args = append(args, tokens...)
+	args = append(args, ")", "and")
+	return append(args, self...), nil
 }
 
 func findTcpdump() (string, error) {
@@ -86,7 +100,7 @@ func tcpdumpError(stderr string) string {
 		}
 		low := strings.ToLower(line)
 		if strings.Contains(low, "permission denied") || strings.Contains(low, "operation not permitted") {
-			line += " — l'agent doit tourner en root ou tcpdump avoir CAP_NET_RAW"
+			line += " — l'agent doit tourner en root, ou tcpdump avoir le droit de capturer : sudo setcap cap_net_raw,cap_net_admin=eip $(command -v tcpdump)"
 		}
 		return line
 	}
@@ -96,7 +110,7 @@ func tcpdumpError(stderr string) string {
 func (h *fileHub) capture(x *xfer, op fileOp) {
 	defer h.release(x)
 	s := newStream(x)
-	args, err := validateCapture(op.Iface, op.Filter)
+	args, err := validateCapture(op.Iface, op.Filter, currentLink.Load())
 	if err != nil {
 		s.fail(err.Error())
 		return
@@ -159,8 +173,8 @@ func (h *fileHub) capture(x *xfer, op fileOp) {
 		}
 	}()
 
-	date := time.Now().Format("20060102-150405")
-	name := "capture-" + op.Iface + "-" + date + ".pcap"
+	// The browser adds the date when it saves the file.
+	name := "capture-" + op.Iface + ".pcap"
 	pending := make([]byte, 0, fileChunk)
 	first := true
 	var total int64
